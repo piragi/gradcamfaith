@@ -89,7 +89,6 @@ class TransLRPExplainer:
         
         # Load weights
         self.model.load_state_dict(new_state_dict, strict=False)
-        
     
     def preprocess_image(self, image_path):
         """Preprocess image for the model"""
@@ -210,6 +209,7 @@ def explain_image(image_path, model_name="codewithdark/vit-chest-xray", method="
     
     # Generate explanation
     image, attribution = explainer.explain(image_path, pred_class, method)
+    inspect_attribution(attribution)
     
     # Visualize and save
     base_filename = os.path.splitext(os.path.basename(image_path))[0]
@@ -219,6 +219,42 @@ def explain_image(image_path, model_name="codewithdark/vit-chest-xray", method="
     print(f"Explanation saved to {save_path}")
     
     return results, attribution
+
+def inspect_attribution(attribution):
+    # Print basic statistics
+    min_val = np.min(attribution)
+    max_val = np.max(attribution)
+    mean_val = np.mean(attribution)
+    median_val = np.median(attribution)
+    print(f"Attribution range: [{min_val:.6f}, {max_val:.6f}]")
+    print(f"Mean: {mean_val:.6f}, Median: {median_val:.6f}")
+
+    # Check percentiles to understand distribution
+    percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
+    print("Percentiles:")
+    for p in percentiles:
+        print(f"{p}th: {np.percentile(attribution, p):.6f}")
+
+    # Plot histogram of attribution values
+    plt.figure(figsize=(10, 6))
+    plt.hist(attribution.flatten(), bins=50)
+    plt.title('Distribution of Attribution Values')
+    plt.xlabel('Attribution Value')
+    plt.ylabel('Frequency')
+    plt.axvline(mean_val, color='r', linestyle='dashed', linewidth=1, label=f'Mean: {mean_val:.4f}')
+    plt.axvline(median_val, color='g', linestyle='dashed', linewidth=1, label=f'Median: {median_val:.4f}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join("./explanations/", f"attribution_histogram.png"))
+    plt.show()
+
+    # Visualize attribution as heatmap
+    plt.figure(figsize=(8, 8))
+    plt.imshow(attribution, cmap='hot')
+    plt.colorbar(label='Attribution Value')
+    plt.title('Attribution Heatmap')
+    plt.savefig(os.path.join("./explanations/", f"attribution_histogram.png"))
+    plt.show()
 
 if __name__ == "__main__":
     # Example usage

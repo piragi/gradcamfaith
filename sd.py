@@ -1,4 +1,4 @@
-import os
+import numpy as np
 import torch
 from diffusers import StableDiffusionInpaintPipeline, DDIMScheduler
 from PIL import Image
@@ -37,7 +37,7 @@ def patch_similarity(original_patch: Image.Image, perturbed_patch: Image.Image):
     )
     return similarity
 
-def perturb_patch(model_pipe, image_path: str, patch_position: Tuple[int, int], patch_size = 16, strength = 0.2):
+def perturb_patch(model_pipe: StableDiffusionInpaintPipeline, image_path: str, patch_position: Tuple[int, int], patch_size = 16, strength = 0.2):
     original_image = Image.open(image_path).convert('RGB')
     image = original_image.copy()
     mask, original_patch = mask_image(image, patch_size, patch_position)
@@ -58,3 +58,52 @@ def perturb_patch(model_pipe, image_path: str, patch_position: Tuple[int, int], 
     image.paste(perturbed_patch, patch_position)
     image.save("./images/xray_perturbed.jpg")
     return image, similarity
+
+def create_attribution_mask(attribution: np.ndarray, percentile_threshold: int = 80) -> Image.Image:
+    norm_attr = (attribution - np.min(attribution)) / (np.max(attribution) - np.min(attribution))
+    threshold = np.percentile(norm_attr, percentile_threshold)
+    binary_mask = (norm_attr >= threshold).astype(np.uint8)
+    mask = binary_mask * 255
+    return mask
+
+def perturb_non_attribution(model_pipe: StableDiffusionInpaintPipeline, image_path: str, attribution: np.ndarray, percentile_threshold: int = 80, strength: float = 0.2):
+    original_image = Image.open(image_path).convert('RGB')
+    
+    # Create the attribution mask as numpy array
+    mask_np = create_attribution_mask(attribution, percentile_threshold)
+    
+    # Create the inverse mask (areas to perturb)
+    inv_mask_np = 255 - mask_np
+    
+    # Convert to PIL image
+    pil_mask = Image.fromarray(inv_mask_np).convert('L')
+    
+    # IMPORTANT: Resize the mask to match the original image dimensions
+    pil_mask = pil_mask.resize(original_image.size, Image.NEAREST)
+    
+    device = model_pipe.device
+    generator = torch.Generator(device=device).manual_seed(420)
+    result = model_pipe(
+        prompt="Severe edema in the left and right lower lobes, severity. Severe right and left pleural effusion is larger.",
+        image=original_image,
+        mask_image=pil_mask,
+        guidance_scale=0.0,
+        num_inference_steps=10,
+        strength=strength,
+        generator=generator
+    ).images[0]
+    
+    # Create the final result
+    result_image = original_image.copy()
+    
+    # Create mask that matches the image dimensions
+    np_mask = np.array(pil_mask) > 0
+    np_perturbed = np.array(result)
+    np_result = np.array(result_image)
+    
+    # Now the dimensions should match
+    np_result[np_mask] = np_perturbed[np_mask]
+    result_image = Image.fromarray(np_result)
+    result_image.save("./images/xray_perturbed.jpg")
+    
+    return result_image

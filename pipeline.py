@@ -1,3 +1,4 @@
+import explanation as expl
 import transformer as tf
 from typing import Tuple
 import sd
@@ -21,9 +22,13 @@ def perturb_image(image: str, patch_position: Tuple[int, int], strength: float, 
     return perturbed_image
 
 def perturb_classify(image: str):
-    perturb_image(image, (160, 160), 0.2)
-    classify_image(image)
-    classify_image("./images/xray_perturbed.jpg")
+    results, attribution = expl.explain_image(image)
+    print(results)
+
+    sd_pipe = sd.load_model()
+    result_image = sd.perturb_non_attribution(sd_pipe, image, attribution, strength=0.2, percentile_threshold=5)
+    results, attribution = expl.explain_image("./images/xray_perturbed.jpg")
+    print(results)
 
 def perturb_classify_all_patches(image: str, strength: float = 0.3):
     """
