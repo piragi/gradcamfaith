@@ -2,7 +2,7 @@ import pipeline as pipe
 
 def main():
     image = "./images/xray.jpg"
-    pipe.perturb_classify_all_patches(image)
+    pipe.perturb_classify(image)
 
 
 if __name__ == "__main__":
