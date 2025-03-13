@@ -26,8 +26,9 @@ def perturb_classify(image: str):
     print(results)
 
     sd_pipe = sd.load_model()
-    result_image = sd.perturb_non_attribution(sd_pipe, image, attribution, strength=0.2, percentile_threshold=5)
-    results, attribution = expl.explain_image("./images/xray_perturbed.jpg")
+    result_image, np_mask = sd.perturb_non_attribution(sd_pipe, image, attribution, strength=0.8, percentile_threshold=15)
+    results, perturbed_attribution = expl.explain_image("./images/xray_perturbed.jpg")
+    expl.explain_attribution_diff(attribution, perturbed_attribution, np_mask)
     print(results)
 
 def perturb_classify_all_patches(image: str, strength: float = 0.3):

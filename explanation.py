@@ -256,6 +256,147 @@ def inspect_attribution(attribution):
     plt.savefig(os.path.join("./explanations/", f"attribution_histogram.png"))
     plt.show()
 
+def explain_attribution_diff(attribution, perturbed_attribution, np_mask, save_dir="./explanations"):
+    """
+    Compare original and perturbed attribution maps, focusing on masked areas.
+    
+    Parameters:
+    -----------
+    attribution : numpy.ndarray
+        Original attribution map
+    perturbed_attribution : numpy.ndarray
+        Attribution map after perturbation
+    np_mask : numpy.ndarray
+        Binary mask indicating areas that were perturbed (True/1 for perturbed areas)
+    save_dir : str
+        Directory to save visualizations
+    """
+    
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Ensure mask has proper dimensions for masking the attribution maps
+    if np_mask.shape != attribution.shape:
+        print(f"Warning: Mask shape {np_mask.shape} differs from attribution shape {attribution.shape}")
+        # Resize mask if needed (this assumes mask is a binary array)
+        from skimage.transform import resize
+        np_mask = resize(np_mask, attribution.shape, order=0, preserve_range=True).astype(bool)
+    
+    # Create masked versions of the attributions
+    masked_original = np.where(np_mask, attribution, np.nan)
+    masked_perturbed = np.where(np_mask, perturbed_attribution, np.nan)
+    
+    # Calculate the difference
+    attribution_diff = perturbed_attribution - attribution
+    masked_diff = np.where(np_mask, attribution_diff, np.nan)
+    
+    # Calculate statistics for the masked areas
+    # For original attribution in masked area
+    orig_masked_values = attribution[np_mask]
+    orig_min = np.min(orig_masked_values)
+    orig_max = np.max(orig_masked_values)
+    orig_mean = np.mean(orig_masked_values)
+    orig_median = np.median(orig_masked_values)
+    
+    # For perturbed attribution in masked area
+    pert_masked_values = perturbed_attribution[np_mask]
+    pert_min = np.min(pert_masked_values)
+    pert_max = np.max(pert_masked_values)
+    pert_mean = np.mean(pert_masked_values)
+    pert_median = np.median(pert_masked_values)
+    
+    # For difference in masked area
+    diff_masked_values = attribution_diff[np_mask]
+    diff_min = np.min(diff_masked_values)
+    diff_max = np.max(diff_masked_values)
+    diff_mean = np.mean(diff_masked_values)
+    diff_median = np.median(diff_masked_values)
+    
+    # Print statistics
+    print("\nAttribution Statistics in Perturbed Areas:")
+    print(f"{'':20} {'Original':15} {'Perturbed':15} {'Difference':15}")
+    print(f"{'-'*65}")
+    print(f"{'Min':20} {orig_min:.6f}{' '*9} {pert_min:.6f}{' '*9} {diff_min:.6f}")
+    print(f"{'Max':20} {orig_max:.6f}{' '*9} {pert_max:.6f}{' '*9} {diff_max:.6f}")
+    print(f"{'Mean':20} {orig_mean:.6f}{' '*9} {pert_mean:.6f}{' '*9} {diff_mean:.6f}")
+    print(f"{'Median':20} {orig_median:.6f}{' '*9} {pert_median:.6f}{' '*9} {diff_median:.6f}")
+    
+    # Create visualizations
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # Original attribution (masked)
+    im0 = axs[0].imshow(masked_original, cmap='viridis')
+    axs[0].set_title('Original Attribution\n(Perturbed Areas Only)')
+    axs[0].axis('off')
+    plt.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04)
+    
+    # Perturbed attribution (masked)
+    im1 = axs[1].imshow(masked_perturbed, cmap='viridis')
+    axs[1].set_title('Perturbed Attribution\n(Perturbed Areas Only)')
+    axs[1].axis('off')
+    plt.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
+    
+    # Difference
+    im2 = axs[2].imshow(masked_diff, cmap='coolwarm', vmin=-max(abs(diff_min), abs(diff_max)), vmax=max(abs(diff_min), abs(diff_max)))
+    axs[2].set_title('Difference\n(Perturbed - Original)')
+    axs[2].axis('off')
+    plt.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "attribution_difference.png"))
+    plt.show()
+    
+    # Distribution of difference values
+    plt.figure(figsize=(10, 6))
+    plt.hist(diff_masked_values.flatten(), bins=50)
+    plt.title('Distribution of Attribution Differences in Perturbed Areas')
+    plt.xlabel('Difference Value (Perturbed - Original)')
+    plt.ylabel('Frequency')
+    plt.axvline(0, color='r', linestyle='dashed', linewidth=1, label='No Change')
+    plt.axvline(diff_mean, color='g', linestyle='dashed', linewidth=1, label=f'Mean: {diff_mean:.4f}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(save_dir, "attribution_difference_histogram.png"))
+    plt.show()
+    
+    # Calculate percentage of masked area where attribution increased/decreased
+    increased = np.sum(diff_masked_values > 0) / diff_masked_values.size * 100
+    decreased = np.sum(diff_masked_values < 0) / diff_masked_values.size * 100
+    unchanged = np.sum(diff_masked_values == 0) / diff_masked_values.size * 100
+    
+    print(f"\nPercentage of perturbed areas where attribution:")
+    print(f"Increased: {increased:.2f}%")
+    print(f"Decreased: {decreased:.2f}%")
+    print(f"Unchanged: {unchanged:.2f}%")
+    
+    # Print the absolute change on average
+    abs_mean_change = np.mean(np.abs(diff_masked_values))
+    print(f"\nAbsolute mean change in attribution: {abs_mean_change:.6f}")
+    
+    return {
+        "original_stats": {
+            "min": orig_min,
+            "max": orig_max,
+            "mean": orig_mean,
+            "median": orig_median
+        },
+        "perturbed_stats": {
+            "min": pert_min,
+            "max": pert_max,
+            "mean": pert_mean,
+            "median": pert_median
+        },
+        "difference_stats": {
+            "min": diff_min,
+            "max": diff_max,
+            "mean": diff_mean,
+            "median": diff_median,
+            "abs_mean": abs_mean_change,
+            "increased_pct": increased,
+            "decreased_pct": decreased,
+            "unchanged_pct": unchanged
+        }
+    }
+
 if __name__ == "__main__":
     # Example usage
     image_path = "./images/xray.jpg"
