@@ -1,3 +1,4 @@
+from pathlib import Path
 import numpy as np
 import torch
 from diffusers import StableDiffusionInpaintPipeline, DDIMScheduler
@@ -94,43 +95,46 @@ def create_patch_attribution_mask(attribution: np.ndarray, percentile_threshold:
     return mask
 
 def perturb_non_attribution(model_pipe: StableDiffusionInpaintPipeline, image_path: str, attribution: np.ndarray, percentile_threshold: int = 80, strength: float = 0.2, patch_size: int = 16):
-    original_image = Image.open(image_path).convert('RGB')
-    
+    original_512 = Image.open(image_path).convert('RGB')    
+
     # Create the attribution mask as numpy array
-    mask_np = create_patch_attribution_mask(attribution, percentile_threshold, patch_size)
-    
+    mask_224 = create_patch_attribution_mask(attribution, percentile_threshold, patch_size)    
+
     # Create the inverse mask (areas to perturb)
-    inv_mask_np = 255 - mask_np
+    inv_mask_224 = 255 - mask_224
     
     # Convert to PIL image
-    pil_mask = Image.fromarray(inv_mask_np).convert('L')
+    pil_mask_224 = Image.fromarray(inv_mask_224).convert('L')
+
+    vit_mask = (mask_224 > 0)
     
     # IMPORTANT: Resize the mask to match the original image dimensions
-    pil_mask = pil_mask.resize(original_image.size, Image.NEAREST)
+    pil_mask_512 = pil_mask_224.resize((512,512), Image.NEAREST)
     
     device = model_pipe.device
     generator = torch.Generator(device=device).manual_seed(420)
-    result = model_pipe(
+    perturbed_512 = model_pipe(
         prompt="Bilateral pulmonary edema with patchy infiltrates in lower lobes. Perihilar haziness. Interstitial opacities.",
-        image=original_image,
-        mask_image=pil_mask,
-        guidance_scale=80.0,
-        num_inference_steps=20,
+        image=original_512,
+        mask_image=pil_mask_512,
+        guidance_scale=0.0,
+        num_inference_steps=5,
         strength=strength,
         generator=generator
     ).images[0]
     
-    # Create the final result
-    result_image = original_image.copy()
+    # Downscale both original and perturbed images to 224x224 for comparison
+    original_224 = Image.open(f'./results/vit_inputs/{Path(image_path).stem}.jpg')
+    perturbed_224 = perturbed_512.resize((224, 224), Image.LANCZOS)
     
-    # Create mask that matches the image dimensions
-    np_mask = np.array(pil_mask) > 0
-    np_perturbed = np.array(result)
-    np_result = np.array(result_image)
+    # Final composition: preserve high attribution areas from original
+    np_original = np.array(original_224)
+    np_perturbed = np.array(perturbed_224)
     
-    # Now the dimensions should match
-    np_result[np_mask] = np_perturbed[np_mask]
-    result_image = Image.fromarray(np_result)
-    result_image.save("./images/xray_perturbed.jpg")
+    result = np.copy(np_original)
+    result[~vit_mask] = np_perturbed[~vit_mask]  # Only replace low attribution areas
     
-    return result_image, np_mask
+    result_image = Image.fromarray(result)
+    
+    # Return the combined image and areas that were perturbed
+    return result_image, ~vit_mask

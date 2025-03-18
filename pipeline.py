@@ -1,7 +1,16 @@
 import explanation as expl
 import transformer as tf
-from typing import Tuple
+from typing import Optional, Tuple, List
 import sd
+import pandas as pd
+from pathlib import Path
+import numpy as np
+import json
+from PIL import Image
+
+DATA_DIR = "./images"
+OUTPUT_DIR = "./results"
+CACHE_DIR = "./cache"
 
 def classify_image(image, model=None, processor=None, label_columns=None):
     # Use provided models if available, otherwise load them
@@ -26,86 +35,238 @@ def perturb_classify(image: str):
     print(results)
 
     sd_pipe = sd.load_model()
-    result_image, np_mask = sd.perturb_non_attribution(sd_pipe, image, attribution, strength=0.8, percentile_threshold=15)
+    result_image, np_mask = sd.perturb_non_attribution(sd_pipe, image, attribution, strength=0.2, percentile_threshold=20)
     results, perturbed_attribution = expl.explain_image("./images/xray_perturbed.jpg")
     expl.explain_attribution_diff(attribution, perturbed_attribution, np_mask)
     print(results)
 
-def perturb_classify_all_patches(image: str, strength: float = 0.3):
+def preprocess_dataset(source_dir: str = "./originals", 
+                       dest_dir: str = "./images", 
+                       target_size: tuple = (512,512)) -> List[Path]:
     """
-    Perturbs and classifies each 16x16 patch in a 512x512 image.
+    Preprocess all JPG images in source_dir by resizing them to target_size 
+    and saving them to dest_dir.
     
     Args:
-        image (str): Path to the input image
-        strength (float): Strength of the perturbation
+        source_dir: Directory containing original images
+        dest_dir: Directory to save resized images
+        target_size: Target size (width, height) for the resized images
+        
+    Returns:
+        List of paths to the processed images
     """
-    patch_size = 32
-    image_size = 512
+    source_path = Path(source_dir)
+    dest_path = Path(dest_dir)
+    dest_path.mkdir(exist_ok=True, parents=True)
+    image_files = list(source_path.glob("*.jpg"))
     
-    # Calculate the number of patches in each dimension
-    num_patches_x = image_size // patch_size  # 32
-    num_patches_y = image_size // patch_size  # 32
-    
-    total_patches = num_patches_x * num_patches_y  # 1024
-    print(f"Processing {total_patches} patches of size {patch_size}x{patch_size} in a {image_size}x{image_size} image")
-    
-    # Load models once
-    print("Loading models...")
-    sd_pipe = sd.load_model()
-    processor, model, label_columns = tf.load_classifier()
-    print("Models loaded successfully")
-    
-    # Classify the original image once
-    print("\nClassifying original image:")
-    original_results = classify_image(image, model, processor, label_columns)
-    
-    # Track important information
-    changed_patches = []
-    confidence_impacts = []
-    original_class = original_results['predicted_class_label']
-    original_class_idx = original_results['predicted_class_idx']
-    original_confidence = original_results['probabilities'][original_class_idx].item()
-    print(f"Original confidence for {original_class}: {original_confidence:.4f}")
-    
-    for y in range(num_patches_y):
-        for x in range(num_patches_x):
-            patch_position = (x * patch_size, y * patch_size)
-            patch_num = y*num_patches_x + x + 1
+    processed_paths = []
+    for image_file in image_files:
+        output_path = dest_path / image_file.name
+        
+        if output_path.exists():
+            print(f"Skipping {image_file.name} - already exists in {dest_dir}")
+            processed_paths.append(output_path)
+            continue
+        
+        try:
+            img = Image.open(image_file).convert('RGB')
+            resized_img = img.resize(target_size, Image.LANCZOS)
+            resized_img.save(output_path)
+            processed_paths.append(output_path)
             
-            print(f"\nPatch {patch_num}/{total_patches} at position {patch_position}:")
-            
-            # Perturb the image at the current patch using the pre-loaded model
-            perturbed_image = perturb_image(image, patch_position, strength, sd_pipe)
-            
-            # Classify the perturbed image using the pre-loaded model
-            print(f"Classification results:")
-            results = classify_image(perturbed_image, model, processor, label_columns)
-            
-            # Get new confidence for the original class (even if classification changed)
-            new_confidence_for_original = results['probabilities'][original_class_idx].item()
-            confidence_drop = original_confidence - new_confidence_for_original
-            
-            # Track all relevant information
-            if results['predicted_class_label'] != original_class:
-                changed_patches.append((patch_position, results['predicted_class_label'], new_confidence_for_original))
-                
-            # Record confidence impact regardless of classification change
-            confidence_impacts.append((patch_position, confidence_drop, new_confidence_for_original))
+            print(f"Processed: {image_file.name} -> {output_path}")
+        except Exception as e:
+            print(f"Error processing {image_file.name}: {e}")
     
-    print(f"\nCompleted processing all {total_patches} patches.")
+    print(f"Preprocessing complete. {len(processed_paths)} images saved to {dest_dir}")
+    return processed_paths
+
+def classify(data_directory: Optional[str] = None, output_suffix: str = "") -> pd.DataFrame:
+    """
+    Classify images and generate attribution maps.
     
-    # Sort patches by confidence impact (highest drop first)
-    confidence_impacts.sort(key=lambda x: x[1], reverse=True)
+    Args:
+        data_directory: Optional custom directory containing images to classify.
+                       If None, uses default DATA_DIR.
+        output_suffix: Optional suffix for output files to distinguish different runs
+        
+    Returns:
+        DataFrame with classification results and paths to attribution maps.
+    """
+    output_dir = Path(OUTPUT_DIR)
+    cache_dir = Path(CACHE_DIR)
+    attribution_dir = output_dir / f"attributions{output_suffix}"
+    vit_inputs_dir = output_dir / "vit_inputs"
     
-    # Summary of patches that changed the classification
-    if changed_patches:
-        print(f"\nFound {len(changed_patches)} patches that changed classification from {original_class}:")
-        for pos, new_class, conf in changed_patches:
-            print(f"  Position {pos}: Changed to {new_class} (confidence for {original_class}: {conf:.4f})")
+    if data_directory is None:
+        data_dir = Path(DATA_DIR)
     else:
-        print("\nNo patches changed the classification.")
+        data_dir = Path(data_directory)
     
-    # Summary of patches with highest confidence impact
-    print(f"\nTop 10 patches with greatest reduction in confidence for {original_class}:")
-    for i, (pos, drop, new_conf) in enumerate(confidence_impacts[:10]):
-        print(f"  {i+1}. Position {pos}: Confidence reduced by {drop:.4f} (from {original_confidence:.4f} to {new_conf:.4f})")
+    image_paths = list(data_dir.glob("*.jpg"))
+    
+    for directory in [output_dir, cache_dir, attribution_dir, vit_inputs_dir]:
+        directory.mkdir(exist_ok=True, parents=True)
+    
+    explainer = expl.TransLRPExplainer()
+    results = []
+    
+    for image_path in image_paths:
+        # check cache
+        cache_file = cache_dir / f"{image_path.stem}_classification{output_suffix}.json"
+        if cache_file.exists():
+            with open(cache_file, 'r') as f:
+                result = json.load(f)
+                results.append(result)
+                continue
+        
+        classification = explainer.classify_image(image_path=str(image_path))
+        image, attribution = explainer.explain(image_path, classification['predicted_class_idx'])
+        vit_input_path = vit_inputs_dir / f"{image_path.stem}{output_suffix}.jpg"
+        Image.fromarray(image).save(vit_input_path)
+        attribution_path = attribution_dir / f"{image_path.stem}_attribution.npy"
+        np.save(attribution_path, attribution)
+        vis_path = attribution_dir / f"{image_path.stem}_vis.png"
+        explainer.visualize(image, attribution, save_path=str(vis_path))
+        
+        result = {
+            "image_path": str(image_path),
+            "vit_input_path": str(vit_input_path),
+            "predicted_class": classification["predicted_class_label"],
+            "predicted_class_idx": classification["predicted_class_idx"],
+            "confidence": float(classification["probabilities"][classification["predicted_class_idx"]]),
+            "attribution_path": str(attribution_path),
+            "attribution_vis_path": str(vis_path)
+        }
+        
+        with open(cache_file, 'w') as f:
+            json.dump(result, f)
+        
+        results.append(result)
+    
+    df = pd.DataFrame(results)
+    df.to_csv(output_dir / f"classification_results{output_suffix}.csv", index=False)
+    
+    return df
+
+def perturb_low_attribution_areas(results_df: pd.DataFrame, percentile_threshold: int = 15, strength: float = 0.2) -> List[Path]:
+    """
+    Perturb low attribution areas of all images and save the results.
+    
+    Args:
+        results_df: DataFrame with classification results (from run_initial_classify)
+        percentile_threshold: Percentile threshold for determining attribution regions
+        strength: Perturbation strength
+        
+    Returns:
+        List of paths to perturbed images
+    """
+    output_dir = Path(OUTPUT_DIR)
+    perturbed_dir = output_dir / "perturbed"
+    mask_dir = output_dir / "masks"
+    for directory in [perturbed_dir, mask_dir]:
+        directory.mkdir(exist_ok=True, parents=True)
+
+    sd_pipe = sd.load_model()
+    perturbed_image_paths = []
+
+    for _, row in results_df.iterrows():
+        image_path = row["image_path"]
+        attribution_path = row["attribution_path"]
+        exp_id = f"{Path(image_path).stem}_non_attr_p{percentile_threshold}_s{strength}"
+        perturbed_image_path = perturbed_dir / f'{exp_id}.jpg'
+        mask_path = mask_dir / f'{exp_id}_mask.npy'
+
+        if perturbed_image_path.exists():
+            perturbed_image_paths.append(perturbed_image_path)
+            continue
+
+        attribution = np.load(attribution_path)
+        result_image, np_mask = sd.perturb_non_attribution(
+            sd_pipe, 
+            image_path, 
+            attribution, 
+            percentile_threshold=percentile_threshold,
+            strength=strength
+        )
+        
+        # Save the perturbed image
+        result_image.save(perturbed_image_path)
+        np.save(mask_path, np_mask)
+        perturbed_image_paths.append(perturbed_image_path)
+        
+        print(f"Perturbed and saved: {perturbed_image_path}")
+    
+    return perturbed_image_paths
+
+def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compare attributions between original and perturbed images.
+    
+    Args:
+        original_results_df: DataFrame with original classification results
+        perturbed_results_df: DataFrame with perturbed classification results
+        
+    Returns:
+        DataFrame with attribution comparison results
+    """
+    output_dir = Path(OUTPUT_DIR)
+    comparison_dir = output_dir / "comparisons"
+    mask_dir = output_dir / "masks"
+    comparison_dir.mkdir(exist_ok=True, parents=True)
+    comparison_results = []
+
+    for _, perturbed_row in perturbed_results_df.iterrows():
+        perturbed_path = Path(perturbed_row["image_path"])
+        perturbed_filename = perturbed_path.stem
+        original_name = perturbed_filename.split("_non_attr")[0]
+        original_row = original_results_df[original_results_df["image_path"].str.contains(f"/{original_name}.jpg")].iloc[0]
+
+        original_attribution = np.load(original_row["attribution_path"])
+        perturbed_attribution = np.load(perturbed_row["attribution_path"])
+        np_mask = np.load(mask_dir / f'{perturbed_filename}_mask.npy')
+
+        comparison_path = comparison_dir / f"{perturbed_filename}_comparison.png"
+        diff_stats = expl.explain_attribution_diff(
+            original_attribution, 
+            perturbed_attribution, 
+            np_mask,
+            base_name=perturbed_filename,
+            save_dir=str(comparison_dir)
+        )
+
+        # Calculate SSIM between the actual 224x224 ViT inputs
+        ssim_score = None
+        if "vit_input_path" in original_row and "vit_input_path" in perturbed_row:
+            original_vit_img = Image.open(original_row["vit_input_path"]).convert('RGB')
+            perturbed_vit_img = Image.open(perturbed_row["vit_input_path"]).convert('RGB')
+            ssim_score = sd.patch_similarity(original_vit_img, perturbed_vit_img)
+
+
+        result = {
+            "original_image": original_row["image_path"],
+            "perturbed_image": perturbed_path,
+            "original_class": original_row["predicted_class"],
+            "perturbed_class": perturbed_row["predicted_class"],
+            "class_changed": original_row["predicted_class_idx"] != perturbed_row["predicted_class_idx"],
+            "original_confidence": original_row["confidence"],
+            "perturbed_confidence": perturbed_row["confidence"],
+            "confidence_delta": perturbed_row["confidence"] - original_row["confidence"],
+            "vit_input_ssim": ssim_score,
+            "comparison_path": str(comparison_path)
+        }
+        
+        # Add key metrics from diff_stats
+        for category in ["original_stats", "perturbed_stats", "difference_stats"]:
+            if category in diff_stats:
+                for key, value in diff_stats[category].items():
+                    result[f"{category}_{key}"] = value
+        
+        comparison_results.append(result)
+    
+    # Create DataFrame
+    comparison_df = pd.DataFrame(comparison_results)
+    comparison_df.to_csv(output_dir / "attribution_comparisons.csv", index=False)
+    
+    return comparison_df

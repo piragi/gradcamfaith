@@ -99,7 +99,7 @@ class TransLRPExplainer:
     
     def classify_image(self, image_path):
         """Classify an image using the model"""
-        img, input_tensor = self.preprocess_image(image_path)
+        _, input_tensor = self.preprocess_image(image_path)
         
         # Forward pass
         outputs = self.model(input_tensor.detach())
@@ -256,7 +256,7 @@ def inspect_attribution(attribution):
     plt.savefig(os.path.join("./explanations/", f"attribution_histogram.png"))
     plt.show()
 
-def explain_attribution_diff(attribution, perturbed_attribution, np_mask, save_dir="./explanations"):
+def explain_attribution_diff(attribution, perturbed_attribution, np_mask, base_name=None, save_dir="./explanations"):
     """
     Compare original and perturbed attribution maps, focusing on masked areas.
     
@@ -268,17 +268,25 @@ def explain_attribution_diff(attribution, perturbed_attribution, np_mask, save_d
         Attribution map after perturbation
     np_mask : numpy.ndarray
         Binary mask indicating areas that were perturbed (True/1 for perturbed areas)
+    base_name : str, optional
+        Base name for saving files (e.g., the perturbed image name without extension)
     save_dir : str
         Directory to save visualizations
     """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from skimage.transform import resize
     
     os.makedirs(save_dir, exist_ok=True)
+    
+    # Use a default base name if none provided
+    if base_name is None:
+        base_name = "comparison"
     
     # Ensure mask has proper dimensions for masking the attribution maps
     if np_mask.shape != attribution.shape:
         print(f"Warning: Mask shape {np_mask.shape} differs from attribution shape {attribution.shape}")
-        # Resize mask if needed (this assumes mask is a binary array)
-        from skimage.transform import resize
         np_mask = resize(np_mask, attribution.shape, order=0, preserve_range=True).astype(bool)
     
     # Create masked versions of the attributions
@@ -342,8 +350,9 @@ def explain_attribution_diff(attribution, perturbed_attribution, np_mask, save_d
     plt.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "attribution_difference.png"))
-    plt.show()
+    comparison_path = os.path.join(save_dir, f"{base_name}_comparison.png")
+    plt.savefig(comparison_path)
+    plt.close() 
     
     # Distribution of difference values
     plt.figure(figsize=(10, 6))
@@ -355,8 +364,9 @@ def explain_attribution_diff(attribution, perturbed_attribution, np_mask, save_d
     plt.axvline(diff_mean, color='g', linestyle='dashed', linewidth=1, label=f'Mean: {diff_mean:.4f}')
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(save_dir, "attribution_difference_histogram.png"))
-    plt.show()
+    histogram_path = os.path.join(save_dir, f"{base_name}_histogram.png")
+    plt.savefig(histogram_path)
+    plt.close() 
     
     # Calculate percentage of masked area where attribution increased/decreased
     increased = np.sum(diff_masked_values > 0) / diff_masked_values.size * 100
@@ -374,29 +384,32 @@ def explain_attribution_diff(attribution, perturbed_attribution, np_mask, save_d
     
     return {
         "original_stats": {
-            "min": orig_min,
-            "max": orig_max,
-            "mean": orig_mean,
-            "median": orig_median
+            "min": float(orig_min),
+            "max": float(orig_max),
+            "mean": float(orig_mean),
+            "median": float(orig_median)
         },
         "perturbed_stats": {
-            "min": pert_min,
-            "max": pert_max,
-            "mean": pert_mean,
-            "median": pert_median
+            "min": float(pert_min),
+            "max": float(pert_max),
+            "mean": float(pert_mean),
+            "median": float(pert_median)
         },
         "difference_stats": {
-            "min": diff_min,
-            "max": diff_max,
-            "mean": diff_mean,
-            "median": diff_median,
-            "abs_mean": abs_mean_change,
-            "increased_pct": increased,
-            "decreased_pct": decreased,
-            "unchanged_pct": unchanged
+            "min": float(diff_min),
+            "max": float(diff_max),
+            "mean": float(diff_mean),
+            "median": float(diff_median),
+            "abs_mean": float(abs_mean_change),
+            "increased_pct": float(increased),
+            "decreased_pct": float(decreased),
+            "unchanged_pct": float(unchanged)
+        },
+        "visualization_paths": {
+            "comparison": comparison_path,
+            "histogram": histogram_path
         }
     }
-
 if __name__ == "__main__":
     # Example usage
     image_path = "./images/xray.jpg"
