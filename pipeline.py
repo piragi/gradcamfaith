@@ -40,17 +40,19 @@ def perturb_classify(image: str):
     expl.explain_attribution_diff(attribution, perturbed_attribution, np_mask)
     print(results)
 
-def preprocess_dataset(source_dir: str = "./originals", 
+def preprocess_dataset(source_dir: str = "./chexpert", 
                        dest_dir: str = "./images", 
                        target_size: tuple = (224,224)) -> List[Path]:
     """
-    Preprocess all JPG images in source_dir by resizing them to target_size 
-    and saving them to dest_dir.
+    Preprocess JPG images by resizing them to target_size and saving them to dest_dir.
+    Can recursively search through subfolders and filter for frontal X-rays.
     
     Args:
         source_dir: Directory containing original images
         dest_dir: Directory to save resized images
         target_size: Target size (width, height) for the resized images
+        recursive: If True, search recursively through all subfolders
+        only_frontal: If True, only process images with '_frontal' in the filename
         
     Returns:
         List of paths to the processed images
@@ -58,14 +60,21 @@ def preprocess_dataset(source_dir: str = "./originals",
     source_path = Path(source_dir)
     dest_path = Path(dest_dir)
     dest_path.mkdir(exist_ok=True, parents=True)
-    image_files = list(source_path.glob("*.jpg"))
+    
+    image_files = list(source_path.glob("**/*.jpg"))
+    
+    image_files = [img for img in image_files if "_frontal" in img.name]
+    print(f"Found {len(image_files)} frontal X-rays")
     
     processed_paths = []
     for image_file in image_files:
-        output_path = dest_path / image_file.name
+        # Create a unique output filename to avoid conflicts from different subfolders
+        patient_id = image_file.parent.parent.name
+        output_filename = f"{patient_id}_{image_file.name}"
+        output_path = dest_path / output_filename
         
         if output_path.exists():
-            print(f"Skipping {image_file.name} - already exists in {dest_dir}")
+            print(f"Skipping {output_path.name} - already exists in {dest_dir}")
             processed_paths.append(output_path)
             continue
         
@@ -122,8 +131,11 @@ def classify(data_directory: Optional[str] = None, output_suffix: str = "") -> p
                 continue
         
         image, classification = explainer.classify_image(image_path=str(image_path))
+
+        # save classified image for similarity comparisons
         vit_input_path = vit_inputs_dir / f"{image_path.stem}{output_suffix}.jpg"
         image.save(vit_input_path)
+
         image, attribution = explainer.explain(image_path, classification['predicted_class_idx'])
         attribution_path = attribution_dir / f"{image_path.stem}_attribution.npy"
         np.save(attribution_path, attribution)
@@ -172,9 +184,13 @@ def perturb_low_attribution_areas(results_df: pd.DataFrame, percentile_threshold
     perturbed_image_paths = []
 
     for _, row in results_df.iterrows():
-        image_path = f'./originals/{Path(row["image_path"]).stem}.jpg'
+        processed_filename = Path(row["image_path"]).name
+        print(processed_filename)
+        patient_id, original_filename = processed_filename.split('_', 1)
+        original_filename = original_filename.split('.')[0]
+        image_path = f'./chexpert/{patient_id}/study1/{original_filename}.jpg'
         attribution_path = row["attribution_path"]
-        exp_id = f"{Path(image_path).stem}_non_attr_p{percentile_threshold}_s{strength}"
+        exp_id = f"{patient_id}_{original_filename}_non_attr_p{percentile_threshold}_s{strength}"
         perturbed_image_path = perturbed_dir / f'{exp_id}.jpg'
         mask_path = mask_dir / f'{exp_id}_mask.npy'
 
@@ -185,7 +201,7 @@ def perturb_low_attribution_areas(results_df: pd.DataFrame, percentile_threshold
         attribution = np.load(attribution_path)
         result_image, np_mask = sd.perturb_non_attribution(
             sd_pipe, 
-            image_path, 
+            (patient_id, original_filename), 
             attribution, 
             percentile_threshold=percentile_threshold,
             strength=strength
@@ -203,11 +219,11 @@ def perturb_low_attribution_areas(results_df: pd.DataFrame, percentile_threshold
 def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df: pd.DataFrame) -> pd.DataFrame:
     """
     Compare attributions between original and perturbed images.
-    
+
     Args:
         original_results_df: DataFrame with original classification results
         perturbed_results_df: DataFrame with perturbed classification results
-        
+
     Returns:
         DataFrame with attribution comparison results
     """
@@ -256,15 +272,15 @@ def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df
             "vit_input_ssim": ssim_score,
             "comparison_path": str(comparison_path)
         }
-        
+
         # Add key metrics from diff_stats
         for category in ["original_stats", "perturbed_stats", "difference_stats"]:
             if category in diff_stats:
                 for key, value in diff_stats[category].items():
                     result[f"{category}_{key}"] = value
-        
+
         comparison_results.append(result)
-    
+
     # Create DataFrame
     comparison_df = pd.DataFrame(comparison_results)
     comparison_df.to_csv(output_dir / "attribution_comparisons.csv", index=False)

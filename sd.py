@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from diffusers import StableDiffusionInpaintPipeline, DDIMScheduler
 from PIL import Image
-from typing import Tuple
+from typing import Tuple, Union
 from torchvision import transforms
 from skimage.metrics import structural_similarity as ssim
 
@@ -94,8 +94,9 @@ def create_patch_attribution_mask(attribution: np.ndarray, percentile_threshold:
     mask = pixel_mask * 255
     return mask
 
-def perturb_non_attribution(model_pipe: StableDiffusionInpaintPipeline, image_path: str, attribution: np.ndarray, percentile_threshold: int = 80, strength: float = 0.2, patch_size: int = 16):
-    original_512 = Image.open(image_path).resize((512,512), Image.LANCZOS).convert('RGB')    
+def perturb_non_attribution(model_pipe: StableDiffusionInpaintPipeline, image_identifier: Union[str,str], attribution: np.ndarray, percentile_threshold: int = 80, strength: float = 0.2, patch_size: int = 16):
+    patient_id, original_filename = image_identifier
+    original_512 = Image.open(f'./chexpert/{patient_id}/study1/{original_filename}.jpg').resize((512,512), Image.LANCZOS).convert('RGB')    
 
     # Create the attribution mask as numpy array
     mask_224 = create_patch_attribution_mask(attribution, percentile_threshold, patch_size)    
@@ -118,13 +119,13 @@ def perturb_non_attribution(model_pipe: StableDiffusionInpaintPipeline, image_pa
         image=original_512,
         mask_image=pil_mask_512,
         guidance_scale=0.0,
-        num_inference_steps=5,
+        num_inference_steps=10,
         strength=strength,
         generator=generator
     ).images[0]
     
     # Downscale both original and perturbed images to 224x224 for comparison
-    original_224 = Image.open(f'./results/vit_inputs/{Path(image_path).stem}.jpg')
+    original_224 = Image.open(f'./images/{patient_id}_{original_filename}.jpg')
     perturbed_224 = perturbed_512.resize((224, 224), Image.LANCZOS)
     
     # Final composition: preserve high attribution areas from original

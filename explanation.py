@@ -159,7 +159,7 @@ class TransLRPExplainer:
         # Normalize for visualization
         attribution = (attribution - attribution.min()) / (attribution.max() - attribution.min() + 1e-8)
         
-        return np.array(img.resize((self.img_size, self.img_size))), attribution
+        return np.array(img), attribution
     
     def visualize(self, image, attribution, save_path=None, alpha=0.5):
         """Visualize the attribution map overlaid on the original image"""
