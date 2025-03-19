@@ -42,7 +42,7 @@ def perturb_classify(image: str):
 
 def preprocess_dataset(source_dir: str = "./originals", 
                        dest_dir: str = "./images", 
-                       target_size: tuple = (512,512)) -> List[Path]:
+                       target_size: tuple = (224,224)) -> List[Path]:
     """
     Preprocess all JPG images in source_dir by resizing them to target_size 
     and saving them to dest_dir.
@@ -121,10 +121,10 @@ def classify(data_directory: Optional[str] = None, output_suffix: str = "") -> p
                 results.append(result)
                 continue
         
-        classification = explainer.classify_image(image_path=str(image_path))
-        image, attribution = explainer.explain(image_path, classification['predicted_class_idx'])
+        image, classification = explainer.classify_image(image_path=str(image_path))
         vit_input_path = vit_inputs_dir / f"{image_path.stem}{output_suffix}.jpg"
-        Image.fromarray(image).save(vit_input_path)
+        image.save(vit_input_path)
+        image, attribution = explainer.explain(image_path, classification['predicted_class_idx'])
         attribution_path = attribution_dir / f"{image_path.stem}_attribution.npy"
         np.save(attribution_path, attribution)
         vis_path = attribution_dir / f"{image_path.stem}_vis.png"
@@ -172,7 +172,7 @@ def perturb_low_attribution_areas(results_df: pd.DataFrame, percentile_threshold
     perturbed_image_paths = []
 
     for _, row in results_df.iterrows():
-        image_path = row["image_path"]
+        image_path = f'./originals/{Path(row["image_path"]).stem}.jpg'
         attribution_path = row["attribution_path"]
         exp_id = f"{Path(image_path).stem}_non_attr_p{percentile_threshold}_s{strength}"
         perturbed_image_path = perturbed_dir / f'{exp_id}.jpg'

@@ -95,7 +95,7 @@ def create_patch_attribution_mask(attribution: np.ndarray, percentile_threshold:
     return mask
 
 def perturb_non_attribution(model_pipe: StableDiffusionInpaintPipeline, image_path: str, attribution: np.ndarray, percentile_threshold: int = 80, strength: float = 0.2, patch_size: int = 16):
-    original_512 = Image.open(image_path).convert('RGB')    
+    original_512 = Image.open(image_path).resize((512,512), Image.LANCZOS).convert('RGB')    
 
     # Create the attribution mask as numpy array
     mask_224 = create_patch_attribution_mask(attribution, percentile_threshold, patch_size)    

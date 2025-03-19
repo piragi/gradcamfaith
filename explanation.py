@@ -99,7 +99,7 @@ class TransLRPExplainer:
     
     def classify_image(self, image_path):
         """Classify an image using the model"""
-        _, input_tensor = self.preprocess_image(image_path)
+        img, input_tensor = self.preprocess_image(image_path)
         
         # Forward pass
         outputs = self.model(input_tensor.detach())
@@ -112,7 +112,7 @@ class TransLRPExplainer:
         pred_class_label = self.label_columns.get(str(pred_class_idx), 
                            self.label_columns.get(pred_class_idx, f"Class {pred_class_idx}"))
         
-        return {
+        return img, {
             "logits": outputs,
             "probabilities": probs,
             "predicted_class_idx": pred_class_idx,
