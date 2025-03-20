@@ -410,10 +410,3 @@ def explain_attribution_diff(attribution, perturbed_attribution, np_mask, base_n
             "histogram": histogram_path
         }
     }
-if __name__ == "__main__":
-    # Example usage
-    image_path = "./images/xray.jpg"
-    explain_image(image_path)
-    
-    image_path = "./images/xray_perturbed.jpg"
-    explain_image(image_path)

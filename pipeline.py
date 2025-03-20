@@ -286,3 +286,123 @@ def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df
     comparison_df.to_csv(output_dir / "attribution_comparisons.csv", index=False)
     
     return comparison_df
+
+def calculate_perturbation_statistics(mask_dir: str = "./results/masks", image_size=(224, 224), patch_size=16):
+    """
+    Calculate statistics about the amount of patches perturbed across all masks.
+    
+    Args:
+        mask_dir: Directory containing mask .npy files
+        image_size: Size of the images (default: 224x224)
+        patch_size: Size of each patch (default: 16)
+        
+    Returns:
+        Dictionary with perturbation statistics
+    """
+    from pathlib import Path
+    import numpy as np
+    
+    mask_dir_path = Path(mask_dir)
+    mask_files = list(mask_dir_path.glob("*_mask.npy"))
+    
+    if not mask_files:
+        print(f"No mask files found in {mask_dir}")
+        return {}
+    
+    # Calculate grid dimensions
+    patch_grid = (image_size[0] // patch_size, image_size[1] // patch_size)
+    total_patches = patch_grid[0] * patch_grid[1]
+    print(f"Image size: {image_size}, Patch size: {patch_size}, Total patches: {total_patches}")
+    
+    # Calculate perturbation stats for each mask
+    perturbation_fractions = []
+    patch_counts = []
+    
+    for mask_file in mask_files:
+        # Load pixel-level mask
+        pixel_mask = np.load(mask_file)
+        
+        if pixel_mask.shape != image_size:
+            print(f"Warning: Mask shape {pixel_mask.shape} doesn't match expected image size {image_size}")
+            # Skip this mask or try to resize it
+            continue
+        
+        # Convert pixel-level mask to patch-level mask
+        patch_mask = np.zeros((patch_grid[0], patch_grid[1]), dtype=bool)
+        
+        # For each patch, check if any pixel in that patch is perturbed
+        for i in range(patch_grid[0]):
+            for j in range(patch_grid[1]):
+                patch_pixels = pixel_mask[
+                    i * patch_size:(i + 1) * patch_size,
+                    j * patch_size:(j + 1) * patch_size
+                ]
+                # If any pixel in the patch is True (perturbed), mark the patch as perturbed
+                patch_mask[i, j] = np.any(patch_pixels)
+        
+        # Count perturbed patches
+        perturbed_count = np.count_nonzero(patch_mask)
+        perturbation_fraction = perturbed_count / total_patches
+        
+        patch_counts.append(perturbed_count)
+        perturbation_fractions.append(perturbation_fraction)
+        
+    # Calculate statistics
+    stats = {
+        "total_masks": len(mask_files),
+        "total_patches_per_image": total_patches,
+        "mean_perturbed_patches": np.mean(patch_counts),
+        "median_perturbed_patches": np.median(patch_counts),
+        "mean_perturbation_fraction": np.mean(perturbation_fractions),
+        "median_perturbation_fraction": np.median(perturbation_fractions),
+        "min_perturbation_fraction": np.min(perturbation_fractions),
+        "max_perturbation_fraction": np.max(perturbation_fractions)
+    }
+    
+    print(f"Perturbation Statistics:")
+    print(f"Total masks analyzed: {stats['total_masks']}")
+    print(f"Total patches per image: {stats['total_patches_per_image']}")
+    print(f"Mean perturbed patches: {stats['mean_perturbed_patches']:.2f} / {total_patches}")
+    print(f"Median perturbed patches: {stats['median_perturbed_patches']:.2f} / {total_patches}")
+    print(f"Mean perturbation fraction: {stats['mean_perturbation_fraction']:.2%}")
+    print(f"Median perturbation fraction: {stats['median_perturbation_fraction']:.2%}")
+    print(f"Min perturbation fraction: {stats['min_perturbation_fraction']:.2%}")
+    print(f"Max perturbation fraction: {stats['max_perturbation_fraction']:.2%}")
+    
+    # Create a histogram of perturbation fractions
+    try:
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(10, 6))
+        plt.hist(perturbation_fractions, bins=20, edgecolor='black')
+        plt.title('Distribution of Perturbation Fractions')
+        plt.xlabel('Fraction of Patches Perturbed')
+        plt.ylabel('Number of Images')
+        plt.axvline(np.mean(perturbation_fractions), color='red', linestyle='dashed', linewidth=2, label=f'Mean: {np.mean(perturbation_fractions):.2%}')
+        plt.axvline(np.median(perturbation_fractions), color='green', linestyle='dashed', linewidth=2, label=f'Median: {np.median(perturbation_fractions):.2%}')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Save the histogram
+        histogram_path = Path(mask_dir).parent / "perturbation_histogram.png"
+        plt.savefig(histogram_path)
+        print(f"Histogram saved to: {histogram_path}")
+        
+        # Create a second histogram showing the count of perturbed patches
+        plt.figure(figsize=(10, 6))
+        plt.hist(patch_counts, bins=20, edgecolor='black')
+        plt.title('Distribution of Perturbed Patch Counts')
+        plt.xlabel('Number of Patches Perturbed')
+        plt.ylabel('Number of Images')
+        plt.axvline(np.mean(patch_counts), color='red', linestyle='dashed', linewidth=2, label=f'Mean: {np.mean(patch_counts):.2f}')
+        plt.axvline(np.median(patch_counts), color='green', linestyle='dashed', linewidth=2, label=f'Median: {np.median(patch_counts):.2f}')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Save the second histogram
+        histogram_path2 = Path(mask_dir).parent / "perturbation_count_histogram.png"
+        plt.savefig(histogram_path2)
+        print(f"Patch count histogram saved to: {histogram_path2}")
+    except Exception as e:
+        print(f"Could not create histogram: {e}")
+    
+    return stats
