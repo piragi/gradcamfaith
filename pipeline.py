@@ -7,10 +7,12 @@ from pathlib import Path
 import numpy as np
 import json
 from PIL import Image
+from diffusers import StableDiffusionInpaintPipeline
 
 DATA_DIR = "./images"
 OUTPUT_DIR = "./results"
 CACHE_DIR = "./cache"
+PATCH_DIR = "./results/patches"
 
 def classify_image(image, model=None, processor=None, label_columns=None):
     # Use provided models if available, otherwise load them
@@ -141,6 +143,10 @@ def classify(data_directory: Optional[str] = None, output_suffix: str = "") -> p
         np.save(attribution_path, attribution)
         vis_path = attribution_dir / f"{image_path.stem}_vis.png"
         explainer.visualize(image, attribution, save_path=str(vis_path))
+
+        # Convert probabilities to a list for JSON serialization
+        probabilities_list = classification["probabilities"].tolist()
+
         
         result = {
             "image_path": str(image_path),
@@ -148,6 +154,7 @@ def classify(data_directory: Optional[str] = None, output_suffix: str = "") -> p
             "predicted_class": classification["predicted_class_label"],
             "predicted_class_idx": classification["predicted_class_idx"],
             "confidence": float(classification["probabilities"][classification["predicted_class_idx"]]),
+            "probabilities": probabilities_list,
             "attribution_path": str(attribution_path),
             "attribution_vis_path": str(vis_path)
         }
@@ -162,7 +169,7 @@ def classify(data_directory: Optional[str] = None, output_suffix: str = "") -> p
     
     return df
 
-def perturb_low_attribution_areas(results_df: pd.DataFrame, percentile_threshold: int = 15, strength: float = 0.2) -> List[Path]:
+def perturb_low_attribution_areas(results_df: pd.DataFrame, sd_pipe: StableDiffusionInpaintPipeline, percentile_threshold: int = 15, strength: float = 0.2) -> List[Path]:
     """
     Perturb low attribution areas of all images and save the results.
     
@@ -180,7 +187,6 @@ def perturb_low_attribution_areas(results_df: pd.DataFrame, percentile_threshold
     for directory in [perturbed_dir, mask_dir]:
         directory.mkdir(exist_ok=True, parents=True)
 
-    sd_pipe = sd.load_model()
     perturbed_image_paths = []
 
     for _, row in results_df.iterrows():
@@ -188,7 +194,6 @@ def perturb_low_attribution_areas(results_df: pd.DataFrame, percentile_threshold
         print(processed_filename)
         patient_id, original_filename = processed_filename.split('_', 1)
         original_filename = original_filename.split('.')[0]
-        image_path = f'./chexpert/{patient_id}/study1/{original_filename}.jpg'
         attribution_path = row["attribution_path"]
         exp_id = f"{patient_id}_{original_filename}_non_attr_p{percentile_threshold}_s{strength}"
         perturbed_image_path = perturbed_dir / f'{exp_id}.jpg'
@@ -216,193 +221,81 @@ def perturb_low_attribution_areas(results_df: pd.DataFrame, percentile_threshold
     
     return perturbed_image_paths
 
-def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df: pd.DataFrame) -> pd.DataFrame:
+def perturb_all_patches(results_df, sd_pipe, patch_size=16, strength=0.2, max_images=None):
     """
-    Compare attributions between original and perturbed images.
-
+    Perturbs each individual patch in the images one by one and saves the results.
+    
     Args:
-        original_results_df: DataFrame with original classification results
-        perturbed_results_df: DataFrame with perturbed classification results
-
+        results_df: DataFrame with classification results
+        sd_pipe: StableDiffusionInpaintPipeline instance (optional)
+        patch_size: Size of each patch to perturb
+        strength: Perturbation strength
+        max_images: Maximum number of images to process (for testing)
+        
     Returns:
-        DataFrame with attribution comparison results
+        List of paths to perturbed images
     """
     output_dir = Path(OUTPUT_DIR)
-    comparison_dir = output_dir / "comparisons"
-    mask_dir = output_dir / "masks"
-    comparison_dir.mkdir(exist_ok=True, parents=True)
-    comparison_results = []
+    perturbed_dir = output_dir / "patches"
+    mask_dir = output_dir / "patch_masks"
+    for directory in [perturbed_dir, mask_dir]:
+        directory.mkdir(exist_ok=True, parents=True)
 
-    for _, perturbed_row in perturbed_results_df.iterrows():
-        perturbed_path = Path(perturbed_row["image_path"])
-        perturbed_filename = perturbed_path.stem
-        original_name = perturbed_filename.split("_non_attr")[0]
-        original_row = original_results_df[original_results_df["image_path"].str.contains(f"/{original_name}.jpg")].iloc[0]
+    perturbed_image_paths = []
+    
+    if max_images:
+        processing_df = results_df.head(max_images)
+    else:
+        processing_df = results_df
 
-        original_attribution = np.load(original_row["attribution_path"])
-        perturbed_attribution = np.load(perturbed_row["attribution_path"])
-        np_mask = np.load(mask_dir / f'{perturbed_filename}_mask.npy')
+    for _, row in processing_df.iterrows():
+        image_path = row["image_path"]
+        image = Image.open(image_path).convert('RGB')
+        width, height = image.size
+        
+        processed_filename = Path(image_path).name
+        print(f"Processing: {processed_filename}")
+        patient_id, original_filename = processed_filename.split('_', 1)
+        original_filename = original_filename.split('.')[0]
+        attribution = np.load(row["attribution_path"])
+        
+        num_patches_x = width // patch_size
+        
+        # Process each patch
+        for y in range(0, height - patch_size + 1, patch_size):
+            for x in range(0, width - patch_size + 1, patch_size):
+                patch_id = (y // patch_size) * num_patches_x + (x // patch_size)
+                
+                # Calculate mean attribution in this patch
+                patch_attribution = attribution[y:y+patch_size, x:x+patch_size]
+                mean_attribution = np.mean(patch_attribution)
+                
+                # Create unique patch identifier
+                exp_id = f"{patient_id}_{original_filename}_patch{patch_id}_x{x}_y{y}_s{strength}"
+                perturbed_image_path = perturbed_dir / f'{exp_id}.jpg'
+                mask_path = mask_dir / f'{exp_id}_mask.npy'
 
-        comparison_path = comparison_dir / f"{perturbed_filename}_comparison.png"
-        diff_stats = expl.explain_attribution_diff(
-            original_attribution, 
-            perturbed_attribution, 
-            np_mask,
-            base_name=perturbed_filename,
-            save_dir=str(comparison_dir)
-        )
-
-        # Calculate SSIM between the actual 224x224 ViT inputs
-        ssim_score = None
-        if "vit_input_path" in original_row and "vit_input_path" in perturbed_row:
-            original_vit_img = Image.open(original_row["vit_input_path"]).convert('RGB')
-            perturbed_vit_img = Image.open(perturbed_row["vit_input_path"]).convert('RGB')
-            ssim_score = sd.patch_similarity(original_vit_img, perturbed_vit_img)
-
-
-        result = {
-            "original_image": original_row["image_path"],
-            "perturbed_image": perturbed_path,
-            "original_class": original_row["predicted_class"],
-            "perturbed_class": perturbed_row["predicted_class"],
-            "class_changed": original_row["predicted_class_idx"] != perturbed_row["predicted_class_idx"],
-            "original_confidence": original_row["confidence"],
-            "perturbed_confidence": perturbed_row["confidence"],
-            "confidence_delta": perturbed_row["confidence"] - original_row["confidence"],
-            "vit_input_ssim": ssim_score,
-            "comparison_path": str(comparison_path)
-        }
-
-        # Add key metrics from diff_stats
-        for category in ["original_stats", "perturbed_stats", "difference_stats"]:
-            if category in diff_stats:
-                for key, value in diff_stats[category].items():
-                    result[f"{category}_{key}"] = value
-
-        comparison_results.append(result)
-
-    # Create DataFrame
-    comparison_df = pd.DataFrame(comparison_results)
-    comparison_df.to_csv(output_dir / "attribution_comparisons.csv", index=False)
+                if perturbed_image_path.exists():
+                    perturbed_image_paths.append(perturbed_image_path)
+                    continue
+                
+                try:
+                    result_image, np_mask = sd.perturb_single_patch(
+                        sd_pipe,
+                        (patient_id, original_filename),
+                        (x, y, patch_size),
+                        strength=strength
+                    )
+                    
+                    # Save the perturbed image
+                    result_image.save(perturbed_image_path)
+                    np.save(mask_path, np_mask)
+                    perturbed_image_paths.append(perturbed_image_path)
+                    
+                    print(f"Perturbed patch {patch_id} at ({x}, {y}) - Attribution: {mean_attribution:.4f}")
+                    
+                except Exception as e:
+                    print(f"Error perturbing patch {patch_id} in {processed_filename}: {e}")
+                    continue
     
-    return comparison_df
-
-def calculate_perturbation_statistics(mask_dir: str = "./results/masks", image_size=(224, 224), patch_size=16):
-    """
-    Calculate statistics about the amount of patches perturbed across all masks.
-    
-    Args:
-        mask_dir: Directory containing mask .npy files
-        image_size: Size of the images (default: 224x224)
-        patch_size: Size of each patch (default: 16)
-        
-    Returns:
-        Dictionary with perturbation statistics
-    """
-    from pathlib import Path
-    import numpy as np
-    
-    mask_dir_path = Path(mask_dir)
-    mask_files = list(mask_dir_path.glob("*_mask.npy"))
-    
-    if not mask_files:
-        print(f"No mask files found in {mask_dir}")
-        return {}
-    
-    # Calculate grid dimensions
-    patch_grid = (image_size[0] // patch_size, image_size[1] // patch_size)
-    total_patches = patch_grid[0] * patch_grid[1]
-    print(f"Image size: {image_size}, Patch size: {patch_size}, Total patches: {total_patches}")
-    
-    # Calculate perturbation stats for each mask
-    perturbation_fractions = []
-    patch_counts = []
-    
-    for mask_file in mask_files:
-        # Load pixel-level mask
-        pixel_mask = np.load(mask_file)
-        
-        if pixel_mask.shape != image_size:
-            print(f"Warning: Mask shape {pixel_mask.shape} doesn't match expected image size {image_size}")
-            # Skip this mask or try to resize it
-            continue
-        
-        # Convert pixel-level mask to patch-level mask
-        patch_mask = np.zeros((patch_grid[0], patch_grid[1]), dtype=bool)
-        
-        # For each patch, check if any pixel in that patch is perturbed
-        for i in range(patch_grid[0]):
-            for j in range(patch_grid[1]):
-                patch_pixels = pixel_mask[
-                    i * patch_size:(i + 1) * patch_size,
-                    j * patch_size:(j + 1) * patch_size
-                ]
-                # If any pixel in the patch is True (perturbed), mark the patch as perturbed
-                patch_mask[i, j] = np.any(patch_pixels)
-        
-        # Count perturbed patches
-        perturbed_count = np.count_nonzero(patch_mask)
-        perturbation_fraction = perturbed_count / total_patches
-        
-        patch_counts.append(perturbed_count)
-        perturbation_fractions.append(perturbation_fraction)
-        
-    # Calculate statistics
-    stats = {
-        "total_masks": len(mask_files),
-        "total_patches_per_image": total_patches,
-        "mean_perturbed_patches": np.mean(patch_counts),
-        "median_perturbed_patches": np.median(patch_counts),
-        "mean_perturbation_fraction": np.mean(perturbation_fractions),
-        "median_perturbation_fraction": np.median(perturbation_fractions),
-        "min_perturbation_fraction": np.min(perturbation_fractions),
-        "max_perturbation_fraction": np.max(perturbation_fractions)
-    }
-    
-    print(f"Perturbation Statistics:")
-    print(f"Total masks analyzed: {stats['total_masks']}")
-    print(f"Total patches per image: {stats['total_patches_per_image']}")
-    print(f"Mean perturbed patches: {stats['mean_perturbed_patches']:.2f} / {total_patches}")
-    print(f"Median perturbed patches: {stats['median_perturbed_patches']:.2f} / {total_patches}")
-    print(f"Mean perturbation fraction: {stats['mean_perturbation_fraction']:.2%}")
-    print(f"Median perturbation fraction: {stats['median_perturbation_fraction']:.2%}")
-    print(f"Min perturbation fraction: {stats['min_perturbation_fraction']:.2%}")
-    print(f"Max perturbation fraction: {stats['max_perturbation_fraction']:.2%}")
-    
-    # Create a histogram of perturbation fractions
-    try:
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(10, 6))
-        plt.hist(perturbation_fractions, bins=20, edgecolor='black')
-        plt.title('Distribution of Perturbation Fractions')
-        plt.xlabel('Fraction of Patches Perturbed')
-        plt.ylabel('Number of Images')
-        plt.axvline(np.mean(perturbation_fractions), color='red', linestyle='dashed', linewidth=2, label=f'Mean: {np.mean(perturbation_fractions):.2%}')
-        plt.axvline(np.median(perturbation_fractions), color='green', linestyle='dashed', linewidth=2, label=f'Median: {np.median(perturbation_fractions):.2%}')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        # Save the histogram
-        histogram_path = Path(mask_dir).parent / "perturbation_histogram.png"
-        plt.savefig(histogram_path)
-        print(f"Histogram saved to: {histogram_path}")
-        
-        # Create a second histogram showing the count of perturbed patches
-        plt.figure(figsize=(10, 6))
-        plt.hist(patch_counts, bins=20, edgecolor='black')
-        plt.title('Distribution of Perturbed Patch Counts')
-        plt.xlabel('Number of Patches Perturbed')
-        plt.ylabel('Number of Images')
-        plt.axvline(np.mean(patch_counts), color='red', linestyle='dashed', linewidth=2, label=f'Mean: {np.mean(patch_counts):.2f}')
-        plt.axvline(np.median(patch_counts), color='green', linestyle='dashed', linewidth=2, label=f'Median: {np.median(patch_counts):.2f}')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        # Save the second histogram
-        histogram_path2 = Path(mask_dir).parent / "perturbation_count_histogram.png"
-        plt.savefig(histogram_path2)
-        print(f"Patch count histogram saved to: {histogram_path2}")
-    except Exception as e:
-        print(f"Could not create histogram: {e}")
-    
-    return stats
+    return perturbed_image_paths

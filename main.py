@@ -1,16 +1,38 @@
 import pipeline as pipe
+import torch
+import gc
+import analysis
+import sd
+
+def clear_gpu_memory():
+    """Explicitly clear PyTorch CUDA cache and run garbage collection"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
 
 def main():
     processed_images = pipe.preprocess_dataset(
-        source_dir="./chexpert",  # Path to the cheXpert dataset
-        dest_dir="./images",      # Destination directory
-        target_size=(224, 224),   # Target size for resizing
+        source_dir="./chexpert",
+        dest_dir="./images",
+        target_size=(224, 224),
     )
+    
+    # Run original classification
     results_df = pipe.classify()
-    perturbed_paths = pipe.perturb_low_attribution_areas(results_df, percentile_threshold=10, strength=0.2)
-    perturbed_results_df = pipe.classify("./results/perturbed", "_perturbed")
-    pipe.compare_attributions(results_df, perturbed_results_df)
-
-
+    
+    # Load SD model
+    sd_pipe = sd.load_model()
+    
+    perturbed_paths = pipe.perturb_all_patches(
+        results_df,
+        sd_pipe=sd_pipe,
+        patch_size=16,  # Size of each patch
+        strength=0.2,   # Perturbation strength
+        max_images=100    # Process only one image for testing (remove or set to None for all)
+    )
+    print(f"Generated {len(perturbed_paths)} perturbed patch images")
+    perturbed_results_df = pipe.classify("./results/patches", "_perturbed")
+    comparison_df = analysis.compare_attributions(results_df, perturbed_results_df)
+    
 if __name__ == "__main__":
     main()
