@@ -192,7 +192,7 @@ class TransLRPExplainer:
         else:
             plt.show()
 
-def explain_image(image_path, model_name="codewithdark/vit-chest-xray", method="transformer_attribution", save_dir="./explanations"):
+def explain_image(image_path, model_name="codewithdark/vit-chest-xray", method="transformer_attribution", save_dir="./explanations", visualize=False):
     """Generate and visualize an explanation for an image"""
     os.makedirs(save_dir, exist_ok=True)
     
@@ -212,11 +212,11 @@ def explain_image(image_path, model_name="codewithdark/vit-chest-xray", method="
     inspect_attribution(attribution)
     
     # Visualize and save
-    base_filename = os.path.splitext(os.path.basename(image_path))[0]
-    save_path = os.path.join(save_dir, f"{base_filename}_{method}.png")
-    explainer.visualize(image, attribution, save_path=save_path)
-    
-    print(f"Explanation saved to {save_path}")
+    if visualize:
+        base_filename = os.path.splitext(os.path.basename(image_path))[0]
+        save_path = os.path.join(save_dir, f"{base_filename}_{method}.png")
+        explainer.visualize(image, attribution, save_path=save_path)
+        print(f"Explanation saved to {save_path}")
     
     return results, attribution
 
@@ -256,7 +256,7 @@ def inspect_attribution(attribution):
     plt.savefig(os.path.join("./explanations/", f"attribution_histogram.png"))
     plt.show()
 
-def explain_attribution_diff(attribution, perturbed_attribution, np_mask, base_name=None, save_dir="./explanations"):
+def explain_attribution_diff(attribution, perturbed_attribution, np_mask, base_name=None, save_dir="./explanations", visualize=False):
     """
     Compare original and perturbed attribution maps, focusing on masked areas.
     
@@ -328,45 +328,46 @@ def explain_attribution_diff(attribution, perturbed_attribution, np_mask, base_n
     print(f"{'Mean':20} {orig_mean:.6f}{' '*9} {pert_mean:.6f}{' '*9} {diff_mean:.6f}")
     print(f"{'Median':20} {orig_median:.6f}{' '*9} {pert_median:.6f}{' '*9} {diff_median:.6f}")
     
-    # Create visualizations
-    fig, axs = plt.subplots(1, 3, figsize=(18, 6))
-    
-    # Original attribution (masked)
-    im0 = axs[0].imshow(masked_original, cmap='viridis')
-    axs[0].set_title('Original Attribution\n(Perturbed Areas Only)')
-    axs[0].axis('off')
-    plt.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04)
-    
-    # Perturbed attribution (masked)
-    im1 = axs[1].imshow(masked_perturbed, cmap='viridis')
-    axs[1].set_title('Perturbed Attribution\n(Perturbed Areas Only)')
-    axs[1].axis('off')
-    plt.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
-    
-    # Difference
-    im2 = axs[2].imshow(masked_diff, cmap='coolwarm', vmin=-max(abs(diff_min), abs(diff_max)), vmax=max(abs(diff_min), abs(diff_max)))
-    axs[2].set_title('Difference\n(Perturbed - Original)')
-    axs[2].axis('off')
-    plt.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
-    
-    plt.tight_layout()
-    comparison_path = os.path.join(save_dir, f"{base_name}_comparison.png")
-    plt.savefig(comparison_path)
-    plt.close() 
-    
-    # Distribution of difference values
-    plt.figure(figsize=(10, 6))
-    plt.hist(diff_masked_values.flatten(), bins=50)
-    plt.title('Distribution of Attribution Differences in Perturbed Areas')
-    plt.xlabel('Difference Value (Perturbed - Original)')
-    plt.ylabel('Frequency')
-    plt.axvline(0, color='r', linestyle='dashed', linewidth=1, label='No Change')
-    plt.axvline(diff_mean, color='g', linestyle='dashed', linewidth=1, label=f'Mean: {diff_mean:.4f}')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    histogram_path = os.path.join(save_dir, f"{base_name}_histogram.png")
-    plt.savefig(histogram_path)
-    plt.close() 
+    if visualize:
+        # Create visualizations
+        fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+        
+        # Original attribution (masked)
+        im0 = axs[0].imshow(masked_original, cmap='viridis')
+        axs[0].set_title('Original Attribution\n(Perturbed Areas Only)')
+        axs[0].axis('off')
+        plt.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04)
+        
+        # Perturbed attribution (masked)
+        im1 = axs[1].imshow(masked_perturbed, cmap='viridis')
+        axs[1].set_title('Perturbed Attribution\n(Perturbed Areas Only)')
+        axs[1].axis('off')
+        plt.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
+        
+        # Difference
+        im2 = axs[2].imshow(masked_diff, cmap='coolwarm', vmin=-max(abs(diff_min), abs(diff_max)), vmax=max(abs(diff_min), abs(diff_max)))
+        axs[2].set_title('Difference\n(Perturbed - Original)')
+        axs[2].axis('off')
+        plt.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
+        
+        plt.tight_layout()
+        comparison_path = os.path.join(save_dir, f"{base_name}_comparison.png")
+        plt.savefig(comparison_path)
+        plt.close() 
+        
+        # Distribution of difference values
+        plt.figure(figsize=(10, 6))
+        plt.hist(diff_masked_values.flatten(), bins=50)
+        plt.title('Distribution of Attribution Differences in Perturbed Areas')
+        plt.xlabel('Difference Value (Perturbed - Original)')
+        plt.ylabel('Frequency')
+        plt.axvline(0, color='r', linestyle='dashed', linewidth=1, label='No Change')
+        plt.axvline(diff_mean, color='g', linestyle='dashed', linewidth=1, label=f'Mean: {diff_mean:.4f}')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        histogram_path = os.path.join(save_dir, f"{base_name}_histogram.png")
+        plt.savefig(histogram_path)
+        plt.close() 
     
     # Calculate percentage of masked area where attribution increased/decreased
     increased = np.sum(diff_masked_values > 0) / diff_masked_values.size * 100

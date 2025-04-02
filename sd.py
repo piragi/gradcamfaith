@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from diffusers import StableDiffusionInpaintPipeline, DDIMScheduler
-from PIL import Image
+from PIL import Image, ImageStat
 from typing import Tuple, Union, Literal
 from torchvision import transforms
 from skimage.metrics import structural_similarity as ssim
@@ -509,3 +509,16 @@ def perturb_single_patch(model_pipe, image_identifier, patch_info, strength=0.2)
     result_image = Image.fromarray(result)
     
     return result_image, np_mask
+
+def mean_image_patch(image_identifier: str, patch_info: Union[int, int, int]) -> Image.Image:
+    patient_id, original_filename = image_identifier
+    x, y, patch_size = patch_info
+
+    image = Image.open(f'./images/{patient_id}_{original_filename}.jpg')
+    mean_channels = ImageStat.Stat(image).mean
+    mean_tuples = tuple(int(channel) for channel in mean_channels)
+    patch = Image.new("RGB", (patch_size, patch_size), mean_tuples)
+    np_mask = np.zeros((224, 224), dtype=bool)
+    np_mask[y:y+patch_size, x:x+patch_size] = True
+    image.paste(patch, (x,y))
+    return image, np_mask

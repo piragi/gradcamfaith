@@ -277,25 +277,36 @@ def perturb_all_patches(results_df, sd_pipe, patch_size=16, strength=0.2, max_im
 
                 if perturbed_image_path.exists():
                     perturbed_image_paths.append(perturbed_image_path)
-                    continue
+                else: 
+                    try:
+                        result_image, np_mask = sd.perturb_single_patch(
+                            sd_pipe,
+                            (patient_id, original_filename),
+                            (x, y, patch_size),
+                            strength=strength
+                        )
+                        
+                        # Save the perturbed image
+                        result_image.save(perturbed_image_path)
+                        np.save(mask_path, np_mask)
+                        perturbed_image_paths.append(perturbed_image_path)
+                        
+                        print(f"Perturbed patch {patch_id} at ({x}, {y}) - Attribution: {mean_attribution:.4f}")
+
+                    except Exception as e:
+                        print(f"Error perturbing patch {patch_id} in {processed_filename}: {e}")
+                        continue
                 
-                try:
-                    result_image, np_mask = sd.perturb_single_patch(
-                        sd_pipe,
-                        (patient_id, original_filename),
-                        (x, y, patch_size),
-                        strength=strength
-                    )
-                    
-                    # Save the perturbed image
-                    result_image.save(perturbed_image_path)
-                    np.save(mask_path, np_mask)
-                    perturbed_image_paths.append(perturbed_image_path)
-                    
-                    print(f"Perturbed patch {patch_id} at ({x}, {y}) - Attribution: {mean_attribution:.4f}")
-                    
-                except Exception as e:
-                    print(f"Error perturbing patch {patch_id} in {processed_filename}: {e}")
-                    continue
-    
+                mean_id = f"{patient_id}_{original_filename}_patch{patch_id}_x{x}_y{y}_mean"
+                mean_image_path = perturbed_dir / f'{mean_id}.jpg'
+                mask_path = mask_dir / f'{mean_id}_mask.npy'
+
+                if mean_image_path.exists():
+                    perturbed_image_paths.append(mean_image_path)
+                else:
+                    mean_image, mean_mask = sd.mean_image_patch((patient_id, original_filename), (x,y,patch_size))
+                    mean_image.save(mean_image_path)
+                    np.save(mask_path, mean_mask)
+                    perturbed_image_paths.append(mean_image_path)
+
     return perturbed_image_paths

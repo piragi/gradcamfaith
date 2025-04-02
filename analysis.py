@@ -166,3 +166,97 @@ def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df
         print("Warning: No comparison results were generated.")
     
     return comparison_df
+
+def calculate_saco_with_details(data_path: str = "./results/patch_attribution_comparisons.csv", method: str = "mean"):
+    data_df = pd.read_csv(data_path)
+    if method:
+        data_df = data_df[data_df['perturbed_image'].str.contains(f"_{method}.jpg")]
+    
+    results = {}
+    pair_data = {}
+    
+    for image_name, image_data in data_df.groupby('original_image'):
+        image_data = image_data.sort_values('mean_attribution', ascending=False).reset_index(drop=True)
+        attributions = image_data['mean_attribution'].values
+        confidence_impacts = image_data['confidence_delta_abs'].values
+        patch_ids = image_data['patch_id'].values
+        
+        saco_score, image_pair_data = calculate_image_saco_with_details(
+            attributions, confidence_impacts, patch_ids)
+        
+        results[image_name] = saco_score
+        pair_data[image_name] = image_pair_data
+        print(f"Calculated SaCo for {image_name}: {saco_score:.4f}")
+    
+    print(f"Average SaCo score: {sum(list(results.values())) / len(results)}")
+    return results, pair_data
+
+def calculate_image_saco_with_details(attributions, confidence_impacts, patch_ids):
+    """Calculate SaCo and return detailed pair-wise comparison data"""
+    F = 0
+    total_weight = 0
+    pairs_data = []
+    
+    for i in range(len(attributions)-1):
+        for j in range(i+1, len(attributions)):
+            attr_diff = attributions[i] - attributions[j]
+            impact_i, impact_j = confidence_impacts[i], confidence_impacts[j]
+            patch_i, patch_j = patch_ids[i], patch_ids[j]
+            
+            # Calculate weight for SaCo
+            weight = attr_diff if impact_i >= impact_j else -attr_diff
+            F += weight
+            total_weight += abs(weight)
+            
+            # Store pair data
+            pair_info = {
+                'patch_i': patch_i,
+                'patch_j': patch_j,
+                'is_faithful': impact_i >= impact_j,
+                'weight': weight
+            }
+            pairs_data.append(pair_info)
+    
+    F /= total_weight
+    return F, pd.DataFrame(pairs_data)
+
+def analyze_patch_metrics(pair_data):
+    """Analyze the pair-wise comparison data and return a flat DataFrame with patch-specific metrics"""
+    rows = []
+    
+    for image_name, image_pairs in pair_data.items():
+        unique_patches = set(image_pairs['patch_i'].tolist() + image_pairs['patch_j'].tolist())
+        
+        for patch_id in unique_patches:
+            pairs_with_i = image_pairs[image_pairs['patch_i'] == patch_id]
+            pairs_with_j = image_pairs[image_pairs['patch_j'] == patch_id]
+            
+            # For pairs where patch is the first one (i)
+            weights_i = pairs_with_i['weight'].tolist()
+            faithful_i = pairs_with_i['is_faithful'].sum()
+            
+            # For pairs where patch is the second one (j)
+            weights_j = pairs_with_j['weight'].tolist()
+            faithful_j = pairs_with_j['is_faithful'].sum()
+            
+            # Combine data from both directions
+            all_weights = weights_i + weights_j
+            total_faithful = faithful_i + faithful_j
+            total_pairs = len(pairs_with_i) + len(pairs_with_j)
+            
+            # Calculate patch-specific SaCo
+            patch_saco = sum(all_weights) / sum(abs(w) for w in all_weights) if all_weights else 0
+            
+            # Create a row for this patch
+            row = {
+                'image_name': image_name,
+                'patch_id': patch_id,
+                'faithful_pairs_count': total_faithful,
+                'unfaithful_pairs_count': total_pairs - total_faithful,
+                'faithful_pairs_pct': (total_faithful / total_pairs * 100) if total_pairs else 0,
+                'patch_saco': patch_saco
+            }
+            
+            rows.append(row)
+
+    return pd.DataFrame(rows)
