@@ -1,9 +1,12 @@
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 import pandas as pd
 from pathlib import Path
 from PIL import Image
 import explanation as expl
 import sd
+import os
 
 OUTPUT_DIR = "./results"
 
@@ -260,3 +263,106 @@ def analyze_patch_metrics(pair_data):
             rows.append(row)
 
     return pd.DataFrame(rows)
+
+def analyze_faithfulness_vs_correctness(saco_scores):
+    """
+    Analyze the relationship between attribution faithfulness and prediction correctness
+    """
+    # Convert SaCo scores to DataFrame
+    image_metrics = pd.DataFrame.from_dict(saco_scores, orient='index', columns=['image_saco'])
+    image_metrics.index.name = 'image_name'
+    image_metrics.reset_index(inplace=True)
+    
+    # Load validation labels
+    valid_df = pd.read_csv("valid.csv")
+    
+    # Print debugging info
+    print(f"Number of images with SaCo scores: {len(image_metrics)}")
+    print(f"Number of images in validation set: {len(valid_df)}")
+    
+    # Extract patient ID from paths for matching
+    image_metrics['patient_id'] = image_metrics['image_name'].apply(
+        lambda x: x.split('/')[-1].split('_')[0].replace('patient', ''))
+    
+    valid_df['patient_id'] = valid_df['Path'].apply(
+        lambda x: x.split('/')[-3].replace('patient', ''))
+    
+    # Print sample entries to verify
+    print("\nSample SaCo image names:")
+    print(image_metrics['image_name'].head())
+    print("\nExtracted patient IDs:")
+    print(image_metrics['patient_id'].head())
+    
+    print("\nSample validation paths:")
+    print(valid_df['Path'].head())
+    print("\nExtracted validation patient IDs:")
+    print(valid_df['patient_id'].head())
+    
+    # Target classes in order
+    target_classes = ['Cardiomegaly', 'Edema', 'Consolidation', 'Pneumonia', 'No Finding']
+    
+    # Load classification results
+    class_results = pd.read_csv("./results/classification_results_perturbed.csv")
+    
+    # Extract original image patient ID
+    class_results['original_image'] = class_results['image_path'].apply(
+        lambda x: 'images/' + x.split('/')[-1].split('_patch')[0] + '.jpg')
+    
+    class_results['patient_id'] = class_results['original_image'].apply(
+        lambda x: x.split('/')[-1].split('_')[0].replace('patient', ''))
+    
+    # Parse the probabilities column
+    class_results['prob_list'] = class_results['probabilities'].apply(
+        lambda x: eval(x))
+    
+    # Merge data
+    # First merge SaCo scores with classification results
+    merged_df = image_metrics.merge(
+        class_results[['original_image', 'patient_id', 'predicted_class', 
+                      'predicted_class_idx', 'confidence', 'prob_list']].drop_duplicates('original_image'),
+        on=['patient_id'], how='inner')
+    
+    print(f"\nAfter first merge - matching records: {len(merged_df)}")
+    
+    # Then merge with validation data
+    results_df = merged_df.merge(
+        valid_df[['patient_id'] + target_classes], 
+        on='patient_id', how='inner')
+    
+    print(f"After second merge - matching records: {len(results_df)}")
+    
+    # If we have matches, proceed with analysis
+    if len(results_df) > 0:
+        # Determine if prediction is correct
+        results_df['predicted_class'] = results_df['predicted_class'].apply(
+            lambda x: target_classes[int(x.split('_')[1])])
+        
+        # Add is_correct column
+        results_df['is_correct'] = results_df.apply(
+            lambda row: row[row['predicted_class']] == 1.0, axis=1)
+        
+        # Calculate metrics
+        correct_saco = results_df[results_df['is_correct']]['image_saco'].mean()
+        incorrect_saco = results_df[~results_df['is_correct']]['image_saco'].mean()
+        
+        print(f"Average SaCo for correct predictions: {correct_saco:.4f}")
+        print(f"Average SaCo for incorrect predictions: {incorrect_saco:.4f}")
+        
+        # Plot results
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(x='is_correct', y='image_saco', data=results_df)
+        plt.title('SaCo Scores by Prediction Correctness')
+        plt.xlabel('Prediction Correct')
+        plt.ylabel('SaCo Score')
+        plt.savefig('faithfulness_vs_correctness.png')
+        plt.close()
+        
+        return results_df
+    else:
+        print("No matching records found. Check the file naming patterns and patient IDs.")
+        # Let's examine some examples to help debug
+        print("\nSample image names from SaCo analysis:")
+        print(image_metrics['image_name'].head())
+        print("\nSample paths from validation data:")
+        print(valid_df['Path'].head())
+        return None

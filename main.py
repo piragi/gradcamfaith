@@ -76,5 +76,6 @@ def run_saco():
         plt.savefig(f'./results/saco_heatmap_{os.path.basename(image_name)}.png')
         plt.close()
 
+    analysis.analyze_faithfulness_vs_correctness(saco_scores)
 if __name__ == "__main__":
     run_saco()
