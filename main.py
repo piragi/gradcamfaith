@@ -2,7 +2,6 @@ import pipeline as pipe
 import torch
 import gc
 import analysis
-import sd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
@@ -16,28 +15,26 @@ def clear_gpu_memory():
     gc.collect()
 
 def main():
-    processed_images = pipe.preprocess_dataset(
+    pipe.preprocess_dataset(
         source_dir="./chexpert",
         dest_dir="./images",
         target_size=(224, 224),
     )
     
     # Run original classification
-    results_df = pipe.classify()
-    
-    # Load SD model
-    sd_pipe = sd.load_model()
+    results_df = pipe.classify("./images")
     
     perturbed_paths = pipe.perturb_all_patches(
         results_df,
-        sd_pipe=sd_pipe,
+        sd_pipe=None,
         patch_size=16,  # Size of each patch
         strength=0.2,   # Perturbation strength
-        max_images=100    # Process only one image for testing (remove or set to None for all)
+        max_images=100, # Process only one image for testing (remove or set to None for all)
+        method = "mean"
     )
     print(f"Generated {len(perturbed_paths)} perturbed patch images")
     perturbed_results_df = pipe.classify("./results/patches", "_perturbed")
-    comparison_df = analysis.compare_attributions(results_df, perturbed_results_df)
+    analysis.compare_attributions(results_df, perturbed_results_df)
 
 def run_saco():
     saco_scores, pair_data = analysis.calculate_saco_with_details()
@@ -78,4 +75,4 @@ def run_saco():
 
     analysis.analyze_faithfulness_vs_correctness(saco_scores)
 if __name__ == "__main__":
-    run_saco()
+    main()

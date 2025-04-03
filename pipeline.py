@@ -1,7 +1,6 @@
-import explanation as expl
-import transformer as tf
-from typing import Optional, Tuple, List
-import sd
+import transformer as trans
+from typing import Optional, List, Dict, Any, Tuple
+import perturbation
 import pandas as pd
 from pathlib import Path
 import numpy as np
@@ -13,34 +12,6 @@ DATA_DIR = "./images"
 OUTPUT_DIR = "./results"
 CACHE_DIR = "./cache"
 PATCH_DIR = "./results/patches"
-
-def classify_image(image, model=None, processor=None, label_columns=None):
-    # Use provided models if available, otherwise load them
-    if model is None or processor is None or label_columns is None:
-        processor, model, label_columns = tf.load_classifier()
-    
-    results = tf.predict(image, model, processor, label_columns)
-    print(results)
-    return results
-
-def perturb_image(image: str, patch_position: Tuple[int, int], strength: float, sd_pipe=None):
-    # Use provided model if available, otherwise load it
-    if sd_pipe is None:
-        sd_pipe = sd.load_model()
-    
-    perturbed_image, similarity = sd.perturb_patch(sd_pipe, image, patch_position, strength=strength)
-    print(similarity)
-    return perturbed_image
-
-def perturb_classify(image: str):
-    results, attribution = expl.explain_image(image)
-    print(results)
-
-    sd_pipe = sd.load_model()
-    result_image, np_mask = sd.perturb_non_attribution(sd_pipe, image, attribution, strength=0.2, percentile_threshold=20)
-    results, perturbed_attribution = expl.explain_image("./images/xray_perturbed.jpg")
-    expl.explain_attribution_diff(attribution, perturbed_attribution, np_mask)
-    print(results)
 
 def preprocess_dataset(source_dir: str = "./chexpert", 
                        dest_dir: str = "./images", 
@@ -61,8 +32,8 @@ def preprocess_dataset(source_dir: str = "./chexpert",
     """
     source_path = Path(source_dir)
     dest_path = Path(dest_dir)
-    dest_path.mkdir(exist_ok=True, parents=True)
-    
+    ensure_directories([dest_path]) 
+
     image_files = list(source_path.glob("**/*.jpg"))
     
     image_files = [img for img in image_files if "_frontal" in img.name]
@@ -93,7 +64,54 @@ def preprocess_dataset(source_dir: str = "./chexpert",
     print(f"Preprocessing complete. {len(processed_paths)} images saved to {dest_dir}")
     return processed_paths
 
-def classify(data_directory: Optional[str] = None, output_suffix: str = "") -> pd.DataFrame:
+def ensure_directories(directories: List[Path]) -> None:
+    for directory in directories:
+        directory.mkdir(exist_ok=True, parents=True)
+
+def try_load_from_cache(cache_path: Path) -> Optional[Dict[str, Any]]:
+    if cache_path.exists():
+        try:
+            with open(cache_path, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+def save_to_cache(cache_path: Path, result: Dict[str, Any]) -> None:
+    with open(cache_path, 'w') as f:
+        json.dump(result, f)
+
+def classify_explain_single_image(image_path: Path, explainer: trans.TransLRPExplainer, dirs: Dict[str, Path], output_suffix: str) -> Dict[str, Any]:
+    cache_path = dirs['cache'] / f"{image_path.stem}_classification{output_suffix}.json"
+    cached_result = try_load_from_cache(cache_path)
+    if cached_result: return cached_result
+
+    image, classification = explainer.classify_image(image_path=str(image_path))
+    vis_path = dirs["attribution"] / f"{image_path.stem}_vis.png"
+    image.save(vis_path)
+
+    image, attribution = explainer.explain(image_path, classification['predicted_class_idx'])
+    attribution_path = dirs["attribution"] / f"{image_path.stem}_attribution.npy"
+    np.save(attribution_path, attribution)
+    # explainer.visualize(image, attribution, save_path=str(vis_path))
+
+    vit_input_path = dirs["vit_inputs"] / f"{image_path.stem}{output_suffix}.jpg"
+    result = {
+                "image_path": str(image_path),
+                "vit_input_path": str(vit_input_path),
+                "predicted_class": classification["predicted_class_label"],
+                "predicted_class_idx": classification["predicted_class_idx"],
+                "confidence": float(classification["probabilities"][classification["predicted_class_idx"]]),
+                "probabilities": classification["probabilities"].tolist(),
+                "attribution_path": str(attribution_path),
+                "attribution_vis_path": str(vis_path)
+            }
+    
+    save_to_cache(cache_path, result)
+
+    return result
+
+def classify(data_directory: str, output_suffix: str = "") -> pd.DataFrame:
     """
     Classify images and generate attribution maps.
     
@@ -109,128 +127,140 @@ def classify(data_directory: Optional[str] = None, output_suffix: str = "") -> p
     cache_dir = Path(CACHE_DIR)
     attribution_dir = output_dir / f"attributions{output_suffix}"
     vit_inputs_dir = output_dir / "vit_inputs"
-    
-    if data_directory is None:
-        data_dir = Path(DATA_DIR)
-    else:
-        data_dir = Path(data_directory)
-    
+    data_dir = Path(data_directory)
+
+    dirs = {
+        "output": output_dir,
+        "cache": cache_dir,
+        "attribution": attribution_dir,
+        "vit_inputs": vit_inputs_dir
+    }
+
+    ensure_directories(list(dirs.values()))
     image_paths = list(data_dir.glob("*.jpg"))
     
-    for directory in [output_dir, cache_dir, attribution_dir, vit_inputs_dir]:
-        directory.mkdir(exist_ok=True, parents=True)
-    
-    explainer = expl.TransLRPExplainer()
+    explainer = trans.TransLRPExplainer()
     results = []
     
     for image_path in image_paths:
-        # check cache
-        cache_file = cache_dir / f"{image_path.stem}_classification{output_suffix}.json"
-        if cache_file.exists():
-            with open(cache_file, 'r') as f:
-                result = json.load(f)
-                results.append(result)
-                continue
-        
-        image, classification = explainer.classify_image(image_path=str(image_path))
-
-        # save classified image for similarity comparisons
-        vit_input_path = vit_inputs_dir / f"{image_path.stem}{output_suffix}.jpg"
-        image.save(vit_input_path)
-
-        image, attribution = explainer.explain(image_path, classification['predicted_class_idx'])
-        attribution_path = attribution_dir / f"{image_path.stem}_attribution.npy"
-        np.save(attribution_path, attribution)
-        vis_path = attribution_dir / f"{image_path.stem}_vis.png"
-        explainer.visualize(image, attribution, save_path=str(vis_path))
-
-        # Convert probabilities to a list for JSON serialization
-        probabilities_list = classification["probabilities"].tolist()
-
-        
-        result = {
-            "image_path": str(image_path),
-            "vit_input_path": str(vit_input_path),
-            "predicted_class": classification["predicted_class_label"],
-            "predicted_class_idx": classification["predicted_class_idx"],
-            "confidence": float(classification["probabilities"][classification["predicted_class_idx"]]),
-            "probabilities": probabilities_list,
-            "attribution_path": str(attribution_path),
-            "attribution_vis_path": str(vis_path)
-        }
-        
-        with open(cache_file, 'w') as f:
-            json.dump(result, f)
-        
-        results.append(result)
+        try:
+            result = classify_explain_single_image(image_path, explainer, dirs, output_suffix)
+            results.append(result)
+        except Exception as e:
+            print(f"Error processing {image_path}: {e}")
+            continue
     
     df = pd.DataFrame(results)
     df.to_csv(output_dir / f"classification_results{output_suffix}.csv", index=False)
     
     return df
 
-def perturb_low_attribution_areas(results_df: pd.DataFrame, sd_pipe: StableDiffusionInpaintPipeline, percentile_threshold: int = 15, strength: float = 0.2) -> List[Path]:
-    """
-    Perturb low attribution areas of all images and save the results.
+def generate_perturbed_identifier(patient_id: str, original_filename: str, patch_id: int, x: int, y: int, strength: float, method: str = "sd") -> str:
+    if method == "sd":
+        return f"{patient_id}_{original_filename}_patch{patch_id}_x{x}_y{y}_s{strength}"
+    else:
+        return f"{patient_id}_{original_filename}_patch{patch_id}_x{x}_y{y}_mean"
+
+def perturb_single_patch(
+    patient_id: str,
+    original_filename: str,
+    patch_info: Tuple[int, int, int],
+    sd_pipe: StableDiffusionInpaintPipeline,
+    output_dirs: Dict[str, Path],
+    method: str = "sd",
+    strength: float = 0.2
+) -> Optional[Path]:
+    patch_id, x, y = patch_info
+    patch_size = 16  # Standard patch size
     
-    Args:
-        results_df: DataFrame with classification results (from run_initial_classify)
-        percentile_threshold: Percentile threshold for determining attribution regions
-        strength: Perturbation strength
+    perturbed_id = generate_perturbed_identifier(patient_id, original_filename, patch_id, x, y, strength, method) 
+    perturbed_image_path = output_dirs["perturbed"] / f'{perturbed_id}.jpg'
+    mask_path = output_dirs["masks"] / f'{perturbed_id}_mask.npy'
+    
+    # Skip if already exists
+    if perturbed_image_path.exists():
+        return perturbed_image_path
+    
+    try:
+        if method == "sd":
+            result_image, np_mask = perturbation.perturb_single_patch(
+                sd_pipe,
+                (patient_id, original_filename),
+                (x, y, patch_size),
+                strength=strength
+            )
+            print(f"Perturbed patch {patch_id} at ({x}, {y})")
+        else:
+            result_image, np_mask = perturbation.mean_image_patch(
+                (patient_id, original_filename), 
+                (x, y, patch_size)
+            )
+            print(f"Created mean patch {patch_id} at ({x}, {y})")
         
-    Returns:
-        List of paths to perturbed images
-    """
-    output_dir = Path(OUTPUT_DIR)
-    perturbed_dir = output_dir / "perturbed"
-    mask_dir = output_dir / "masks"
-    for directory in [perturbed_dir, mask_dir]:
-        directory.mkdir(exist_ok=True, parents=True)
-
-    perturbed_image_paths = []
-
-    for _, row in results_df.iterrows():
-        processed_filename = Path(row["image_path"]).name
-        print(processed_filename)
-        patient_id, original_filename = processed_filename.split('_', 1)
-        original_filename = original_filename.split('.')[0]
-        attribution_path = row["attribution_path"]
-        exp_id = f"{patient_id}_{original_filename}_non_attr_p{percentile_threshold}_s{strength}"
-        perturbed_image_path = perturbed_dir / f'{exp_id}.jpg'
-        mask_path = mask_dir / f'{exp_id}_mask.npy'
-
-        if perturbed_image_path.exists():
-            perturbed_image_paths.append(perturbed_image_path)
-            continue
-
-        attribution = np.load(attribution_path)
-        result_image, np_mask = sd.perturb_non_attribution(
-            sd_pipe, 
-            (patient_id, original_filename), 
-            attribution, 
-            percentile_threshold=percentile_threshold,
-            strength=strength
-        )
-        
-        # Save the perturbed image
         result_image.save(perturbed_image_path)
         np.save(mask_path, np_mask)
-        perturbed_image_paths.append(perturbed_image_path)
+        return perturbed_image_path
         
-        print(f"Perturbed and saved: {perturbed_image_path}")
-    
-    return perturbed_image_paths
+    except Exception as e:
+        print(f"Error processing {perturbed_id}: {e}")
+        return None
 
-def perturb_all_patches(results_df, sd_pipe, patch_size=16, strength=0.2, max_images=None):
+def perturb_image_patches(
+    image_path: str,
+    sd_pipe: Optional[StableDiffusionInpaintPipeline],
+    output_dirs: Dict[str, Path],
+    patch_size: int = 16,
+    strength: float = 0.2,
+    method: str = "mean"
+) -> List[Path]:
+    perturbed_paths = []
+    
+    processed_filename = Path(image_path).name
+    patient_id, original_filename = processed_filename.split('_', 1)
+    original_filename = original_filename.split('.')[0]
+    
+    # Load image and attribution
+    image = Image.open(image_path).convert('RGB')
+    width, height = image.size
+    
+    num_patches_x = width // patch_size
+    
+    for y in range(0, height - patch_size + 1, patch_size):
+        for x in range(0, width - patch_size + 1, patch_size):
+            patch_id = (y // patch_size) * num_patches_x + (x // patch_size)
+            
+            # Process with SD perturbation
+            perturbed_path = perturb_single_patch(
+                patient_id=patient_id,
+                original_filename=original_filename,
+                patch_info=(patch_id, x, y),
+                sd_pipe=sd_pipe,
+                output_dirs=output_dirs,
+                method=method,
+                strength=strength
+            )
+            if perturbed_path:
+                perturbed_paths.append(perturbed_path)
+    
+    return perturbed_paths
+
+def perturb_all_patches(
+    results_df: pd.DataFrame, 
+    sd_pipe: Optional[StableDiffusionInpaintPipeline] = None,
+    patch_size: int = 16, 
+    strength: float = 0.2, 
+    max_images: Optional[int] = None,
+    method: str = "mean"
+) -> List[Path]:
     """
-    Perturbs each individual patch in the images one by one and saves the results.
+    Perturbs patches in all images and saves the results.
     
     Args:
         results_df: DataFrame with classification results
-        sd_pipe: StableDiffusionInpaintPipeline instance (optional)
+        sd_pipe: StableDiffusionInpaintPipeline instance
         patch_size: Size of each patch to perturb
         strength: Perturbation strength
-        max_images: Maximum number of images to process (for testing)
+        max_images: Maximum number of images to process
         
     Returns:
         List of paths to perturbed images
@@ -238,75 +268,33 @@ def perturb_all_patches(results_df, sd_pipe, patch_size=16, strength=0.2, max_im
     output_dir = Path(OUTPUT_DIR)
     perturbed_dir = output_dir / "patches"
     mask_dir = output_dir / "patch_masks"
-    for directory in [perturbed_dir, mask_dir]:
-        directory.mkdir(exist_ok=True, parents=True)
-
-    perturbed_image_paths = []
     
-    if max_images:
-        processing_df = results_df.head(max_images)
-    else:
-        processing_df = results_df
-
-    for _, row in processing_df.iterrows():
-        image_path = row["image_path"]
-        image = Image.open(image_path).convert('RGB')
-        width, height = image.size
+    output_dirs = {
+        "perturbed": perturbed_dir,
+        "masks": mask_dir
+    }
+    ensure_directories(list(output_dirs.values()))
+    
+    perturbed_image_paths = []
+    processing_df = results_df.head(max_images) if max_images else results_df
+    
+    for idx, row in enumerate(processing_df.iterrows()):
+        _, row_data = row
+        image_path = row_data["image_path"]
+        attribution_path = row_data["attribution_path"]
         
-        processed_filename = Path(image_path).name
-        print(f"Processing: {processed_filename}")
-        patient_id, original_filename = processed_filename.split('_', 1)
-        original_filename = original_filename.split('.')[0]
-        attribution = np.load(row["attribution_path"])
+        print(f"Processing image {idx+1}/{len(processing_df)}: {Path(image_path).name}")
         
-        num_patches_x = width // patch_size
+        image_paths = perturb_image_patches(
+            image_path=image_path,
+            attribution_path=attribution_path,
+            sd_pipe=sd_pipe,
+            output_dirs=output_dirs,
+            patch_size=patch_size,
+            strength=strength,
+            method=method
+        )
         
-        # Process each patch
-        for y in range(0, height - patch_size + 1, patch_size):
-            for x in range(0, width - patch_size + 1, patch_size):
-                patch_id = (y // patch_size) * num_patches_x + (x // patch_size)
-                
-                # Calculate mean attribution in this patch
-                patch_attribution = attribution[y:y+patch_size, x:x+patch_size]
-                mean_attribution = np.mean(patch_attribution)
-                
-                # Create unique patch identifier
-                exp_id = f"{patient_id}_{original_filename}_patch{patch_id}_x{x}_y{y}_s{strength}"
-                perturbed_image_path = perturbed_dir / f'{exp_id}.jpg'
-                mask_path = mask_dir / f'{exp_id}_mask.npy'
-
-                if perturbed_image_path.exists():
-                    perturbed_image_paths.append(perturbed_image_path)
-                else: 
-                    try:
-                        result_image, np_mask = sd.perturb_single_patch(
-                            sd_pipe,
-                            (patient_id, original_filename),
-                            (x, y, patch_size),
-                            strength=strength
-                        )
-                        
-                        # Save the perturbed image
-                        result_image.save(perturbed_image_path)
-                        np.save(mask_path, np_mask)
-                        perturbed_image_paths.append(perturbed_image_path)
-                        
-                        print(f"Perturbed patch {patch_id} at ({x}, {y}) - Attribution: {mean_attribution:.4f}")
-
-                    except Exception as e:
-                        print(f"Error perturbing patch {patch_id} in {processed_filename}: {e}")
-                        continue
-                
-                mean_id = f"{patient_id}_{original_filename}_patch{patch_id}_x{x}_y{y}_mean"
-                mean_image_path = perturbed_dir / f'{mean_id}.jpg'
-                mask_path = mask_dir / f'{mean_id}_mask.npy'
-
-                if mean_image_path.exists():
-                    perturbed_image_paths.append(mean_image_path)
-                else:
-                    mean_image, mean_mask = sd.mean_image_patch((patient_id, original_filename), (x,y,patch_size))
-                    mean_image.save(mean_image_path)
-                    np.save(mask_path, mean_mask)
-                    perturbed_image_paths.append(mean_image_path)
-
+        perturbed_image_paths.extend(image_paths)
+    
     return perturbed_image_paths

@@ -4,9 +4,8 @@ import seaborn as sns
 import pandas as pd
 from pathlib import Path
 from PIL import Image
-import explanation as expl
-import sd
-import os
+import transformer as trans
+import perturbation
 
 OUTPUT_DIR = "./results"
 
@@ -71,7 +70,7 @@ def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df
             
             # Generate comparison visualization
             comparison_path = comparison_dir / f"{perturbed_filename}_comparison.png"
-            diff_stats = expl.explain_attribution_diff(
+            diff_stats = trans.explain_attribution_diff(
                 original_attribution,
                 perturbed_attribution,
                 np_mask,
@@ -84,7 +83,7 @@ def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df
             if "vit_input_path" in original_row and "vit_input_path" in perturbed_row:
                 original_vit_img = Image.open(original_row["vit_input_path"]).convert('RGB')
                 perturbed_vit_img = Image.open(perturbed_row["vit_input_path"]).convert('RGB')
-                ssim_score = sd.patch_similarity(original_vit_img, perturbed_vit_img)
+                ssim_score = perturbation.patch_similarity(original_vit_img, perturbed_vit_img)
             
             # Extract patch coordinates from filename
             x, y = -1, -1
