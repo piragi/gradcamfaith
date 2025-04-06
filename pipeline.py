@@ -81,16 +81,16 @@ def save_to_cache(cache_path: Path, result: Dict[str, Any]) -> None:
     with open(cache_path, 'w') as f:
         json.dump(result, f)
 
-def classify_explain_single_image(image_path: Path, explainer: trans.TransLRPExplainer, dirs: Dict[str, Path], output_suffix: str) -> Dict[str, Any]:
+def classify_explain_single_image(image_path: Path, vit: trans.ViT, dirs: Dict[str, Path], output_suffix: str) -> Dict[str, Any]:
     cache_path = dirs['cache'] / f"{image_path.stem}_classification{output_suffix}.json"
     cached_result = try_load_from_cache(cache_path)
     if cached_result: return cached_result
 
-    image, classification = explainer.classify_image(image_path=str(image_path))
+    image, classification = vit.classify_image(image_path=str(image_path))
     vis_path = dirs["attribution"] / f"{image_path.stem}_vis.png"
     image.save(vis_path)
 
-    image, attribution = explainer.explain(image_path, classification['predicted_class_idx'])
+    image, attribution = trans.transmm(vit, image_path, classification['predicted_class_idx'])
     attribution_path = dirs["attribution"] / f"{image_path.stem}_attribution.npy"
     np.save(attribution_path, attribution)
     # explainer.visualize(image, attribution, save_path=str(vis_path))
@@ -139,12 +139,12 @@ def classify(data_directory: str, output_suffix: str = "") -> pd.DataFrame:
     ensure_directories(list(dirs.values()))
     image_paths = list(data_dir.glob("*.jpg"))
     
-    explainer = trans.TransLRPExplainer()
+    vit = trans.ViT(method="transmm")
     results = []
     
     for image_path in image_paths:
         try:
-            result = classify_explain_single_image(image_path, explainer, dirs, output_suffix)
+            result = classify_explain_single_image(image_path, vit, dirs, output_suffix)
             results.append(result)
         except Exception as e:
             print(f"Error processing {image_path}: {e}")
@@ -189,13 +189,11 @@ def perturb_single_patch(
                 (x, y, patch_size),
                 strength=strength
             )
-            print(f"Perturbed patch {patch_id} at ({x}, {y})")
         else:
-            result_image, np_mask = perturbation.mean_image_patch(
+            result_image, np_mask = perturbation.perturb_patch_mean(
                 (patient_id, original_filename), 
                 (x, y, patch_size)
             )
-            print(f"Created mean patch {patch_id} at ({x}, {y})")
         
         result_image.save(perturbed_image_path)
         np.save(mask_path, np_mask)
@@ -281,13 +279,11 @@ def perturb_all_patches(
     for idx, row in enumerate(processing_df.iterrows()):
         _, row_data = row
         image_path = row_data["image_path"]
-        attribution_path = row_data["attribution_path"]
         
         print(f"Processing image {idx+1}/{len(processing_df)}: {Path(image_path).name}")
         
         image_paths = perturb_image_patches(
             image_path=image_path,
-            attribution_path=attribution_path,
             sd_pipe=sd_pipe,
             output_dirs=output_dirs,
             patch_size=patch_size,

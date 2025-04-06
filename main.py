@@ -75,4 +75,4 @@ def run_saco():
 
     analysis.analyze_faithfulness_vs_correctness(saco_scores)
 if __name__ == "__main__":
-    main()
+    run_saco()

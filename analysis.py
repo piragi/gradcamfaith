@@ -80,9 +80,9 @@ def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df
             
             # Calculate SSIM between the actual 224x224 ViT inputs
             ssim_score = None
-            if "vit_input_path" in original_row and "vit_input_path" in perturbed_row:
-                original_vit_img = Image.open(original_row["vit_input_path"]).convert('RGB')
-                perturbed_vit_img = Image.open(perturbed_row["vit_input_path"]).convert('RGB')
+            if "attribution_vis_path" in original_row and "attribution_vis_path" in perturbed_row:
+                original_vit_img = Image.open(original_row["attribution_vis_path"]).convert('RGB')
+                perturbed_vit_img = Image.open(perturbed_row["attribution_vis_path"]).convert('RGB')
                 ssim_score = perturbation.patch_similarity(original_vit_img, perturbed_vit_img)
             
             # Extract patch coordinates from filename
