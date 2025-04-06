@@ -1,4 +1,5 @@
 import torch
+import gc
 import torch.nn.functional as F
 import numpy as np
 from PIL import Image
@@ -6,10 +7,11 @@ import matplotlib.pyplot as plt
 import os
 from transformers import AutoImageProcessor, AutoModelForImageClassification
 from collections import OrderedDict
-from translrp.ViT_LRP import vit_base_patch16_224
+from translrp.ViT_LRP import vit_base_patch16_224 as vit_lrp
+from translrp.ViT_new import vit_base_patch16_224 as vit_mm
 
-class TransLRPExplainer:
-    def __init__(self, huggingface_model_name="codewithdark/vit-chest-xray", img_size=224):
+class ViT:
+    def __init__(self, huggingface_model_name="codewithdark/vit-chest-xray", img_size=224, method: str = "translrp"):
         """Initialize the TransLRP explainer"""
         self.img_size = img_size
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -24,11 +26,21 @@ class TransLRPExplainer:
         
         # Initialize Chefer's ViT model
         print("Initializing Chefer's ViT model")
-        self.model = vit_base_patch16_224(
-            pretrained=False,
-            img_size=img_size,
-            num_classes=self.num_classes
-        ).to(self.device)
+        if method == "translrp":
+            self.model = vit_lrp(
+                pretrained=False,
+                img_size=img_size,
+                num_classes=self.num_classes
+            ).to(self.device)
+        
+        else:
+            self.model = vit_mm(
+                pretrained=False,
+                img_size=img_size,
+                num_classes=self.num_classes
+            ).to(self.device)
+            self.model.eval()
+
         
         # Transfer weights and prepare model
         self._transfer_weights()
@@ -119,48 +131,6 @@ class TransLRPExplainer:
             "predicted_class_label": pred_class_label,
         }
     
-    def explain(self, image_path, target_class=None, method="transformer_attribution"):
-        """Generate an explanation for the prediction"""
-        # Preprocess image
-        img, input_tensor = self.preprocess_image(image_path)
-        
-        # Get prediction if no target class provided
-        if target_class is None:
-            with torch.no_grad():
-                outputs = self.model(input_tensor.detach())
-                target_class = outputs.argmax(dim=1).item()
-            label = self.label_columns.get(str(target_class), f"Class {target_class}")
-            print(f"Explaining prediction: {label} (Class {target_class})")
-        
-        # Forward pass with gradients
-        outputs = self.model(input_tensor)
-        
-        # Create one-hot encoding for the target class
-        one_hot = torch.zeros_like(outputs)
-        one_hot[0, target_class] = 1
-        
-        # Zero gradients and backward pass
-        self.model.zero_grad()
-        outputs.backward(gradient=one_hot, retain_graph=True)
-        
-        # Generate explanation
-        explanation = self.model.relprop(
-            torch.eye(outputs.shape[1], device=outputs.device)[target_class].unsqueeze(0),
-            method=method,
-            alpha=1.0
-        )
-        
-        # Process the explanation
-        num_patches_side = int(np.sqrt(explanation.shape[1]))
-        attribution = explanation.reshape(1, 1, num_patches_side, num_patches_side)
-        attribution = F.interpolate(attribution, size=(self.img_size, self.img_size), mode='bilinear')
-        attribution = attribution.squeeze().cpu().detach().numpy()
-        
-        # Normalize for visualization
-        attribution = (attribution - attribution.min()) / (attribution.max() - attribution.min() + 1e-8)
-        
-        return np.array(img), attribution
-    
     def visualize(self, image, attribution, save_path=None, alpha=0.5):
         """Visualize the attribution map overlaid on the original image"""
         plt.figure(figsize=(15, 5))
@@ -192,12 +162,164 @@ class TransLRPExplainer:
         else:
             plt.show()
 
+def translrp(vit: ViT, image_path, target_class=None, method="transformer_attribution"):
+    """Generate an explanation for the prediction"""
+    # Preprocess image
+    img, input_tensor = vit.preprocess_image(image_path)
+    
+    # Get prediction if no target class provided
+    if target_class is None:
+        with torch.no_grad():
+            outputs = vit.model(input_tensor.detach())
+            target_class = outputs.argmax(dim=1).item()
+        label = vit.label_columns.get(str(target_class), f"Class {target_class}")
+        print(f"Explaining prediction: {label} (Class {target_class})")
+    
+    # Forward pass with gradients
+    outputs = vit.model(input_tensor)
+    
+    # Create one-hot encoding for the target class
+    one_hot = torch.zeros_like(outputs)
+    one_hot[0, target_class] = 1
+    
+    # Zero gradients and backward pass
+    vit.model.zero_grad()
+    outputs.backward(gradient=one_hot, retain_graph=True)
+    
+    # Generate explanation
+    explanation = vit.model.relprop(
+        torch.eye(outputs.shape[1], device=outputs.device)[target_class].unsqueeze(0),
+        method=method,
+        alpha=1.0
+    )
+    
+    # Process the explanation
+    num_patches_side = int(np.sqrt(explanation.shape[1]))
+    attribution = explanation.reshape(1, 1, num_patches_side, num_patches_side)
+    attribution = F.interpolate(attribution, size=(vit.img_size, vit.img_size), mode='bilinear')
+    attribution = attribution.squeeze().cpu().detach().numpy()
+    
+    # Normalize for visualization
+    attribution = (attribution - attribution.min()) / (attribution.max() - attribution.min() + 1e-8)
+    
+    return np.array(img), attribution
+
+def avg_heads(cam, grad):
+    """Rule 5 from paper: Average attention heads weighted by gradients."""
+    # Move to CPU to save GPU memory
+    cam = cam.cpu()
+    grad = grad.cpu()
+    
+    cam = cam.reshape(-1, cam.shape[-2], cam.shape[-1])
+    grad = grad.reshape(-1, grad.shape[-2], grad.shape[-1])
+    cam = grad * cam
+    cam = cam.clamp(min=0).mean(dim=0)
+    return cam
+
+def apply_self_attention_rules(R_ss, cam_ss):
+    """Rule 6 from paper: Apply self-attention propagation rule."""
+    # Ensure both are on the same device (CPU to save memory)
+    R_ss = R_ss.cpu()
+    cam_ss = cam_ss.cpu()
+    
+    R_ss_addition = torch.matmul(cam_ss, R_ss)
+    return R_ss_addition
+
+def transmm(vit, image_path, target_class=None):
+    """
+    Memory-efficient implementation of TransMM.
+    
+    Args:
+        vit: ViT model instance
+        image_path: Path to the image
+        target_class: Target class index (if None, use predicted class)
+        
+    Returns:
+        Tuple of (original_image_array, attribution_map)
+    """
+    # Preprocess image
+    img, input_tensor = vit.preprocess_image(image_path)
+    device = vit.device
+    
+    # Forward pass without hooks first to determine class
+    if target_class is None:
+        with torch.no_grad():
+            outputs = vit.model(input_tensor.detach())
+            target_class = outputs.argmax(dim=1).item()
+            del outputs
+            torch.cuda.empty_cache()
+    
+    # Clear any existing gradients
+    vit.model.zero_grad()
+    
+    # Forward pass with hook registration
+    output = vit.model(input_tensor, register_hook=True)
+    
+    # Create one-hot vector on CPU to save memory
+    one_hot = np.zeros((1, output.size()[-1]), dtype=np.float32)
+    one_hot[0, target_class] = 1
+    one_hot = torch.from_numpy(one_hot).requires_grad_(True).to(device)
+    
+    # Scale output by one_hot
+    loss = torch.sum(one_hot * output)
+    
+    vit.model.zero_grad()
+    loss.backward(retain_graph=True)
+    
+    # Get attention maps and gradients
+    num_tokens = vit.model.blocks[0].attn.get_attention_map().shape[-1]
+    R = torch.eye(num_tokens, num_tokens).to('cpu')  # Keep on CPU
+    
+    # Process each block
+    for i, blk in enumerate(vit.model.blocks):
+        # Get data and immediately move to CPU
+        grad = blk.attn.get_attn_gradients().detach()
+        cam = blk.attn.get_attention_map().detach()
+        
+        # Process on CPU to save GPU memory
+        cam = avg_heads(cam, grad)
+        R = R + apply_self_attention_rules(R, cam)
+        
+        # Explicitly delete intermediates
+        del grad, cam
+    
+    # Extract patch tokens relevance (excluding CLS token)
+    transformer_attribution = R[0, 1:].clone()
+    del R
+    
+    # Reshape to patch grid
+    side_size = int(np.sqrt(transformer_attribution.size(0)))
+    transformer_attribution = transformer_attribution.reshape(1, 1, side_size, side_size)
+    
+    # Move back to GPU only for interpolation
+    transformer_attribution = transformer_attribution.to(device)
+    
+    # Upscale to image size
+    transformer_attribution = F.interpolate(
+        transformer_attribution, 
+        size=(vit.img_size, vit.img_size), 
+        mode='bilinear'
+    )
+    
+    # Convert to numpy and normalize
+    attribution = transformer_attribution.reshape(vit.img_size, vit.img_size).cpu().detach().numpy()
+    
+    # Clean up
+    del transformer_attribution, input_tensor, output, one_hot, loss
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    # Normalize
+    attribution = (attribution - attribution.min()) / (attribution.max() - attribution.min() + 1e-8)
+    
+    return np.array(img), attribution
+
 def explain_image(image_path, model_name="codewithdark/vit-chest-xray", method="transformer_attribution", save_dir="./explanations", visualize=False):
     """Generate and visualize an explanation for an image"""
     os.makedirs(save_dir, exist_ok=True)
     
     # Initialize explainer
-    explainer = TransLRPExplainer(model_name)
+    explainer = ViT(model_name)
     
     # Classify image
     results = explainer.classify_image(image_path)
@@ -256,7 +378,7 @@ def inspect_attribution(attribution):
     plt.savefig(os.path.join("./explanations/", f"attribution_histogram.png"))
     plt.show()
 
-def explain_attribution_diff(attribution, perturbed_attribution, np_mask, base_name=None, save_dir="./explanations", visualize=False):
+def explain_attribution_diff(attribution, perturbed_attribution, np_mask, base_name=None, save_dir="./explanations", visualize=True):
     """
     Compare original and perturbed attribution maps, focusing on masked areas.
     
