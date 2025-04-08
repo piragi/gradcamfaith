@@ -1,11 +1,13 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import pandas as pd
 from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
 from PIL import Image
-import transformer as trans
+
 import perturbation
+import transformer as trans
 
 OUTPUT_DIR = "./results"
 
@@ -37,8 +39,6 @@ def compare_attributions(original_results_df: pd.DataFrame, perturbed_results_df
             print(f"Skipping {perturbed_filename}: unexpected filename format")
             continue
             
-        patient_id = filename_parts[0]
-        
         # Extract the original filename part (before "_patch")
         if "_patch" not in perturbed_filename:
             print(f"Skipping {perturbed_filename}: not a patch-perturbed file")
@@ -266,6 +266,8 @@ def analyze_patch_metrics(pair_data):
 def analyze_faithfulness_vs_correctness(saco_scores):
     """
     Analyze the relationship between attribution faithfulness and prediction correctness
+    using both patient_id and study_id for accurate matching.
+    Disregards images where the filename doesn't contain study ID.
     """
     # Convert SaCo scores to DataFrame
     image_metrics = pd.DataFrame.from_dict(saco_scores, orient='index', columns=['image_saco'])
@@ -279,55 +281,93 @@ def analyze_faithfulness_vs_correctness(saco_scores):
     print(f"Number of images with SaCo scores: {len(image_metrics)}")
     print(f"Number of images in validation set: {len(valid_df)}")
     
-    # Extract patient ID from paths for matching
-    image_metrics['patient_id'] = image_metrics['image_name'].apply(
-        lambda x: x.split('/')[-1].split('_')[0].replace('patient', ''))
+    # Extract patient_id AND study_id from image names
+    def extract_ids_from_image(image_path):
+        """Extract both patient_id and study_id from an image path"""
+        filename = image_path.split('/')[-1]
+        parts = filename.split('_')
+        
+        # Check if "study" is in the filename
+        if len(parts) >= 2 and "study" in parts[1]:
+            patient_id = parts[0].replace('patient', '')
+            study_id = parts[1].replace('study', '')
+            return patient_id, study_id
+        else:
+            # For debugging purposes, still print a warning
+            print(f"Warning: No study ID in filename {filename}, disregarding")
+            return None, None
     
-    valid_df['patient_id'] = valid_df['Path'].apply(
-        lambda x: x.split('/')[-3].replace('patient', ''))
+    # Extract IDs from SaCo image names
+    image_metrics[['patient_id', 'study_id']] = image_metrics['image_name'].apply(
+        lambda x: pd.Series(extract_ids_from_image(x))
+    )
     
-    # Print sample entries to verify
-    print("\nSample SaCo image names:")
-    print(image_metrics['image_name'].head())
-    print("\nExtracted patient IDs:")
-    print(image_metrics['patient_id'].head())
+    # Filter out images without study ID
+    initial_count = len(image_metrics)
+    image_metrics = image_metrics.dropna(subset=['study_id'])
+    filtered_count = initial_count - len(image_metrics)
+    print(f"Filtered out {filtered_count} images without study ID from SaCo scores")
     
-    print("\nSample validation paths:")
-    print(valid_df['Path'].head())
-    print("\nExtracted validation patient IDs:")
-    print(valid_df['patient_id'].head())
+    # Extract IDs from validation data paths
+    valid_df[['patient_id', 'study_id']] = valid_df['Path'].apply(
+        lambda x: pd.Series((x.split('/')[-3].replace('patient', ''), 
+                            x.split('/')[-2].replace('study', '')))
+    )
+    
+    # Print sample entries to verify extraction
+    print("\nSample SaCo image names with extracted IDs:")
+    print(image_metrics[['image_name', 'patient_id', 'study_id']].head())
+    
+    print("\nSample validation paths with extracted IDs:")
+    print(valid_df[['Path', 'patient_id', 'study_id']].head())
     
     # Target classes in order
     target_classes = ['Cardiomegaly', 'Edema', 'Consolidation', 'Pneumonia', 'No Finding']
     
     # Load classification results
-    class_results = pd.read_csv("./results/classification_results_perturbed.csv")
+    class_results = pd.read_csv("./results/classification_results.csv")
     
-    # Extract original image patient ID
+    # Extract original image filename and IDs
     class_results['original_image'] = class_results['image_path'].apply(
         lambda x: 'images/' + x.split('/')[-1].split('_patch')[0] + '.jpg')
     
-    class_results['patient_id'] = class_results['original_image'].apply(
-        lambda x: x.split('/')[-1].split('_')[0].replace('patient', ''))
+    # Extract both patient_id and study_id from classification results
+    class_results[['patient_id', 'study_id']] = class_results['original_image'].apply(
+        lambda x: pd.Series(extract_ids_from_image(x))
+    )
+    
+    # Filter out classification results without study ID
+    initial_count = len(class_results)
+    class_results = class_results.dropna(subset=['study_id'])
+    filtered_count = initial_count - len(class_results)
+    print(f"Filtered out {filtered_count} images without study ID from classification results")
     
     # Parse the probabilities column
     class_results['prob_list'] = class_results['probabilities'].apply(
         lambda x: eval(x))
     
-    # Merge data
+    # Print sample class results to verify extraction
+    print("\nSample classification results with extracted IDs:")
+    print(class_results[['original_image', 'patient_id', 'study_id']].head())
+    
+    # Merge data on BOTH patient_id AND study_id
     # First merge SaCo scores with classification results
     merged_df = image_metrics.merge(
-        class_results[['original_image', 'patient_id', 'predicted_class', 
+        class_results[['original_image', 'patient_id', 'study_id', 'predicted_class', 
                       'predicted_class_idx', 'confidence', 'prob_list']].drop_duplicates('original_image'),
-        on=['patient_id'], how='inner')
+        on=['patient_id', 'study_id'], how='inner')
     
     print(f"\nAfter first merge - matching records: {len(merged_df)}")
     
     # Then merge with validation data
     results_df = merged_df.merge(
-        valid_df[['patient_id'] + target_classes], 
-        on='patient_id', how='inner')
+        valid_df[['patient_id', 'study_id'] + target_classes], 
+        on=['patient_id', 'study_id'], how='inner')
     
+    sample_case = results_df.sample(5)
+    print(sample_case[['image_name', 'patient_id', 'study_id', 
+                      'predicted_class', 'Cardiomegaly', 'Edema', 
+                      'Consolidation', 'Pneumonia', 'No Finding']])
     print(f"After second merge - matching records: {len(results_df)}")
     
     # If we have matches, proceed with analysis
@@ -356,12 +396,70 @@ def analyze_faithfulness_vs_correctness(saco_scores):
         plt.savefig('faithfulness_vs_correctness.png')
         plt.close()
         
+        # Additional analysis: Calculate metrics per class
+        print("\nClass-wise breakdown:")
+        for cls in target_classes:
+            class_data = results_df[results_df['predicted_class'] == cls]
+            if len(class_data) > 0:
+                correct_class = class_data[class_data['is_correct']]
+                incorrect_class = class_data[~class_data['is_correct']]
+                
+                print(f"\n{cls}:")
+                print(f"  Total predictions: {len(class_data)}")
+                print(f"  Correct: {len(correct_class)} ({len(correct_class)/len(class_data)*100:.1f}%)")
+                
+                if len(correct_class) > 0:
+                    print(f"  Avg SaCo (correct): {correct_class['image_saco'].mean():.4f}")
+                
+                if len(incorrect_class) > 0:
+                    print(f"  Avg SaCo (incorrect): {incorrect_class['image_saco'].mean():.4f}")
+        
         return results_df
     else:
-        print("No matching records found. Check the file naming patterns and patient IDs.")
-        # Let's examine some examples to help debug
-        print("\nSample image names from SaCo analysis:")
-        print(image_metrics['image_name'].head())
-        print("\nSample paths from validation data:")
-        print(valid_df['Path'].head())
+        print("No matching records found. Check the file naming patterns and IDs.")
+        
+        # Detailed diagnostic information
+        print("\nDiagnostic Information:")
+        
+        print("\n1. Unique patient IDs in SaCo data:")
+        print(image_metrics['patient_id'].value_counts().head())
+        
+        print("\n2. Unique patient IDs in validation data:")
+        print(valid_df['patient_id'].value_counts().head())
+        
+        print("\n3. Unique patient IDs in classification results:")
+        print(class_results['patient_id'].value_counts().head())
+        
+        print("\n4. Unique study IDs in SaCo data:")
+        print(image_metrics['study_id'].value_counts().head())
+        
+        print("\n5. Unique study IDs in validation data:")
+        print(valid_df['study_id'].value_counts().head())
+        
+        print("\n6. Sample filenames from each source:")
+        print("SaCo image names:", image_metrics['image_name'].head(3).tolist())
+        print("Validation paths:", valid_df['Path'].head(3).tolist())
+        print("Classification images:", class_results['original_image'].head(3).tolist())
+        
+        # Check for any potential matches (patient_id only)
+        patient_matches = set(image_metrics['patient_id']) & set(valid_df['patient_id']) & set(class_results['patient_id'])
+        print(f"\nNumber of patient IDs common across all datasets: {len(patient_matches)}")
+        
+        # Check potential study matches
+        if len(patient_matches) > 0:
+            print("\nAnalyzing a sample patient to debug study ID matching:")
+            sample_patient = list(patient_matches)[0]
+            print(f"Sample patient ID: {sample_patient}")
+            
+            saco_studies = set(image_metrics[image_metrics['patient_id'] == sample_patient]['study_id'])
+            valid_studies = set(valid_df[valid_df['patient_id'] == sample_patient]['study_id'])
+            class_studies = set(class_results[class_results['patient_id'] == sample_patient]['study_id'])
+            
+            print(f"SaCo studies: {saco_studies}")
+            print(f"Validation studies: {valid_studies}")
+            print(f"Classification studies: {class_studies}")
+            
+            common_studies = saco_studies & valid_studies & class_studies
+            print(f"Common studies: {common_studies}")
+        
         return None

@@ -1,12 +1,15 @@
-import pipeline as pipe
-import torch
 import gc
-import analysis
-import matplotlib.pyplot as plt
-import seaborn as sns
-import pandas as pd
-import numpy as np
 import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import torch
+
+import analysis
+import pipeline as pipe
+
 
 def clear_gpu_memory():
     """Explicitly clear PyTorch CUDA cache and run garbage collection"""
@@ -29,7 +32,7 @@ def main():
         sd_pipe=None,
         patch_size=16,  # Size of each patch
         strength=0.2,   # Perturbation strength
-        max_images=100, # Process only one image for testing (remove or set to None for all)
+        max_images=1, # Process only one image for testing (remove or set to None for all)
         method = "mean"
     )
     print(f"Generated {len(perturbed_paths)} perturbed patch images")
@@ -58,21 +61,7 @@ def run_saco():
     analysis_with_coords = analysis_df.merge(coordinates_df, on='patch_id')
 
     # Create heatmaps of patch SaCo scores for each image
-    for image_name, image_data in analysis_with_coords.groupby('image_name'):
-        plt.figure(figsize=(10, 8))
-        # Reshape data to create a 2D grid (adjust dimensions based on your patch grid)
-        # Assuming 14x14 grid for a typical ViT
-        heatmap_data = np.zeros((14, 14))
-        for _, row in image_data.iterrows():
-            x, y = int(row['x']/16), int(row['y']/16)  # Assuming 16x16 patches
-            if 0 <= x < 14 and 0 <= y < 14:
-                heatmap_data[y, x] = row['patch_saco']
-        
-        sns.heatmap(heatmap_data, cmap='coolwarm', center=0, vmin=-1, vmax=1)
-        plt.title(f'Patch SaCo Heatmap: {image_name}')
-        plt.savefig(f'./results/saco_heatmap_{os.path.basename(image_name)}.png')
-        plt.close()
 
     analysis.analyze_faithfulness_vs_correctness(saco_scores)
 if __name__ == "__main__":
-    run_saco()
+    main()

@@ -1,17 +1,20 @@
-import torch
 import gc
-import torch.nn.functional as F
-import numpy as np
-from PIL import Image
-import matplotlib.pyplot as plt
 import os
-from transformers import AutoImageProcessor, AutoModelForImageClassification
 from collections import OrderedDict
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
+from transformers import AutoImageProcessor, AutoModelForImageClassification
+
 from translrp.ViT_LRP import vit_base_patch16_224 as vit_lrp
 from translrp.ViT_new import vit_base_patch16_224 as vit_mm
 
+
 class ViT:
-    def __init__(self, huggingface_model_name="codewithdark/vit-chest-xray", img_size=224, method: str = "translrp"):
+    def __init__(self, huggingface_model_name="lxyuan/vit-xray-pneumonia-classification", img_size=224, method: str = "translrp"):
         """Initialize the TransLRP explainer"""
         self.img_size = img_size
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -396,8 +399,9 @@ def explain_attribution_diff(attribution, perturbed_attribution, np_mask, base_n
         Directory to save visualizations
     """
     import os
-    import numpy as np
+
     import matplotlib.pyplot as plt
+    import numpy as np
     from skimage.transform import resize
     
     os.makedirs(save_dir, exist_ok=True)

@@ -43,7 +43,8 @@ def preprocess_dataset(source_dir: str = "./chexpert",
     for image_file in image_files:
         # Create a unique output filename to avoid conflicts from different subfolders
         patient_id = image_file.parent.parent.name
-        output_filename = f"{patient_id}_{image_file.name}"
+        study_id = image_file.parent.name
+        output_filename = f"{patient_id}_{study_id}_{image_file.name}"
         output_path = dest_path / output_filename
         
         if output_path.exists():
