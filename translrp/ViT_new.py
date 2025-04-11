@@ -1,14 +1,15 @@
 """ Vision Transformer (ViT) in PyTorch
 Hacked together by / Copyright 2020 Ross Wightman
 """
+from functools import partial
+
 import torch
 import torch.nn as nn
-from functools import partial
 from einops import rearrange
 
 from translrp.helpers import load_pretrained
-from translrp.weight_init import trunc_normal_
 from translrp.layer_helpers import to_2tuple
+from translrp.weight_init import trunc_normal_
 
 
 def _cfg(url='', **kwargs):
