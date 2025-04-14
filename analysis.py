@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -35,15 +34,6 @@ def compare_attributions(original_results_df: pd.DataFrame,
         perturbed_path = Path(perturbed_row["image_path"])
         perturbed_filename = perturbed_path.stem
 
-        # Extract the patient ID and original filename from the perturbed filename
-        # Format: {patient_id}_{original_filename}_patch{patch_id}_x{x}_y{y}_s{strength}
-        filename_parts = perturbed_filename.split('_', 1)
-        if len(filename_parts) < 2:
-            print(f"Skipping {perturbed_filename}: unexpected filename format")
-            continue
-
-        patient_id = filename_parts[0]
-
         # Extract the original filename part (before "_patch")
         if "_patch" not in perturbed_filename:
             print(f"Skipping {perturbed_filename}: not a patch-perturbed file")
@@ -51,15 +41,18 @@ def compare_attributions(original_results_df: pd.DataFrame,
 
         original_part = perturbed_filename.split("_patch")[0]
 
-        # Find corresponding original image
-        matching_rows = original_results_df[
-            original_results_df["image_path"].str.contains(original_part)]
+        original_filenames = original_results_df["image_path"].apply(
+            lambda path: Path(path).stem)
 
-        if matching_rows.empty:
+        # Find exact matches (preserving whitespace)
+        matching_indices = original_filenames[original_filenames ==
+                                              original_part].index
+
+        if len(matching_indices) == 0:
             print(f"No matching original image found for {perturbed_filename}")
             continue
 
-        original_row = matching_rows.iloc[0]
+        original_row = original_results_df.loc[matching_indices[0]]
 
         # Get mask path
         mask_path = patch_mask_dir / f"{perturbed_filename}_mask.npy"
@@ -357,9 +350,8 @@ def analyze_faithfulness_vs_correctness(
 
 def analyze_attribution_patterns(df):
     """
-    Analyze patterns in attribution maps, calculate correlation of ratio neg/pos attention attribution and SaCo score. 
+    Calculate basic magnitude metrics for attribution maps without correlation analysis.
     """
-
     # Add metrics to understand attribution patterns
     metrics = {
         'neg_magnitude':
@@ -425,7 +417,7 @@ def analyze_attribution_patterns(df):
         f"Neg/Pos ratio range: {df_clean['neg_pos_ratio'].min():.5f} to {df_clean['neg_pos_ratio'].max():.5f}"
     )
 
-    # Create scatter plot of SaCo vs neg/pos ratio
+    # Just create a basic scatter plot without correlation analysis
     plt.figure(figsize=(10, 6))
     scatter = sns.scatterplot(data=df_clean,
                               x='saco_score',
@@ -437,29 +429,223 @@ def analyze_attribution_patterns(df):
     plt.title('SaCo Score vs. Negative/Positive Attribution Ratio')
     plt.xlabel('SaCo Score')
     plt.ylabel('Negative/Positive Attribution Ratio')
-
-    # Focus on correct cases with low SaCo
-    correct_df = df_clean[df_clean['is_correct']]
-    if len(correct_df) > 0:
-        corr = correct_df['saco_score'].corr(correct_df['neg_pos_ratio'])
-        print(
-            f"Correlation between SaCo and neg/pos ratio (correct cases): {corr:.3f}"
-        )
-
-        # Calculate statistical significance
-        n = len(correct_df)
-        t_stat = corr * np.sqrt(n - 2) / np.sqrt(1 - corr**2)
-        from scipy import stats
-        p_value = stats.t.sf(abs(t_stat), n - 2) * 2  # Two-tailed test
-        print(f"t-statistic: {t_stat:.3f}, p-value: {p_value:.5f}")
-
-        # Add correlation annotation with significance
-        plt.text(
-            x=0.05,
-            y=0.95,
-            s=f"Correlation (correct cases): {corr:.3f} (p={p_value:.5f})",
-            transform=plt.gca().transAxes,
-            bbox=dict(facecolor='white', alpha=0.8))
-
     plt.tight_layout()
     plt.savefig('saco_vs_neg_pos_ratio.png')
+
+    # Return the dataframe with the added metrics
+    return df
+
+
+def analyze_key_attribution_patterns(df):
+    """
+    Analysis focusing on key metrics for understanding negative attribution patterns
+    """
+    # First run basic analysis (without correlation calculation)
+    df = analyze_attribution_patterns(df)
+
+    # Add our prioritized new metrics
+    df = add_entropy_metrics(df)
+    df = add_concentration_metrics(df)
+    df = add_information_theory_metrics(df)
+
+    # Clean data
+    df_clean = df.dropna(
+        subset=['saco_score', 'neg_magnitude', 'pos_magnitude'])
+
+    # Calculate correlations with SaCo score for correct predictions
+    correct_df = df_clean[df_clean['is_correct']]
+
+    if len(correct_df) > 0:
+        print("\nCorrelations with SaCo score (correct predictions):")
+        # Include neg_pos_ratio in the list since we're calculating all correlations here
+        key_metrics = [
+            'neg_pos_ratio', 'neg_entropy', 'pos_entropy', 'entropy_ratio',
+            'neg_gini', 'pos_gini', 'neg_top10_conc', 'pos_top10_conc',
+            'mutual_information', 'neg_pos_contingency'
+        ]
+
+        correlations = {}
+        for metric in key_metrics:
+            if metric in correct_df.columns:
+                corr = correct_df['saco_score'].corr(correct_df[metric])
+                p_value = calculate_correlation_significance(
+                    correct_df['saco_score'], correct_df[metric])
+                correlations[metric] = (corr, p_value)
+                print(f"{metric}: r={corr:.3f}, p={p_value:.5f}")
+
+        # Create visualization for most significant correlations
+        significant_metrics = [
+            m for m, (_, p) in correlations.items() if p < 0.05
+        ]
+        for metric in significant_metrics[:
+                                          3]:  # Top 3 significant correlations
+            corr, p_value = correlations[metric]
+
+            plt.figure(figsize=(10, 6))
+            scatter = sns.scatterplot(data=correct_df,
+                                      x='saco_score',
+                                      y=metric,
+                                      hue='confidence',
+                                      size='confidence',
+                                      sizes=(20, 200),
+                                      alpha=0.7)
+            plt.title(
+                f'SaCo Score vs. {metric} (r={corr:.3f}, p={p_value:.5f})')
+            plt.xlabel('SaCo Score (Faithfulness)')
+            plt.ylabel(metric.replace('_', ' ').title())
+            plt.tight_layout()
+            plt.savefig(f'saco_vs_{metric}.png')
+
+    return df_clean
+
+
+def calculate_correlation_significance(x, y):
+    """Calculate p-value for a correlation"""
+    from scipy import stats
+    corr, p_value = stats.pearsonr(x, y)
+    return p_value
+
+
+def add_entropy_metrics(df):
+    metrics = {
+        'neg_entropy': [],  # Shannon entropy of negative attributions
+        'pos_entropy': [],  # Shannon entropy of positive attributions
+        'entropy_ratio': []  # Ratio of negative to positive entropy
+    }
+
+    for _, row in df.iterrows():
+        try:
+            pos_attr = np.load(row['attribution_path'])
+            neg_attr = np.load(row['attribution_neg_path'])
+
+            # Normalize distributions for entropy calculation
+            pos_norm = pos_attr / (np.sum(pos_attr) + 1e-10)
+            neg_norm = neg_attr / (np.sum(neg_attr) + 1e-10)
+
+            # Calculate Shannon entropy (using only non-zero values)
+            pos_entropy = -np.sum(pos_norm[pos_norm > 0] *
+                                  np.log2(pos_norm[pos_norm > 0] + 1e-10))
+            neg_entropy = -np.sum(neg_norm[neg_norm > 0] *
+                                  np.log2(neg_norm[neg_norm > 0] + 1e-10))
+
+            metrics['neg_entropy'].append(neg_entropy)
+            metrics['pos_entropy'].append(pos_entropy)
+            metrics['entropy_ratio'].append(neg_entropy /
+                                            (pos_entropy + 1e-10))
+
+        except Exception as e:
+            print(f"Error calculating entropy for {row['filename']}: {e}")
+            for key in metrics:
+                metrics[key].append(np.nan)
+
+    # Add metrics to dataframe
+    for key, values in metrics.items():
+        df[key] = values
+
+    return df
+
+
+def add_concentration_metrics(df):
+    metrics = {
+        'neg_gini': [],  # Gini coefficient for negative attributions
+        'pos_gini': [],  # Gini coefficient for positive attributions
+        'neg_top10_conc': [],  # Concentration of top 10% negative attributions
+        'pos_top10_conc': []  # Concentration of top 10% positive attributions
+    }
+
+    for _, row in df.iterrows():
+        try:
+            pos_attr = np.load(row['attribution_path']).flatten()
+            neg_attr = np.load(row['attribution_neg_path']).flatten()
+
+            # Calculate Gini coefficient (measure of inequality)
+            def gini(x):
+                # Sort values
+                sorted_x = np.sort(x)
+                n = len(x)
+                cumsum = np.cumsum(sorted_x)
+                # Return Gini coefficient
+                return (np.sum((2 * np.arange(1, n + 1) - n - 1) *
+                               sorted_x)) / (n * np.sum(sorted_x))
+
+            metrics['neg_gini'].append(gini(neg_attr))
+            metrics['pos_gini'].append(gini(pos_attr))
+
+            # Top 10% concentration
+            neg_threshold = np.percentile(neg_attr, 90)
+            pos_threshold = np.percentile(pos_attr, 90)
+            metrics['neg_top10_conc'].append(
+                np.sum(neg_attr[neg_attr >= neg_threshold]) /
+                (np.sum(neg_attr) + 1e-10))
+            metrics['pos_top10_conc'].append(
+                np.sum(pos_attr[pos_attr >= pos_threshold]) /
+                (np.sum(pos_attr) + 1e-10))
+
+        except Exception as e:
+            print(
+                f"Error calculating concentration for {row['filename']}: {e}")
+            for key in metrics:
+                metrics[key].append(np.nan)
+
+    # Add metrics to dataframe
+    for key, values in metrics.items():
+        df[key] = values
+
+    return df
+
+
+def add_information_theory_metrics(df):
+    metrics = {
+        'mutual_information':
+        [],  # Mutual information between positive and negative attributions
+        'neg_pos_contingency':
+        []  # Contingency between negative and positive attributions
+    }
+
+    from sklearn.metrics import mutual_info_score
+
+    for _, row in df.iterrows():
+        try:
+            pos_attr = np.load(row['attribution_path'])
+            neg_attr = np.load(row['attribution_neg_path'])
+
+            if pos_attr.shape != neg_attr.shape:
+                for key in metrics:
+                    metrics[key].append(np.nan)
+                continue
+
+            # Discretize for information theory metrics (into 20 bins)
+            pos_bins = np.linspace(pos_attr.min(), pos_attr.max(), 20)
+            neg_bins = np.linspace(neg_attr.min(), neg_attr.max(), 20)
+
+            pos_discrete = np.digitize(pos_attr.flatten(), pos_bins)
+            neg_discrete = np.digitize(neg_attr.flatten(), neg_bins)
+
+            # Calculate mutual information
+            mi = mutual_info_score(pos_discrete, neg_discrete)
+            metrics['mutual_information'].append(mi)
+
+            # Calculate contingency (how often high/low values co-occur)
+            pos_median = np.median(pos_attr)
+            neg_median = np.median(neg_attr)
+
+            high_pos = pos_attr > pos_median
+            high_neg = neg_attr > neg_median
+
+            # Calculate contingency ratio
+            contingency = (np.sum(np.logical_and(high_pos, high_neg)) + np.sum(
+                np.logical_and(~high_pos, ~high_neg))) / pos_attr.size
+            metrics['neg_pos_contingency'].append(contingency)
+
+        except Exception as e:
+            print(
+                f"Error calculating information metrics for {row['filename']}: {e}"
+            )
+            for key in metrics:
+                metrics[key].append(np.nan)
+
+    # Add metrics to dataframe
+    for key, values in metrics.items():
+        df[key] = values
+
+    return df

@@ -59,8 +59,8 @@ def run_saco():
 
     correct_incorrect = analysis.analyze_faithfulness_vs_correctness(
         saco_scores)
-    analysis.analyze_attribution_patterns(correct_incorrect)
+    analysis.analyze_key_attribution_patterns(correct_incorrect)
 
 
 if __name__ == "__main__":
-    run_saco()
+    main()

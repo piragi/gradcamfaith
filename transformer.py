@@ -390,7 +390,7 @@ def explain_attribution_diff(attribution,
                              np_mask,
                              base_name=None,
                              save_dir="./explanations",
-                             visualize=True):
+                             visualize=False):
     """
     Compare original and perturbed attribution maps, focusing on masked areas.
     
