@@ -6,3 +6,6 @@ uv.lock
 cache/
 results/
 chexpert/
+*.csv
+*.png
+model/
