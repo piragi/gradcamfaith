@@ -9,6 +9,7 @@ dependencies = [
     "datasets>=3.5.0",
     "diffusers>=0.32.2",
     "einops>=0.8.1",
+    "ipykernel>=6.29.5",
     "matplotlib>=3.10.1",
     "opencv-python>=4.11.0.86",
     "pandas>=2.2.3",

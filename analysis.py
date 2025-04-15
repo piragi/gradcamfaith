@@ -13,7 +13,8 @@ OUTPUT_DIR = "./results"
 
 
 def compare_attributions(original_results_df: pd.DataFrame,
-                         perturbed_results_df: pd.DataFrame) -> pd.DataFrame:
+                         perturbed_results_df: pd.DataFrame,
+                         output_dir: str = "./results") -> pd.DataFrame:
     """
     Compare attributions between original and perturbed images.
     
@@ -24,9 +25,9 @@ def compare_attributions(original_results_df: pd.DataFrame,
     Returns:
         DataFrame with attribution comparison results
     """
-    output_dir = Path(OUTPUT_DIR)
-    comparison_dir = output_dir / "comparisons"
-    patch_mask_dir = output_dir / "patch_masks"
+    output_path = Path(output_dir)
+    comparison_dir = output_path / "comparisons"
+    patch_mask_dir = output_path / "patch_masks"
     comparison_dir.mkdir(exist_ok=True, parents=True)
     comparison_results = []
 
@@ -49,13 +50,14 @@ def compare_attributions(original_results_df: pd.DataFrame,
                                               original_part].index
 
         if len(matching_indices) == 0:
-            print(f"No matching original image found for {perturbed_filename}")
+            # print(f"No matching original image found for {perturbed_filename}")
             continue
 
         original_row = original_results_df.loc[matching_indices[0]]
 
-        # Get mask path
-        mask_path = patch_mask_dir / f"{perturbed_filename}_mask.npy"
+        # Get mask path TODO: fix this part to be generally applicable
+        mask_path = Path(
+            f"./results/patch_masks/{perturbed_filename}_mask.npy")
 
         if not mask_path.exists():
             print(f"Mask file not found: {mask_path}")
@@ -189,7 +191,7 @@ def compare_attributions(original_results_df: pd.DataFrame,
             comparison_df["rank_difference"] = comparison_df[
                 "attribution_rank"] - comparison_df["impact_rank"]
 
-        comparison_df.to_csv(output_dir / "patch_attribution_comparisons.csv",
+        comparison_df.to_csv(output_path / "patch_attribution_comparisons.csv",
                              index=False)
     else:
         print("Warning: No comparison results were generated.")
@@ -220,7 +222,7 @@ def calculate_saco_with_details(
 
         results[image_name] = saco_score
         pair_data[image_name] = image_pair_data
-        print(f"Calculated SaCo for {image_name}: {saco_score:.4f}")
+        # print(f"Calculated SaCo for {image_name}: {saco_score:.4f}")
 
     print(f"Average SaCo score: {sum(list(results.values())) / len(results)}")
     return results, pair_data
@@ -438,7 +440,8 @@ def analyze_attribution_patterns(df):
 
 def analyze_key_attribution_patterns(df):
     """
-    Analysis focusing on key metrics for understanding negative attribution patterns
+    Analysis focusing on key metrics for understanding negative attribution patterns,
+    with correlations calculated overall and per class
     """
     # First run basic analysis (without correlation calculation)
     df = analyze_attribution_patterns(df)
@@ -447,54 +450,99 @@ def analyze_key_attribution_patterns(df):
     df = add_entropy_metrics(df)
     df = add_concentration_metrics(df)
     df = add_information_theory_metrics(df)
+    df = gradient_based_metrics(df)
+    df = sparsity_metrics(df)
+    df = attribution_consistency_metrics(df)
+    df = robustness_metrics(df)
 
     # Clean data
     df_clean = df.dropna(
         subset=['saco_score', 'neg_magnitude', 'pos_magnitude'])
 
-    # Calculate correlations with SaCo score for correct predictions
-    correct_df = df_clean[df_clean['is_correct']]
+    # Define key metrics to analyze
+    key_metrics = [
+        'neg_pos_ratio',
+        'neg_entropy',
+        'pos_entropy',
+        'entropy_ratio',
+        'neg_gini',
+        'pos_gini',
+        'neg_top10_conc',
+        'pos_top10_conc',
+        'mutual_information',
+        'neg_pos_contingency',
+        # Gradient metrics
+        'gradient_magnitude',
+        'gradient_variance',
+        'gradient_entropy',
+        'gradient_sparsity',
+        # Sparsity metrics
+        'pos_l0_sparsity',
+        'neg_l0_sparsity',
+        'pos_effective_sparsity',
+        'neg_effective_sparsity',
+        'pos_kurtosis',
+        'neg_kurtosis',
+        # Attribution consistency metrics
+        'pos_neg_coherence',
+        'attribution_evenness',
+        'feature_consensus',
+        # Robustness metrics
+        'smoothing_stability',
+        'noise_stability',
+        'peak_persistence'
+    ]
 
-    if len(correct_df) > 0:
-        print("\nCorrelations with SaCo score (correct predictions):")
-        # Include neg_pos_ratio in the list since we're calculating all correlations here
-        key_metrics = [
-            'neg_pos_ratio', 'neg_entropy', 'pos_entropy', 'entropy_ratio',
-            'neg_gini', 'pos_gini', 'neg_top10_conc', 'pos_top10_conc',
-            'mutual_information', 'neg_pos_contingency'
-        ]
+    # Extract class from image name (assuming 'image_name' column exists)
+    def get_class(image_name):
+        class_prefixes = ["images/Normal", "images/covid", "images/non_COVID"]
+        for prefix in class_prefixes:
+            if str(image_name).startswith(prefix):
+                return prefix
+        return "unknown"
 
-        correlations = {}
+    # Add class column if image_name exists
+    df_clean = df_clean[df_clean['is_correct']]
+
+    if 'filename' in df_clean.columns:
+        df_clean['class'] = df_clean['filename'].apply(get_class)
+    # df_clean['class'] = df_clean['true_class']
+    # Calculate overall correlations with SaCo score
+    if len(df_clean) > 0:
+        print("\n" + "=" * 60)
+        print("OVERALL CORRELATIONS WITH SACO SCORE:")
+        print("=" * 60)
+
+        correlations_overall = {}
         for metric in key_metrics:
-            if metric in correct_df.columns:
-                corr = correct_df['saco_score'].corr(correct_df[metric])
+            if metric in df_clean.columns:
+                corr = df_clean['saco_score'].corr(df_clean[metric])
                 p_value = calculate_correlation_significance(
-                    correct_df['saco_score'], correct_df[metric])
-                correlations[metric] = (corr, p_value)
+                    df_clean['saco_score'], df_clean[metric])
+                correlations_overall[metric] = (corr, p_value)
                 print(f"{metric}: r={corr:.3f}, p={p_value:.5f}")
 
-        # Create visualization for most significant correlations
-        significant_metrics = [
-            m for m, (_, p) in correlations.items() if p < 0.05
-        ]
-        for metric in significant_metrics[:
-                                          3]:  # Top 3 significant correlations
-            corr, p_value = correlations[metric]
+        # Calculate per-class correlations if we have class information
+        if 'class' in df_clean.columns:
+            classes = df_clean['class'].unique()
 
-            plt.figure(figsize=(10, 6))
-            scatter = sns.scatterplot(data=correct_df,
-                                      x='saco_score',
-                                      y=metric,
-                                      hue='confidence',
-                                      size='confidence',
-                                      sizes=(20, 200),
-                                      alpha=0.7)
-            plt.title(
-                f'SaCo Score vs. {metric} (r={corr:.3f}, p={p_value:.5f})')
-            plt.xlabel('SaCo Score (Faithfulness)')
-            plt.ylabel(metric.replace('_', ' ').title())
-            plt.tight_layout()
-            plt.savefig(f'saco_vs_{metric}.png')
+            for cls in classes:
+                class_df = df_clean[df_clean['class'] == cls]
+
+                if len(class_df
+                       ) > 5:  # Only calculate if we have enough data points
+                    print("\n" + "-" * 60)
+                    print(f"CORRELATIONS FOR CLASS: {cls}")
+                    print("-" * 60)
+
+                    for metric in key_metrics:
+                        if metric in class_df.columns:
+                            corr = class_df['saco_score'].corr(
+                                class_df[metric])
+                            p_value = calculate_correlation_significance(
+                                class_df['saco_score'], class_df[metric])
+                            print(f"{metric}: r={corr:.3f}, p={p_value:.5f}")
+    compare_concentration_distributions(df_clean)
 
     return df_clean
 
@@ -641,6 +689,274 @@ def add_information_theory_metrics(df):
             print(
                 f"Error calculating information metrics for {row['filename']}: {e}"
             )
+            for key in metrics:
+                metrics[key].append(np.nan)
+
+    # Add metrics to dataframe
+    for key, values in metrics.items():
+        df[key] = values
+
+    return df
+
+
+def compare_concentration_distributions(df):
+    """Compare the distribution of concentration metrics across classes"""
+    # Create comparison plots
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    metrics = ['neg_gini', 'pos_gini', 'neg_entropy', 'pos_entropy']
+
+    # Calculate statistics
+    stats = {}
+    for cls in df['class'].unique():
+        stats[cls] = {}
+        for metric in metrics:
+            class_values = df[df['class'] == cls][metric]
+            stats[cls][metric] = {
+                'mean': class_values.mean(),
+                'std': class_values.std(),
+                'range': class_values.max() - class_values.min(),
+                'percentiles': np.percentile(class_values,
+                                             [10, 25, 50, 75, 90])
+            }
+
+    # Print the statistics
+    print("Concentration Distribution By Class")
+    print("===================================")
+
+    for metric in metrics:
+        print(f"\n{metric}")
+        for cls in stats:
+            pct = stats[cls][metric]['percentiles']
+            print(f"{cls}:")
+            print(f"  Mean: {stats[cls][metric]['mean']:.3f}")
+            print(f"  Std Dev: {stats[cls][metric]['std']:.3f}")
+            print(f"  Range (10th-90th): {pct[4]-pct[0]:.3f}")
+            print(f"  Distribution: 10%={pct[0]:.3f}, 25%={pct[1]:.3f}, " +
+                  f"50%={pct[2]:.3f}, 75%={pct[3]:.3f}, 90%={pct[4]:.3f}")
+
+    # Create the plots
+    for i, metric in enumerate(metrics):
+        ax = axes[i // 2, i % 2]
+        for cls in df['class'].unique():
+            sns.kdeplot(df[df['class'] == cls][metric], ax=ax, label=cls)
+
+        ax.set_title(f'Distribution of {metric}')
+        ax.legend()
+
+    plt.tight_layout()
+    plt.savefig('concentration_distributions.png')
+    return stats
+
+
+def gradient_based_metrics(df):
+    """Analyze properties of the gradients used in attribution"""
+    metrics = {
+        'gradient_magnitude': [],  # Average magnitude of gradients
+        'gradient_variance': [],  # Variance of gradient values
+        'gradient_entropy': [],  # Entropy of gradient distribution
+        'gradient_sparsity': []  # Percentage of near-zero gradients
+    }
+
+    for _, row in df.iterrows():
+        try:
+            # For gradient-based metrics, we'll use the positive and negative
+            # attribution maps as proxies for gradient information
+            pos_attr = np.load(row['attribution_path'])
+            neg_attr = np.load(row['attribution_neg_path'])
+
+            # Combined attribution (absolute values)
+            combined_attr = np.abs(pos_attr) + np.abs(neg_attr)
+
+            # Calculate metrics
+            metrics['gradient_magnitude'].append(np.mean(combined_attr))
+            metrics['gradient_variance'].append(np.var(combined_attr))
+
+            # Calculate entropy of normalized gradients
+            grad_norm = combined_attr / (np.sum(combined_attr) + 1e-10)
+            entropy = -np.sum(grad_norm * np.log2(grad_norm + 1e-10))
+            metrics['gradient_entropy'].append(entropy)
+
+            # Calculate sparsity (% of gradients close to zero)
+            threshold = 0.01 * np.max(combined_attr)
+            sparsity = np.mean(combined_attr < threshold)
+            metrics['gradient_sparsity'].append(sparsity)
+
+        except Exception as e:
+            print(
+                f"Error processing gradients for {row['filename'] if 'filename' in row else 'unknown'}: {e}"
+            )
+            for key in metrics:
+                metrics[key].append(np.nan)
+
+    # Add metrics to dataframe
+    for key, values in metrics.items():
+        df[key] = values
+
+    return df
+
+
+def sparsity_metrics(df):
+    """Calculate various sparsity measures for attribution maps"""
+    metrics = {
+        'pos_l0_sparsity': [],  # Percentage of near-zero positive attributions
+        'neg_l0_sparsity': [],  # Percentage of near-zero negative attributions
+        'pos_effective_sparsity':
+        [],  # Effective number of non-zero positive elements
+        'neg_effective_sparsity':
+        [],  # Effective number of non-zero negative elements
+        'pos_kurtosis': [],  # Measure of "peakedness" of positive distribution
+        'neg_kurtosis': []  # Measure of "peakedness" of negative distribution
+    }
+
+    for _, row in df.iterrows():
+        try:
+            pos_attr = np.load(row['attribution_path'])
+            neg_attr = np.load(row['attribution_neg_path'])
+
+            flat_pos = pos_attr.flatten()
+            flat_neg = neg_attr.flatten()
+
+            # L0 sparsity (percentage of near-zero elements)
+            pos_threshold = 0.01 * np.max(pos_attr)
+            neg_threshold = 0.01 * np.max(neg_attr)
+            metrics['pos_l0_sparsity'].append(
+                np.mean(pos_attr < pos_threshold))
+            metrics['neg_l0_sparsity'].append(
+                np.mean(neg_attr < neg_threshold))
+
+            # Effective sparsity for positive attributions
+            pos_normalized = flat_pos / (np.sum(flat_pos) + 1e-10)
+            pos_effective_nonzero = 1.0 / (np.sum(pos_normalized**2) + 1e-10)
+            metrics['pos_effective_sparsity'].append(1.0 -
+                                                     (pos_effective_nonzero /
+                                                      len(flat_pos)))
+
+            # Effective sparsity for negative attributions
+            neg_normalized = flat_neg / (np.sum(flat_neg) + 1e-10)
+            neg_effective_nonzero = 1.0 / (np.sum(neg_normalized**2) + 1e-10)
+            metrics['neg_effective_sparsity'].append(1.0 -
+                                                     (neg_effective_nonzero /
+                                                      len(flat_neg)))
+
+            # Kurtosis (measure of "peakedness")
+            from scipy import stats
+            metrics['pos_kurtosis'].append(stats.kurtosis(flat_pos))
+            metrics['neg_kurtosis'].append(stats.kurtosis(flat_neg))
+
+        except Exception as e:
+            print(
+                f"Error calculating sparsity for {row['filename'] if 'filename' in row else 'unknown'}: {e}"
+            )
+            for key in metrics:
+                metrics[key].append(np.nan)
+
+    # Add metrics to dataframe
+    for key, values in metrics.items():
+        df[key] = values
+
+    return df
+
+
+def attribution_consistency_metrics(df):
+    """Measure consistency between different aspects of the attribution"""
+    metrics = {
+        'pos_neg_coherence':
+        [],  # Correlation between positive and negative attribution patterns
+        'attribution_evenness':
+        [],  # How evenly distributed the attribution intensity is across regions
+        'feature_consensus': []  # Agreement between different attention heads
+    }
+
+    for _, row in df.iterrows():
+        try:
+            pos_attr = np.load(row['attribution_path'])
+            neg_attr = np.load(row['attribution_neg_path'])
+
+            # Correlation between positive and negative maps
+            flat_pos = pos_attr.flatten()
+            flat_neg = neg_attr.flatten()
+            pos_neg_corr = np.corrcoef(flat_pos, flat_neg)[0, 1]
+            metrics['pos_neg_coherence'].append(
+                abs(pos_neg_corr))  # Use absolute value to measure alignment
+
+            # Measure attribution evenness (ratio of mean to max)
+            combined_attr = pos_attr + neg_attr
+            evenness = np.mean(combined_attr) / (np.max(combined_attr) + 1e-10)
+            metrics['attribution_evenness'].append(evenness)
+
+            # If head-specific attributions are available, measure agreement between heads
+            if 'attribution_heads_path' in row and pd.notnull(
+                    row['attribution_heads_path']):
+                heads_attr = np.load(row['attribution_heads_path'])
+
+                # Calculate pairwise correlations between heads
+                num_heads = heads_attr.shape[0]
+                correlations = []
+                for i in range(num_heads):
+                    for j in range(i + 1, num_heads):
+                        corr = np.corrcoef(heads_attr[i].flatten(),
+                                           heads_attr[j].flatten())[0, 1]
+                        correlations.append(corr)
+
+                metrics['feature_consensus'].append(np.mean(correlations))
+            else:
+                metrics['feature_consensus'].append(np.nan)
+
+        except Exception as e:
+            print(f"Error calculating consistency for {row['filename']}: {e}")
+            for key in metrics:
+                metrics[key].append(np.nan)
+
+    # Add metrics to dataframe
+    for key, values in metrics.items():
+        df[key] = values
+
+    return df
+
+
+def robustness_metrics(df):
+    """Calculate robustness of attribution to small changes"""
+    from scipy.ndimage import gaussian_filter
+
+    metrics = {
+        'smoothing_stability': [],  # Stability under Gaussian smoothing
+        'noise_stability': [],  # Stability under small noise addition
+        'peak_persistence':
+        []  # How persistent the highest attribution regions are
+    }
+
+    for _, row in df.iterrows():
+        try:
+            pos_attr = np.load(row['attribution_path'])
+
+            # Smoothing stability
+            smoothed = gaussian_filter(pos_attr, sigma=1.0)
+            stability = np.corrcoef(pos_attr.flatten(), smoothed.flatten())[0,
+                                                                            1]
+            metrics['smoothing_stability'].append(stability)
+
+            # Noise stability (adding small random noise)
+            noise_level = 0.05 * np.std(pos_attr)
+            noise = np.random.normal(0, noise_level, pos_attr.shape)
+            noisy = pos_attr + noise
+            noise_stability = np.corrcoef(pos_attr.flatten(),
+                                          noisy.flatten())[0, 1]
+            metrics['noise_stability'].append(noise_stability)
+
+            # Peak persistence
+            # How much the top 10% attribution region overlaps after smoothing
+            threshold = np.percentile(pos_attr, 90)
+            smoothed_threshold = np.percentile(smoothed, 90)
+
+            top_orig = pos_attr >= threshold
+            top_smoothed = smoothed >= smoothed_threshold
+
+            overlap = np.logical_and(top_orig, top_smoothed)
+            persistence = np.sum(overlap) / (np.sum(top_orig) + 1e-10)
+            metrics['peak_persistence'].append(persistence)
+
+        except Exception as e:
+            print(f"Error calculating robustness for {row['filename']}: {e}")
             for key in metrics:
                 metrics[key].append(np.nan)
 

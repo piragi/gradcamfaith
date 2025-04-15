@@ -89,20 +89,29 @@ def save_to_cache(cache_path: Path, result: Dict[str, Any]) -> None:
         json.dump(result, f)
 
 
-def classify_explain_single_image(image_path: Path, vit: trans.ViT,
+def classify_explain_single_image(image_path: Path,
+                                  vit: trans.ViT,
                                   dirs: Dict[str, Path],
-                                  output_suffix: str) -> Dict[str, Any]:
+                                  output_suffix: str,
+                                  pretransform: bool = False,
+                                  gini_params: Tuple[float, float,
+                                                     float] = (0.65, 8.0, 0.5),
+                                  use_cached: bool = True) -> Dict[str, Any]:
     cache_path = dirs[
         'cache'] / f"{image_path.stem}_classification{output_suffix}.json"
     cached_result = try_load_from_cache(cache_path)
-    if cached_result: return cached_result
+    if use_cached and cached_result: return cached_result
 
     image, classification = vit.classify_image(image_path=str(image_path))
     vis_path = dirs["attribution"] / f"{image_path.stem}_vis.png"
     image.save(vis_path)
 
     image, (attribution, attribution_neg) = trans.transmm(
-        vit, image_path, classification['predicted_class_idx'])
+        vit,
+        image_path,
+        classification['predicted_class_idx'],
+        pretransform=pretransform,
+        gini_params=gini_params)
 
     attribution_path = dirs[
         "attribution"] / f"{image_path.stem}_attribution.npy"
