@@ -10,3 +10,4 @@ chexpert/
 *.png
 model/
 results_transmmplus/
+*.ipynb

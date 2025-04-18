@@ -106,12 +106,13 @@ def classify_explain_single_image(image_path: Path,
     vis_path = dirs["attribution"] / f"{image_path.stem}_vis.png"
     image.save(vis_path)
 
-    image, (attribution, attribution_neg) = trans.transmm(
-        vit,
-        image_path,
-        classification['predicted_class_idx'],
-        pretransform=pretransform,
-        gini_params=gini_params)
+    image, (attribution,
+            attribution_neg), ffn_activity = trans.transmm_with_ffn_activity(
+                vit,
+                image_path,
+                classification['predicted_class_idx'],
+                pretransform=pretransform,
+                gini_params=gini_params)
 
     attribution_path = dirs[
         "attribution"] / f"{image_path.stem}_attribution.npy"
@@ -120,6 +121,10 @@ def classify_explain_single_image(image_path: Path,
     attribution_neg_path = dirs[
         "attribution"] / f"{image_path.stem}_attribution_neg.npy"
     np.save(attribution_neg_path, attribution_neg)
+
+    ffn_activity_path = dirs[
+        "attribution"] / f"{image_path.stem}_ffn_activity.npy"
+    np.save(ffn_activity_path, ffn_activity)
     # explainer.visualize(image, attribution, save_path=str(vis_path))
 
     vit_input_path = dirs[
@@ -143,7 +148,9 @@ def classify_explain_single_image(image_path: Path,
         "attribution_neg_path":
         str(attribution_neg_path),
         "attribution_vis_path":
-        str(vis_path)
+        str(vis_path),
+        "ffn_activity_path":
+        str(ffn_activity_path)
     }
 
     save_to_cache(cache_path, result)

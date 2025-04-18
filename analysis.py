@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -344,7 +345,8 @@ def analyze_faithfulness_vs_correctness(
             'is_correct': row['predicted_class'] == true_class,
             'confidence': row['confidence'],
             'attribution_path': row['attribution_path'],
-            'attribution_neg_path': row['attribution_neg_path']
+            'attribution_neg_path': row['attribution_neg_path'],
+            'ffn_activity_path': row['ffn_activity_path']
         })
 
     return pd.DataFrame(results)
@@ -454,7 +456,7 @@ def analyze_key_attribution_patterns(df):
     df = sparsity_metrics(df)
     df = attribution_consistency_metrics(df)
     df = robustness_metrics(df)
-
+    df = add_ffn_activity_metrics(df)
     # Clean data
     df_clean = df.dropna(
         subset=['saco_score', 'neg_magnitude', 'pos_magnitude'])
@@ -490,7 +492,17 @@ def analyze_key_attribution_patterns(df):
         # Robustness metrics
         'smoothing_stability',
         'noise_stability',
-        'peak_persistence'
+        'peak_persistence',
+        # Add FFN activity metrics if they exist in the dataframe
+        'ffn_mean_activity',
+        'ffn_cls_activity',
+        'ffn_last_layer_activity',
+        'ffn_max_layer_activity',
+        'ffn_early_layers_activity',
+        'ffn_middle_layers_activity',
+        'ffn_late_layers_activity',
+        'ffn_layer_activity_variance',
+        'ffn_token_activity_variance'
     ]
 
     # Extract class from image name (assuming 'image_name' column exists)
@@ -506,7 +518,7 @@ def analyze_key_attribution_patterns(df):
 
     if 'filename' in df_clean.columns:
         df_clean['class'] = df_clean['filename'].apply(get_class)
-    # df_clean['class'] = df_clean['true_class']
+    df_clean['class'] = df_clean['true_class']
     # Calculate overall correlations with SaCo score
     if len(df_clean) > 0:
         print("\n" + "=" * 60)
@@ -957,6 +969,84 @@ def robustness_metrics(df):
 
         except Exception as e:
             print(f"Error calculating robustness for {row['filename']}: {e}")
+            for key in metrics:
+                metrics[key].append(np.nan)
+
+    # Add metrics to dataframe
+    for key, values in metrics.items():
+        df[key] = values
+
+    return df
+
+
+def add_ffn_activity_metrics(df):
+    """
+    Add FFN activity metrics to the dataframe for correlation analysis.
+    """
+    # Initialize new columns for FFN activity metrics
+    metrics = {
+        'ffn_mean_activity': [],  # Mean activity across all layers and tokens
+        'ffn_cls_activity': [],  # Mean activity of CLS token across layers
+        'ffn_last_layer_activity': [],  # Activity in the last layer
+        'ffn_max_layer_activity': [],  # Maximum layer-wise activity
+        'ffn_early_layers_activity': [],  # Activity in first third of layers
+        'ffn_middle_layers_activity': [],  # Activity in middle third of layers
+        'ffn_late_layers_activity': [],  # Activity in last third of layers
+        'ffn_layer_activity_variance':
+        [],  # Variance of activity across layers
+        'ffn_token_activity_variance':
+        []  # Mean variance of activity across tokens
+    }
+
+    for _, row in df.iterrows():
+        try:
+            # Create filename based on image name - adjust pattern as needed
+            # Load FFN activity data
+            ffn_data = np.load(row['ffn_activity_path'], allow_pickle=True)
+
+            # Calculate various aggregations
+            layer_means = [layer['mean_activity'] for layer in ffn_data]
+            metrics['ffn_mean_activity'].append(np.mean(layer_means))
+
+            cls_activities = [
+                layer['cls_activity'] for layer in ffn_data
+                if 'cls_activity' in layer
+            ]
+            metrics['ffn_cls_activity'].append(
+                np.mean(cls_activities) if cls_activities else np.nan)
+
+            metrics['ffn_last_layer_activity'].append(
+                ffn_data[-1]['mean_activity'])
+            metrics['ffn_max_layer_activity'].append(np.max(layer_means))
+
+            # Activity by layer groups (early, middle, late)
+            num_layers = len(ffn_data)
+            third = num_layers // 3
+            metrics['ffn_early_layers_activity'].append(
+                np.mean(layer_means[:third]))
+            metrics['ffn_middle_layers_activity'].append(
+                np.mean(layer_means[third:2 * third]))
+            metrics['ffn_late_layers_activity'].append(
+                np.mean(layer_means[2 * third:]))
+
+            metrics['ffn_layer_activity_variance'].append(np.var(layer_means))
+
+            # Mean variance across tokens
+            token_variances = []
+            for i in range(len(ffn_data)):
+                if 'activity' not in ffn_data[i] or not isinstance(
+                        ffn_data[i]['activity'], np.ndarray):
+                    continue
+                token_activity = ffn_data[i]['activity']
+                if token_activity.ndim > 0 and token_activity.shape[0] > 1:
+                    token_variances.append(np.var(
+                        token_activity[1:]))  # Exclude CLS token
+
+            metrics['ffn_token_activity_variance'].append(
+                np.mean(token_variances) if token_variances else np.nan)
+
+        except Exception as e:
+            print(f"Error processing FFN activity for {row['filename']}: {e}")
             for key in metrics:
                 metrics[key].append(np.nan)
 

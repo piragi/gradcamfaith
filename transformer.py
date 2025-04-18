@@ -417,7 +417,7 @@ def transmm(vit: ViT,
         R_neg = R_neg + apply_self_attention_rules(R_neg, cam_neg)
 
         # Explicitly delete intermediates
-        del grad, cam
+        del grad, cam, cam_neg
 
     # Extract patch tokens relevance (excluding CLS token)
     transformer_attribution = R[0, 1:].clone()
@@ -459,6 +459,370 @@ def transmm(vit: ViT,
     attribution_neg = normalize(attribution_neg)
 
     return np.array(img), (attribution, attribution_neg)
+
+
+def calculate_transformation_weights(input_tokens, output_tokens):
+    """Calculate token transformation weights based on length ratio and directional correlation."""
+    # Calculate L2 norm (length) for each token
+    input_lengths = torch.norm(input_tokens, p=2,
+                               dim=-1)  # [batch_size, num_tokens]
+    output_lengths = torch.norm(output_tokens, p=2,
+                                dim=-1)  # [batch_size, num_tokens]
+
+    # Calculate ratio (handle division by zero)
+    eps = 1e-8  # small epsilon to avoid division by zero
+    length_ratio = output_lengths / (input_lengths + eps)
+
+    # Normalize tokens for cosine similarity
+    input_norm = F.normalize(input_tokens, p=2, dim=-1)
+    output_norm = F.normalize(output_tokens, p=2, dim=-1)
+
+    # Calculate cosine similarity between original and transformed tokens
+    cosine_sim = torch.sum(input_norm * output_norm,
+                           dim=-1)  # [batch_size, num_tokens]
+
+    # Apply softmax to get NECC (across tokens for each batch)
+    necc = F.softmax(cosine_sim, dim=-1)
+
+    # Combine both measurements into final transformation weights
+    return length_ratio * necc
+
+
+def combined_gae_tokentm(vit,
+                         image_path,
+                         target_class=None,
+                         pretransform=False,
+                         gini_params: Tuple[float, float,
+                                            float] = (0.65, 8.0, 0.5)):
+    """
+    Memory-efficient implementation that calculates both GAE and TokenTM attributions.
+    
+    Args:
+        vit: ViT model instance
+        image_path: Path to the image
+        target_class: Target class index (if None, use predicted class)
+        pretransform: Whether to apply Gini-based normalization to attention maps
+        gini_params: Parameters for Gini-based normalization
+        
+    Returns:
+        Tuple of (original_image_array, gae_attribution, tokentm_attribution)
+    """
+    # Preprocess image
+    img = vit.preprocess_image(image_path)
+    input_tensor = vit.processor(img)
+    device = vit.device
+
+    # Forward pass without hooks first to determine class
+    if target_class is None:
+        with torch.no_grad():
+            outputs = vit.model(input_tensor.unsqueeze(0).to(device).detach())
+            target_class = outputs.argmax(dim=1).item()
+            del outputs
+            torch.cuda.empty_cache()
+
+    # Clear any existing gradients
+    vit.model.zero_grad()
+
+    # Forward pass with hook registration
+    output = vit.model(input_tensor.unsqueeze(0).to(device),
+                       register_hook=True)
+
+    # Create one-hot vector on CPU to save memory
+    one_hot = np.zeros((1, output.size()[-1]), dtype=np.float32)
+    one_hot[0, target_class] = 1
+    one_hot = torch.from_numpy(one_hot).requires_grad_(True).to(device)
+
+    # Scale output by one_hot
+    loss = torch.sum(one_hot * output)
+
+    vit.model.zero_grad()
+    loss.backward(retain_graph=True)
+
+    # Get attention maps and gradients
+    num_tokens = vit.model.blocks[0].attn.get_attention_map().shape[-1]
+
+    # GAE initialization (identity matrix)
+    R_gae = torch.eye(num_tokens, num_tokens).to('cpu')
+
+    # TokenTM initialization (token lengths)
+    # Extract initial token lengths from patch embedding
+    with torch.no_grad():
+        # Get patch tokens and their lengths
+        patch_tokens = vit.model.patch_embed(
+            input_tensor.unsqueeze(0).to(device))[0].detach()
+        patch_lengths = torch.norm(patch_tokens, p=2, dim=-1)
+
+        # Get the actual class token length
+        cls_token_length = torch.norm(vit.model.cls_token, p=2, dim=-1)
+
+        # Combine them
+        token_lengths = torch.zeros(patch_lengths.shape[0] + 1, device='cpu')
+        token_lengths[0] = cls_token_length.cpu()
+        token_lengths[1:] = patch_lengths.cpu()
+
+        C_tokentm = torch.diag(token_lengths)  # This will be 197x197
+
+    # Process each block
+    for i, blk in enumerate(vit.model.blocks):
+        # Common calculations for both methods
+        grad = blk.attn.get_attn_gradients().detach().cpu()
+        cam = blk.attn.get_attention_map().detach().cpu()
+
+        # Calculate attention-gradient weighted contribution
+        weighted_cam = avg_heads(cam, grad)
+
+        # 1. GAE calculation (original implementation)
+        R_gae = R_gae + apply_self_attention_rules(R_gae, weighted_cam)
+
+        # 2. TokenTM calculation
+        # Get input/output tokens for attention and FFN
+        attn_input = blk.attn.input_tokens.detach().cpu()
+        attn_output = blk.attn.output_tokens.detach().cpu()
+        ffn_input = blk.mlp.input_tokens.detach().cpu()
+        ffn_output = blk.mlp.output_tokens.detach().cpu()
+
+        # Calculate transformation weights for attention
+        W_attn = calculate_transformation_weights(attn_input, attn_output)
+
+        # Make dimension alignment explicit
+        W_attn_col = W_attn.squeeze(0).unsqueeze(1)  # [num_tokens, 1]
+        # Apply transformation weights column-wise to attention map
+        T_attn = weighted_cam * W_attn_col.transpose(
+            0, 1)  # Ensures column-wise application
+
+        # Create identity matrix
+        I = torch.eye(num_tokens, num_tokens).to('cpu')
+
+        # Create update map for MHSA: U = I + T
+        U_mhsa = I + T_attn
+
+        # Calculate transformation weights for FFN
+        W_ffn = calculate_transformation_weights(ffn_input, ffn_output)
+
+        # Create update map for FFN: U = I + I·W
+        # Convert W_ffn to diagonal matrix format
+        W_ffn_diag = torch.diag(W_ffn.squeeze())
+        U_ffn = I + W_ffn_diag
+
+        # Update C using matrix multiplication (TokenTM approach)
+        C_tokentm = U_ffn @ U_mhsa @ C_tokentm
+
+        # Clean up intermediates to save memory
+        del grad, cam, weighted_cam, W_attn, T_attn, W_ffn, W_ffn_diag
+
+    # Extract patch tokens relevance (excluding CLS token)
+    gae_attribution = R_gae[0, 1:].clone()
+    tokentm_attribution = C_tokentm[0, 1:].clone()
+
+    del R_gae, C_tokentm
+
+    # Process attributions
+    def process_attribution(attribution):
+        # Reshape to patch grid
+        side_size = int(np.sqrt(attribution.size(0)))
+        attribution = attribution.reshape(1, 1, side_size, side_size)
+
+        # Move back to GPU only for interpolation
+        attribution = attribution.to(device)
+
+        # Upscale to image size
+        attribution = F.interpolate(attribution,
+                                    size=(vit.img_size, vit.img_size),
+                                    mode='bilinear')
+
+        # Convert to numpy and normalize
+        return attribution.reshape(vit.img_size,
+                                   vit.img_size).cpu().detach().numpy()
+
+    gae_result = process_attribution(gae_attribution)
+    tokentm_result = process_attribution(tokentm_attribution)
+
+    # Clean up
+    del gae_attribution, tokentm_attribution, input_tensor, output, one_hot, loss
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    # Normalize
+    normalize = lambda x: (x - x.min()) / (x.max() - x.min() + 1e-8)
+
+    gae_result = normalize(gae_result)
+    tokentm_result = normalize(tokentm_result)
+
+    return np.array(img), gae_result, tokentm_result
+
+
+def calculate_ffn_activity(ffn_input, ffn_output):
+    """
+    Calculate FFN activity based on length change and directional shift.
+    
+    Args:
+        ffn_input: Input tokens to FFN [batch_size, num_tokens, dim]
+        ffn_output: Output tokens from FFN [batch_size, num_tokens, dim]
+        
+    Returns:
+        FFN activity metric [batch_size, num_tokens]
+    """
+    # Normalize tokens for cosine similarity
+    input_norm = F.normalize(ffn_input, p=2, dim=-1)
+    output_norm = F.normalize(ffn_output, p=2, dim=-1)
+
+    # Calculate cosine similarity
+    cosine_sim = torch.sum(input_norm * output_norm, dim=-1)
+
+    # Calculate directional change component: (1 - cos⟨Eᵢ, Ẽᵢ⟩)
+    directional_change = 1 - cosine_sim
+
+    # Calculate length ratios
+    input_lengths = torch.norm(ffn_input, p=2, dim=-1)
+    output_lengths = torch.norm(ffn_output, p=2, dim=-1)
+    eps = 1e-8  # Avoid division by zero
+    length_ratio = output_lengths / (input_lengths + eps)
+
+    # Calculate magnitude change component: |log(L(Ẽᵢ)/L(Eᵢ))|
+    magnitude_change = torch.abs(torch.log(length_ratio + eps))
+
+    # Combine for final metric
+    ffn_activity = directional_change * magnitude_change
+
+    return ffn_activity
+
+
+def transmm_with_ffn_activity(vit,
+                              image_path,
+                              target_class=None,
+                              pretransform=False,
+                              gini_params: Tuple[float, float,
+                                                 float] = (0.65, 8.0, 0.5),
+                              activity_aggregation='mean'):
+    """
+    Memory-efficient implementation of TransMM with added FFN activity metric.
+    
+    Args:
+        vit: ViT model instance
+        image_path: Path to the image
+        target_class: Target class index (if None, use predicted class)
+        pretransform: Whether to apply Gini-based normalization
+        gini_params: Parameters for Gini normalization
+        activity_aggregation: How to aggregate FFN activity ('mean', 'layer_wise', 'token_wise', or 'full')
+        
+    Returns:
+        Tuple of (original_image_array, attribution_maps, ffn_activity_data)
+    """
+    # Preprocess image
+    img = vit.preprocess_image(image_path)
+    input_tensor = vit.processor(img)
+    device = vit.device
+
+    # Forward pass without hooks first to determine class
+    if target_class is None:
+        with torch.no_grad():
+            outputs = vit.model(input_tensor.unsqueeze(0).to(device).detach())
+            target_class = outputs.argmax(dim=1).item()
+            del outputs
+            torch.cuda.empty_cache()
+
+    # Clear any existing gradients
+    vit.model.zero_grad()
+
+    # Forward pass with hook registration
+    output = vit.model(input_tensor.unsqueeze(0).to(device),
+                       register_hook=True)
+
+    # Create one-hot vector on CPU to save memory
+    one_hot = np.zeros((1, output.size()[-1]), dtype=np.float32)
+    one_hot[0, target_class] = 1
+    one_hot = torch.from_numpy(one_hot).requires_grad_(True).to(device)
+
+    # Scale output by one_hot
+    loss = torch.sum(one_hot * output)
+
+    vit.model.zero_grad()
+    loss.backward(retain_graph=True)
+
+    # Get attention maps and gradients
+    num_tokens = vit.model.blocks[0].attn.get_attention_map().shape[-1]
+    R = torch.eye(num_tokens, num_tokens).to('cpu')  # Keep on CPU
+    R_neg = torch.eye(num_tokens, num_tokens).to('cpu')  # Keep on CPU
+
+    # Initialize container for FFN activity
+    ffn_activities = []
+
+    # Process each block
+    for i, blk in enumerate(vit.model.blocks):
+        # Get data and immediately move to CPU
+        grad = blk.attn.get_attn_gradients().detach().cpu()
+        cam = blk.attn.get_attention_map().detach().cpu()
+
+        # Process on CPU to save GPU memory
+        cam = avg_heads(cam, grad)
+        cam_neg = avg_heads_min(cam, grad)
+        R = R + apply_self_attention_rules(R, cam)
+        R_neg = R_neg + apply_self_attention_rules(R_neg, cam_neg)
+
+        # Calculate FFN activity
+        ffn_input = blk.mlp.input_tokens.detach().cpu()
+        ffn_output = blk.mlp.output_tokens.detach().cpu()
+        ffn_activity = calculate_ffn_activity(ffn_input, ffn_output)
+
+        # Store activity data (convert to numpy to save memory)
+        ffn_activities.append({
+            'layer':
+            i,
+            'activity':
+            ffn_activity.squeeze(0).numpy()
+            if ffn_activity.dim() > 1 else ffn_activity.numpy(),
+            'mean_activity':
+            ffn_activity.mean().item(),
+            'cls_activity':
+            ffn_activity[0, 0].item()
+            if ffn_activity.dim() > 1 else ffn_activity[0].item()
+        })
+
+        # Explicitly delete intermediates
+        del grad, cam, cam_neg, ffn_activity
+
+    # Extract patch tokens relevance (excluding CLS token)
+    transformer_attribution = R[0, 1:].clone()
+    transformer_attribution_neg = R_neg[0, 1:].clone()
+    del R, R_neg
+
+    def process_transformer_attribution(transformer_attribution):
+        # Reshape to patch grid
+        side_size = int(np.sqrt(transformer_attribution.size(0)))
+        transformer_attribution = transformer_attribution.reshape(
+            1, 1, side_size, side_size)
+
+        # Move back to GPU only for interpolation
+        transformer_attribution = transformer_attribution.to(device)
+
+        # Upscale to image size
+        transformer_attribution = F.interpolate(transformer_attribution,
+                                                size=(vit.img_size,
+                                                      vit.img_size),
+                                                mode='bilinear')
+
+        # Convert to numpy and normalize
+        return transformer_attribution.reshape(
+            vit.img_size, vit.img_size).cpu().detach().numpy()
+
+    attribution = process_transformer_attribution(transformer_attribution)
+    attribution_neg = process_transformer_attribution(
+        transformer_attribution_neg)
+
+    # Clean up
+    del transformer_attribution, transformer_attribution_neg, input_tensor, output, one_hot, loss
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    # Normalize
+    normalize = lambda x: (x - x.min()) / (x.max() - x.min() + 1e-8)
+
+    attribution = normalize(attribution)
+    attribution_neg = normalize(attribution_neg)
+
+    ffn_activity_result = ffn_activities
+
+    return np.array(img), (attribution, attribution_neg), ffn_activity_result
 
 
 def explain_image(image_path,

@@ -55,7 +55,7 @@ def subset_images(n: int = 100):
     df = pd.read_csv('./results/saco_scores.csv')
 
     # Exclude Normal class for now due to very high SaCo scores
-    prefixes = ["images/non_COVID"]
+    prefixes = ["images/non_COVID", "images/covid", "images/Normal"]
     result = []
 
     for prefix in prefixes:
@@ -117,6 +117,12 @@ def grid_search_gini_params(image_subset, method: str = "gini"):
                 saco_scores, *_ = analysis.calculate_saco_with_details(
                     "./results_transmmplus/patch_attribution_comparisons.csv")
 
+                correct_incorrect = analysis.analyze_faithfulness_vs_correctness(
+                    saco_scores,
+                    classification_results=
+                    './results_transmmplus/classification_results_mean.csv')
+                analysis.analyze_key_attribution_patterns(correct_incorrect)
+
                 # Create and save SaCo scores dataframe with parameter info
                 saco_df = pd.DataFrame({
                     'image_name': list(saco_scores.keys()),
@@ -176,7 +182,7 @@ def analyze_saco_scores(n, head):
     calculate_saco_median(file_path, n, head)
 
 
-subset = subset_images(n=200)
-summary_df = grid_search_gini_params(subset, method='gini_noncov')
+subset = subset_images(n=300)
+summary_df = grid_search_gini_params(subset, method='tokentm')
 
 #analyze_saco_scores(400, 400)
