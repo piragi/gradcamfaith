@@ -5,6 +5,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 
 from translrp.helpers import load_pretrained
@@ -15,29 +16,48 @@ from translrp.weight_init import trunc_normal_
 def _cfg(url='', **kwargs):
     return {
         'url': url,
-        'num_classes': 1000, 'input_size': (3, 224, 224), 'pool_size': None,
-        'crop_pct': .9, 'interpolation': 'bicubic',
-        'first_conv': 'patch_embed.proj', 'classifier': 'head',
+        'num_classes': 1000,
+        'input_size': (3, 224, 224),
+        'pool_size': None,
+        'crop_pct': .9,
+        'interpolation': 'bicubic',
+        'first_conv': 'patch_embed.proj',
+        'classifier': 'head',
         **kwargs
     }
 
 
 default_cfgs = {
     # patch models
-    'vit_small_patch16_224': _cfg(
-        url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-weights/vit_small_p16_224-15ec54c9.pth',
+    'vit_small_patch16_224':
+    _cfg(
+        url=
+        'https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-weights/vit_small_p16_224-15ec54c9.pth',
     ),
-    'vit_base_patch16_224': _cfg(
-        url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_p16_224-80ecf9dd.pth',
-        mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5),
+    'vit_base_patch16_224':
+    _cfg(
+        url=
+        'https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_p16_224-80ecf9dd.pth',
+        mean=(0.5, 0.5, 0.5),
+        std=(0.5, 0.5, 0.5),
     ),
-    'vit_large_patch16_224': _cfg(
-        url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_large_p16_224-4ee7a4dc.pth',
-        mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+    'vit_large_patch16_224':
+    _cfg(
+        url=
+        'https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_large_p16_224-4ee7a4dc.pth',
+        mean=(0.5, 0.5, 0.5),
+        std=(0.5, 0.5, 0.5)),
 }
 
+
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+
+    def __init__(self,
+                 in_features,
+                 hidden_features=None,
+                 out_features=None,
+                 act_layer=nn.GELU,
+                 drop=0.):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -46,22 +66,46 @@ class Mlp(nn.Module):
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
-    def forward(self, x):
+    def save_input(self, x):
+        self.input_tokens = x
+
+    def save_output(self, x):
+        self.output_tokens = x
+
+    def save_output_grad(self, grad):
+        self.output_grad = grad
+
+    def get_output_grad(self):
+        return self.output_grad
+
+    def forward(self, x, register_hook=False):
+        self.save_input(x)
+
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
         x = self.fc2(x)
         x = self.drop(x)
+
+        self.save_output(x)
+        if register_hook:
+            x.register_hook(self.save_output_grad)
         return x
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False,attn_drop=0., proj_drop=0.):
+
+    def __init__(self,
+                 dim,
+                 num_heads=8,
+                 qkv_bias=False,
+                 attn_drop=0.,
+                 proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
-        self.scale = head_dim ** -0.5
+        self.scale = head_dim**-0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -83,14 +127,21 @@ class Attention(nn.Module):
     def get_attention_map(self):
         return self.attention_map
 
+    def save_input(self, x):
+        self.input_tokens = x
+
+    def save_output(self, x):
+        self.output_tokens = x
+
     def forward(self, x, register_hook=False):
         b, n, _, h = *x.shape, self.num_heads
 
         # self.save_output(x)
         # x.register_hook(self.save_output_grad)
 
+        self.save_input(x)
         qkv = self.qkv(x)
-        q, k, v = rearrange(qkv, 'b n (qkv h d) -> qkv b h n d', qkv = 3, h = h)
+        q, k, v = rearrange(qkv, 'b n (qkv h d) -> qkv b h n d', qkv=3, h=h)
 
         dots = torch.einsum('bhid,bhjd->bhij', q, k) * self.scale
 
@@ -104,21 +155,36 @@ class Attention(nn.Module):
             attn.register_hook(self.save_attn_gradients)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
-        out =  self.proj(out)
+        out = self.proj(out)
         out = self.proj_drop(out)
+        self.save_output(out)
         return out
 
 
 class Block(nn.Module):
 
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+    def __init__(self,
+                 dim,
+                 num_heads,
+                 mlp_ratio=4.,
+                 qkv_bias=False,
+                 drop=0.,
+                 attn_drop=0.,
+                 act_layer=nn.GELU,
+                 norm_layer=nn.LayerNorm):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+        self.attn = Attention(dim,
+                              num_heads=num_heads,
+                              qkv_bias=qkv_bias,
+                              attn_drop=attn_drop,
+                              proj_drop=drop)
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = Mlp(in_features=dim,
+                       hidden_features=mlp_hidden_dim,
+                       act_layer=act_layer,
+                       drop=drop)
 
     def forward(self, x, register_hook=False):
         x = x + self.attn(self.norm1(x), register_hook=register_hook)
@@ -129,16 +195,21 @@ class Block(nn.Module):
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     """
+
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
-        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
+        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] //
+                                                        patch_size[0])
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = num_patches
 
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.proj = nn.Conv2d(in_chans,
+                              embed_dim,
+                              kernel_size=patch_size,
+                              stride=patch_size)
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -148,31 +219,52 @@ class PatchEmbed(nn.Module):
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x
 
+
 class VisionTransformer(nn.Module):
     """ Vision Transformer
     """
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
-                 num_heads=12, mlp_ratio=4., qkv_bias=False, drop_rate=0., attn_drop_rate=0., norm_layer=nn.LayerNorm):
+
+    def __init__(self,
+                 img_size=224,
+                 patch_size=16,
+                 in_chans=3,
+                 num_classes=1000,
+                 embed_dim=768,
+                 depth=12,
+                 num_heads=12,
+                 mlp_ratio=4.,
+                 qkv_bias=False,
+                 drop_rate=0.,
+                 attn_drop_rate=0.,
+                 norm_layer=nn.LayerNorm):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
-        self.patch_embed = PatchEmbed(
-                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        self.patch_embed = PatchEmbed(img_size=img_size,
+                                      patch_size=patch_size,
+                                      in_chans=in_chans,
+                                      embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         self.blocks = nn.ModuleList([
-            Block(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
-                drop=drop_rate, attn_drop=attn_drop_rate, norm_layer=norm_layer)
-            for i in range(depth)])
+            Block(dim=embed_dim,
+                  num_heads=num_heads,
+                  mlp_ratio=mlp_ratio,
+                  qkv_bias=qkv_bias,
+                  drop=drop_rate,
+                  attn_drop=attn_drop_rate,
+                  norm_layer=norm_layer) for i in range(depth)
+        ])
         self.norm = norm_layer(embed_dim)
 
         # Classifier head
-        self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(
+            embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
@@ -195,7 +287,8 @@ class VisionTransformer(nn.Module):
         B = x.shape[0]
         x = self.patch_embed(x)
 
-        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        cls_tokens = self.cls_token.expand(
+            B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
         x = x + self.pos_embed
         x = self.pos_drop(x)
@@ -220,20 +313,35 @@ def _conv_filter(state_dict, patch_size=16):
 
 
 def vit_base_patch16_224(pretrained=False, **kwargs):
-    model = VisionTransformer(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model = VisionTransformer(patch_size=16,
+                              embed_dim=768,
+                              depth=12,
+                              num_heads=12,
+                              mlp_ratio=4,
+                              qkv_bias=True,
+                              norm_layer=partial(nn.LayerNorm, eps=1e-6),
+                              **kwargs)
     model.default_cfg = default_cfgs['vit_base_patch16_224']
     if pretrained:
-        load_pretrained(
-            model, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3), filter_fn=_conv_filter)
+        load_pretrained(model,
+                        num_classes=model.num_classes,
+                        in_chans=kwargs.get('in_chans', 3),
+                        filter_fn=_conv_filter)
     return model
 
+
 def vit_large_patch16_224(pretrained=False, **kwargs):
-    model = VisionTransformer(
-        patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model = VisionTransformer(patch_size=16,
+                              embed_dim=1024,
+                              depth=24,
+                              num_heads=16,
+                              mlp_ratio=4,
+                              qkv_bias=True,
+                              norm_layer=partial(nn.LayerNorm, eps=1e-6),
+                              **kwargs)
     model.default_cfg = default_cfgs['vit_large_patch16_224']
     if pretrained:
-        load_pretrained(model, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3))
+        load_pretrained(model,
+                        num_classes=model.num_classes,
+                        in_chans=kwargs.get('in_chans', 3))
     return model

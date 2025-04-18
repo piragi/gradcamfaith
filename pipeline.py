@@ -85,9 +85,8 @@ def save_attribution_results(
         "ffn_activity_path": str(ffn_activity_path)
     }
 
-
 # Classification functions
-def classify_single_image(
+def classify_explain_single_image(
     config: PipelineConfig,
     image_path: Path,
     vit: trans.ViT
@@ -177,7 +176,7 @@ def classify_dataset(config: PipelineConfig, vit: trans.ViT) -> pd.DataFrame:
     
     for i, image_path in enumerate(image_paths):
         print(f"Processing image {i+1}/{len(image_paths)}: {image_path.name}")
-        result = classify_single_image(config, image_path, vit)
+        result = classify_explain_single_image(config, image_path, vit)
         results.append(result)
     
     df = pd.DataFrame(results)

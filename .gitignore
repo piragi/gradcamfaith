@@ -9,3 +9,5 @@ chexpert/
 *.csv
 *.png
 model/
+results_transmmplus/
+*.ipynb

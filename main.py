@@ -42,6 +42,11 @@ def main():
 
 def run_saco():
     saco_scores, pair_data = analysis.calculate_saco_with_details()
+    saco_df = pd.DataFrame({
+        'image_name': list(saco_scores.keys()),
+        'saco_score': list(saco_scores.values())
+    })
+    saco_df.to_csv("./results/saco_scores.csv", index=False)
     analysis_df = analysis.analyze_patch_metrics(pair_data)
     analysis_df.to_csv("./results/patch_analysis_results.csv", index=False)
 
@@ -63,4 +68,4 @@ def run_saco():
 
 
 if __name__ == "__main__":
-    main()
+    run_saco()
