@@ -1,6 +1,5 @@
 import gc
 import os
-from collections import OrderedDict
 from typing import Tuple
 
 import cv2
@@ -10,7 +9,6 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 from PIL import Image
-from transformers import AutoImageProcessor, AutoModelForImageClassification
 
 from translrp.layers_ours import Linear
 from translrp.ViT_LRP import vit_base_patch16_224 as vit_lrp

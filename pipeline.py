@@ -5,7 +5,7 @@ from PIL import Image
 from diffusers import StableDiffusionInpaintPipeline
 import numpy as np
 
-from config import PipelineConfig, FileConfig, ClassificationConfig, PerturbationConfig
+from config import PipelineConfig, FileConfig
 import io_utils
 import transformer as trans
 import perturbation
@@ -23,23 +23,23 @@ def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
     Returns:
         List of paths to the processed images
     """
-    io_utils.ensure_directories([config.file_config.data_dir])
+    io_utils.ensure_directories([config.file.data_dir])
     
     image_files = list(source_dir.glob("**/*.png"))
     print(f"Found {len(image_files)} X-ray images")
     
     processed_paths = []
     for image_file in image_files:
-        output_path = config.file_config.data_dir / image_file.name
+        output_path = config.file.data_dir / image_file.name
         
         if output_path.exists():
-            print(f"Skipping {output_path.name} - already exists in {config.file_config.data_dir}")
+            print(f"Skipping {output_path.name} - already exists in {config.file.data_dir}")
             processed_paths.append(output_path)
             continue
         
         try:
             img = Image.open(image_file)
-            resized_img = img.resize(config.classification_config.target_size, Image.LANCZOS)
+            resized_img = img.resize(config.classify.target_size, Image.LANCZOS)
             resized_img.save(output_path)
             processed_paths.append(output_path)
             
@@ -47,7 +47,7 @@ def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
         except Exception as e:
             print(f"Error processing {image_file.name}: {e}")
     
-    print(f"Preprocessing complete. {len(processed_paths)} images saved to {config.file_config.data_dir}")
+    print(f"Preprocessing complete. {len(processed_paths)} images saved to {config.file.data_dir}")
     return processed_paths
 
 
@@ -103,21 +103,21 @@ def classify_explain_single_image(
         Dictionary with classification results and paths
     """
     cache_path = io_utils.build_cache_path(
-        config.file_config.cache_dir, 
+        config.file.cache_dir, 
         image_path, 
-        f"_classification{config.file_config.output_suffix}"
+        f"_classification{config.file.output_suffix}"
     )
     
     # Try to load from cache
     cached_result = io_utils.try_load_from_cache(cache_path)
-    if config.file_config.use_cached and cached_result:
+    if config.file.use_cached and cached_result:
         return cached_result
     
     # Classify the image
     image, classification = vit.classify_image(image_path=str(image_path))
     
     # Save the visualized image
-    vis_path = config.file_config.attribution_dir / f"{image_path.stem}_vis.png"
+    vis_path = config.file.attribution_dir / f"{image_path.stem}_vis.png"
     image.save(vis_path)
     
     # Generate attribution
@@ -125,13 +125,13 @@ def classify_explain_single_image(
         vit,
         image_path,
         classification['predicted_class_idx'],
-        pretransform=config.classification_config.pretransform,
-        gini_params=config.classification_config.gini_params
+        pretransform=config.classify.pretransform,
+        gini_params=config.classify.gini_params
     )
     
     # Save attribution results
     attribution_paths = save_attribution_results(
-        config.file_config,
+        config.file,
         image_path, 
         attribution_map, 
         attribution_neg, 
@@ -139,7 +139,7 @@ def classify_explain_single_image(
     )
     
     # Save the VIT input
-    vit_input_path = config.vit_inputs_dir / f"{image_path.stem}{config.output_suffix}.png"
+    vit_input_path = config.file.vit_inputs_dir / f"{image_path.stem}{config.file.output_suffix}.png"
     
     # Prepare the result
     result = {
@@ -171,7 +171,7 @@ def classify_dataset(config: PipelineConfig, vit: trans.ViT) -> pd.DataFrame:
         DataFrame with classification results and paths to attribution maps.
     """
     io_utils.ensure_directories(config.directories)
-    image_paths = list(config.data_dir.glob("*.png"))
+    image_paths = list(config.file.data_dir.glob("*.png"))
     results = []
     
     for i, image_path in enumerate(image_paths):
@@ -180,7 +180,7 @@ def classify_dataset(config: PipelineConfig, vit: trans.ViT) -> pd.DataFrame:
         results.append(result)
     
     df = pd.DataFrame(results)
-    results_path = config.output_dir / f"classification_results{config.output_suffix}.csv"
+    results_path = config.file.output_dir / f"classification_results{config.file.output_suffix}.csv"
     df.to_csv(results_path, index=False)
     
     return df
@@ -206,8 +206,8 @@ def generate_perturbed_identifier(
     Returns:
         Identifier string for the perturbed image
     """
-    if config.perturbation_method == "sd":
-        return f"{original_filename}_patch{patch_id}_x{x}_y{y}_s{config.perturbation_strength}"
+    if config.perturb.method == "sd":
+        return f"{original_filename}_patch{patch_id}_x{x}_y{y}_s{config.perturb.strength}"
     else:
         return f"{original_filename}_patch{patch_id}_x{x}_y{y}_mean"
 
@@ -231,26 +231,26 @@ def perturb_single_patch(
         Path to the perturbed image if successful, None otherwise
     """
     patch_id, x, y = patch_info
-    patch_size = config.patch_size
+    patch_size = config.perturb.patch_size
 
     perturbed_id = generate_perturbed_identifier(config, original_filename, patch_id, x, y)
-    perturbed_image_path = config.perturbed_dir / f'{perturbed_id}.png'
-    mask_path = config.mask_dir / f'{perturbed_id}_mask.npy'
+    perturbed_image_path = config.file.perturbed_dir / f'{perturbed_id}.png'
+    mask_path = config.file.mask_dir / f'{perturbed_id}_mask.npy'
 
     # Skip if already exists
     if perturbed_image_path.exists():
         return perturbed_image_path
 
     try:
-        if config.perturbation_method == "sd":
+        if config.perturb.method == "sd":
             if sd_pipe is None:
                 raise ValueError("SD pipe is required for SD perturbation but was not provided")
             
-            result_image, np_mask = perturbation.perturb_single_patch(
+            result_image, np_mask = perturbation.perturb_patch_sd(
                 sd_pipe,
                 original_filename, 
                 (x, y, patch_size),
-                strength=config.perturbation_strength
+                strength=config.perturb.strength
             )
         else:
             result_image, np_mask = perturbation.perturb_patch_mean(
@@ -313,7 +313,7 @@ def perturb_image_patches(
     original_filename = image_path.stem
     image = Image.open(image_path).convert("RGB")
     
-    patches = generate_patch_coordinates(image, config.patch_size)
+    patches = generate_patch_coordinates(image, config.perturb.patch_size)
     
     for patch_info in patches:
         perturbed_path = perturb_single_patch(
@@ -345,10 +345,10 @@ def perturb_dataset(
     Returns:
         List of paths to perturbed images
     """
-    io_utils.ensure_directories([config.perturbed_dir, config.mask_dir])
+    io_utils.ensure_directories([config.file.perturbed_dir, config.file.mask_dir])
     
     perturbed_image_paths = []
-    processing_df = results_df.head(config.perturbation_config.max_images) if config.perturbation_config.max_images else results_df
+    processing_df = results_df.head(config.perturb.max_images) if config.perturb.max_images else results_df
     
     for idx, row in enumerate(processing_df.iterrows()):
         _, row_data = row
@@ -362,24 +362,6 @@ def perturb_dataset(
     return perturbed_image_paths
 
 
-# Factory function
-def create_vit_model(config: PipelineConfig) -> trans.ViT:
-    """Create and initialize a ViT model.
-    
-    Args:
-        config: Pipeline configuration
-        
-    Returns:
-        Initialized ViT model
-    """
-    model_config = trans.ModelConfig(
-        model_type=trans.ModelType(config.classification_config.model_type),
-        num_classes=config.classification_config.num_classes,
-        device=config.classification_config.device
-    )
-    return trans.ViT(config=model_config, method=config.classification_config.attribution_method)
-
-
 def run_classification(config: PipelineConfig) -> pd.DataFrame:
     """
     Run the classification pipeline.
@@ -391,7 +373,7 @@ def run_classification(config: PipelineConfig) -> pd.DataFrame:
         DataFrame with classification results
     """
     io_utils.ensure_directories(config.directories)
-    vit_model = create_vit_model(config)
+    vit_model = trans.ViT(method=config.classify.attribution_method)
     return classify_dataset(config, vit_model)
 
 
@@ -408,8 +390,8 @@ def run_perturbation(config: PipelineConfig, results_df: pd.DataFrame) -> List[P
     """
     # Load the SD pipeline if needed
     sd_pipe = None
-    if config.perturbation_method == "sd":
-        sd_pipe = perturbation.create_sd_pipeline()
+    if config.perturb.method== "sd":
+        sd_pipe = perturbation.load_sd_model()
     
     return perturb_dataset(config, results_df, sd_pipe)
 

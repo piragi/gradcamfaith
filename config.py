@@ -99,16 +99,16 @@ class PerturbationConfig:
 class PipelineConfig:
     """Master configuration for the medical image analysis pipeline."""
     # Component configurations
-    file_config: FileConfig = field(default_factory=FileConfig)
-    classification_config: ClassificationConfig = field(default_factory=ClassificationConfig)
-    perturbation_config: PerturbationConfig = field(default_factory=PerturbationConfig)
+    file: FileConfig = field(default_factory=FileConfig)
+    classify: ClassificationConfig = field(default_factory=ClassificationConfig)
+    perturb: PerturbationConfig = field(default_factory=PerturbationConfig)
     
     @property
     def directories(self) -> List[Path]:
         """Return a list of all directories used by the pipeline."""
-        return self.file_config.directories
+        return self.file.directories
     
     @property
     def directory_map(self) -> Dict[str, Path]:
         """Return a map of all directories."""
-        return self.file_config.directory_map
+        return self.file.directory_map
