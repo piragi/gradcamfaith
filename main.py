@@ -1,71 +1,83 @@
-import gc
-import os
+# main.py
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
-import seaborn as sns
-import torch
 
 import analysis
+import config
 import pipeline as pipe
 
 
-def clear_gpu_memory():
-    """Explicitly clear PyTorch CUDA cache and run garbage collection"""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
-
-
 def main():
-    pipe.preprocess_dataset(
-        source_dir="./COVID-QU-Ex",
-        dest_dir="./images",
-        target_size=(224, 224),
-    )
+    pipeline_config = config.PipelineConfig()
+    results_df, perturbed_df = pipe.run_pipeline(
+        pipeline_config, source_dir=Path("./COVID-QU-Ex/"))
 
-    # Run original classification
-    results_df = pipe.classify("./images/")
-
-    perturbed_paths = pipe.perturb_all_patches(
-        results_df,
-        sd_pipe=None,
-        patch_size=16,  # Size of each patch
-        strength=0.2,  # Perturbation strength
-        max_images=None,
-        method="mean")
-    print(f"Generated {len(perturbed_paths)} perturbed patch images")
-    perturbed_results_df = pipe.classify("./results/patches", "_perturbed")
-    analysis.compare_attributions(results_df, perturbed_results_df)
+    analysis.compare_attributions(results_df,
+                                  perturbed_df,
+                                  generate_visualizations=False)
+    run_saco()
 
 
-def run_saco():
-    saco_scores, pair_data = analysis.calculate_saco_with_details()
+def run_saco(output_dir: str = "./results",
+             comparison_path: Optional[str] = None,
+             classification_path: Optional[str] = None,
+             method: str = "mean",
+             save_results: bool = True) -> Dict[str, Any]:
+    """
+    Run SaCo (Saliency Correlation) analysis on previously generated attribution comparisons.
+    
+    Args:
+        output_dir: Directory to save and read results
+        comparison_path: Path to comparison CSV (default: {output_dir}/patch_attribution_comparisons.csv)
+        classification_path: Path to classification results (default: {output_dir}/classification_results.csv)
+        method: Perturbation method to filter by
+        save_results: Whether to save results to files
+        
+    Returns:
+        Dictionary with analysis DataFrames
+    """
+    comparison_file = comparison_path or f"{output_dir}/patch_attribution_comparisons.csv"
+    classification_file = classification_path or f"{output_dir}/classification_results.csv"
+
+    saco_scores, pair_data = analysis.calculate_saco_with_details(
+        data_path=comparison_file, method=method)
+
     saco_df = pd.DataFrame({
         'image_name': list(saco_scores.keys()),
         'saco_score': list(saco_scores.values())
     })
-    saco_df.to_csv("./results/saco_scores.csv", index=False)
-    analysis_df = analysis.analyze_patch_metrics(pair_data)
-    analysis_df.to_csv("./results/patch_analysis_results.csv", index=False)
 
-    # Classify patches into categories
-    analysis_df['faithfulness_category'] = pd.cut(
-        analysis_df['patch_saco'],
-        bins=[-1, -0.5, 0, 0.5, 1],
-        labels=['Very Unfaithful', 'Unfaithful', 'Faithful', 'Very Faithful'])
+    patch_metrics_df = analysis.analyze_patch_metrics(pair_data)
 
-    # Count patches in each category
-    category_counts = analysis_df['faithfulness_category'].value_counts(
-    ).sort_index()
-    print("Patches by faithfulness category:")
-    print(category_counts)
+    # Analyze faithfulness vs. correctness
+    faithfulness_df = analysis.analyze_faithfulness_vs_correctness(
+        saco_scores, classification_results=classification_file)
 
-    correct_incorrect = analysis.analyze_faithfulness_vs_correctness(
-        saco_scores)
-    analysis.analyze_key_attribution_patterns(correct_incorrect)
+    # Analyze attribution patterns
+    patterns_df = analysis.analyze_key_attribution_patterns(faithfulness_df)
+
+    # Save results if requested
+    if save_results:
+        output_path = Path(output_dir)
+        saco_df.to_csv(output_path / "saco_scores.csv", index=False)
+        patch_metrics_df.to_csv(output_path / "patch_analysis_results.csv",
+                                index=False)
+        faithfulness_df.to_csv(output_path / "faithfulness_correctness.csv",
+                               index=False)
+        if not patterns_df.empty:
+            patterns_df.to_csv(output_path / "attribution_patterns.csv",
+                               index=False)
+
+    # Return all dataframes
+    return {
+        "saco_scores": saco_df,
+        "patch_metrics": patch_metrics_df,
+        "faithfulness_correctness": faithfulness_df,
+        "attribution_patterns": patterns_df
+    }
 
 
 if __name__ == "__main__":
-    run_saco()
+    main()

@@ -132,10 +132,6 @@ def classify_explain_single_image(config: PipelineConfig, image_path: Path,
 
     prediction = model.get_prediction(vit_model, input_tensor, device=device)
 
-    # Save the visualized image
-    vis_path = config.file.attribution_dir / f"{image_path.stem}_vis.png"
-    original_image.save(vis_path)
-
     attribution_result = attribution.generate_attribution(
         model=vit_model,
         input_tensor=input_tensor,
@@ -177,8 +173,6 @@ def classify_explain_single_image(config: PipelineConfig, image_path: Path,
         float(prediction["probabilities"][prediction["predicted_class_idx"]]),
         "probabilities":
         prediction["probabilities"].tolist(),
-        "attribution_vis_path":
-        str(vis_path),
         **attribution_paths
     }
 
@@ -433,10 +427,10 @@ def run_perturbation(config: PipelineConfig,
 
 
 def run_pipeline(
-        config: PipelineConfig,
-        source_dir: Optional[Path] = None,
-        device: Optional[torch.device] = None
-) -> Tuple[pd.DataFrame, List[Path]]:
+    config: PipelineConfig,
+    source_dir: Optional[Path] = None,
+    device: Optional[torch.device] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run the complete pipeline: preprocess, classify, and perturb.
     
@@ -460,6 +454,12 @@ def run_pipeline(
         preprocess_dataset(config, source_dir)
 
     results_df = run_classification(config, device)
-    perturbed_paths = run_perturbation(config, results_df)
 
-    return results_df, perturbed_paths
+    perturbed_paths = run_perturbation(config, results_df)
+    print(f"Generated {len(perturbed_paths)} perturbed patch images")
+
+    config.file.output_suffix = "_perturbed"
+    config.file.data_dir = Path("./results/patches")
+    perturbed_df = run_classification(config, device)
+
+    return results_df, perturbed_df
