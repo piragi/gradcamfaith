@@ -312,7 +312,7 @@ def _conv_filter(state_dict, patch_size=16):
     return out_dict
 
 
-def vit_base_patch16_224(pretrained=False, **kwargs):
+def vit_base_patch16_224(pretrained=False, **kwargs) -> VisionTransformer:
     model = VisionTransformer(patch_size=16,
                               embed_dim=768,
                               depth=12,
