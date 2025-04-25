@@ -248,12 +248,12 @@ def calculate_ssim_if_available(original_row: pd.Series,
     Returns:
         SSIM score or None if paths are not available
     """
-    if "vit_input_path" in original_row and "vit_input_path" in perturbed_row:
+    if "image_path" in original_row and "image_path" in perturbed_row:
         try:
             original_vit_img = Image.open(
-                original_row["vit_input_path"]).convert('RGB')
+                original_row["image_path"]).convert('RGB')
             perturbed_vit_img = Image.open(
-                perturbed_row["vit_input_path"]).convert('RGB')
+                perturbed_row["image_path"]).convert('RGB')
             return perturbation.patch_similarity(original_vit_img,
                                                  perturbed_vit_img)
         except Exception as e:

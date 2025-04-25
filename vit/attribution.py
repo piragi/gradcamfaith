@@ -113,43 +113,6 @@ def gini_based_normalization(attention_head: torch.Tensor,
                           (torch.sum(transformed) + 1e-10))
 
 
-def process_attribution_map(transformer_attribution: torch.Tensor,
-                            img_size: int, device: torch.device) -> np.ndarray:
-    """
-    Process raw attribution to create visualization-ready map.
-    
-    Args:
-        transformer_attribution: Raw attribution tensor for patch tokens
-        img_size: Size of output attribution map
-        device: Device to perform processing on
-        
-    Returns:
-        Processed attribution map as numpy array
-    """
-    # Reshape to patch grid
-    side_size = int(np.sqrt(transformer_attribution.size(0)))
-    transformer_attribution = transformer_attribution.reshape(
-        1, 1, side_size, side_size)
-
-    # Move back to specified device for interpolation
-    transformer_attribution = transformer_attribution.to(device)
-
-    # Upscale to image size
-    transformer_attribution = F.interpolate(transformer_attribution,
-                                            size=(img_size, img_size),
-                                            mode='bilinear')
-
-    # Convert to numpy and reshape
-    attribution = transformer_attribution.reshape(
-        img_size, img_size).cpu().detach().numpy()
-
-    # Normalize for visualization
-    attribution = (attribution - attribution.min()) / (
-        attribution.max() - attribution.min() + 1e-8)
-
-    return attribution
-
-
 def calculate_transformation_weights(
         input_tokens: torch.Tensor,
         output_tokens: torch.Tensor) -> torch.Tensor:

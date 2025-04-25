@@ -155,16 +155,10 @@ def classify_explain_single_image(config: PipelineConfig, image_path: Path,
         ffn_activities  # FFN activity data
     )
 
-    # Save the model input
-    vit_input_path = config.file.vit_inputs_dir / f"{image_path.stem}{config.file.output_suffix}.png"
-    original_image.save(vit_input_path)
-
     # Prepare the result
     result = {
         "image_path":
         str(image_path),
-        "vit_input_path":
-        str(vit_input_path),
         "predicted_class":
         prediction["predicted_class_label"],
         "predicted_class_idx":
