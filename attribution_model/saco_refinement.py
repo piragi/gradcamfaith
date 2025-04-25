@@ -9,7 +9,7 @@ import pandas as pd
 def refine_attribution_map(attribution_map: np.ndarray,
                            patch_metrics: pd.DataFrame,
                            patch_size: int = 16,
-                           learning_rate: float = 0.1) -> np.ndarray:
+                           learning_rate: float = 0.2) -> np.ndarray:
     """
     Refine attribution map based on patch-specific SaCo metrics.
     
@@ -138,8 +138,8 @@ def update_attribution_values(working_data: pd.DataFrame,
         patch_id = row['patch_id']
 
         # Calculate coordinates from patch_id
-        y = (patch_id // grid_size) * patch_size
-        x = (patch_id % grid_size) * patch_size
+        y = int((patch_id // grid_size) * patch_size)
+        x = int((patch_id % grid_size) * patch_size)
 
         # Skip if coordinates are out of bounds
         if y >= map_size or x >= map_size:
@@ -163,9 +163,9 @@ def iterate_saco_refinement(
     image_name: str,
     max_iterations: int = 10,
     learning_rate: float = 0.05,
-    initial_reg_weight: float = 0.7,
-    min_reg_weight: float = 0.2,
-    decay_rate: float = 0.9,
+    initial_reg_weight: float = 0.5,
+    min_reg_weight: float = 0.1,
+    decay_rate: float = 0.75,
     patch_size: int = 16,
     output_dir: Optional[str] = "./results/refined"
 ) -> Tuple[np.ndarray, float, List[Dict[str, Any]]]:
@@ -220,72 +220,65 @@ def iterate_saco_refinement(
     print(f"Initial SaCo score for {image_name}: {current_saco:.4f}")
 
     for iteration in range(max_iterations):
-        try:
-            # Get current attribution values and confidence impacts
-            attributions = working_data['mean_attribution'].values
-            confidence_impacts = working_data['confidence_delta_abs'].values
-            patch_ids = working_data['patch_id'].values
+        # Get current attribution values and confidence impacts
+        attributions = working_data['mean_attribution'].values
+        confidence_impacts = working_data['confidence_delta_abs'].values
+        patch_ids = working_data['patch_id'].values
 
-            # Calculate patch-specific metrics
-            _, pair_data = calculate_image_saco_with_details(
-                attributions, confidence_impacts, patch_ids)
+        # Calculate patch-specific metrics
+        _, pair_data = calculate_image_saco_with_details(
+            attributions, confidence_impacts, patch_ids)
 
-            patch_metrics_df = analyze_patch_metrics({image_name: pair_data})
+        patch_metrics_df = analyze_patch_metrics({image_name: pair_data})
 
-            # Apply regularized refinement
-            refined_map = regularized_refinement(
-                original_map=original_attribution,
-                current_map=current_map,
-                patch_metrics=patch_metrics_df,
-                learning_rate=learning_rate,
-                reg_weight=reg_weight,
-                patch_size=patch_size)
+        # Apply regularized refinement
+        refined_map = regularized_refinement(original_map=original_attribution,
+                                             current_map=current_map,
+                                             patch_metrics=patch_metrics_df,
+                                             learning_rate=learning_rate,
+                                             reg_weight=reg_weight,
+                                             patch_size=patch_size)
 
-            # Update mean_attribution values based on refined map
-            working_data = update_attribution_values(working_data, refined_map,
-                                                     patch_size)
+        # Update mean_attribution values based on refined map
+        working_data = update_attribution_values(working_data, refined_map,
+                                                 patch_size)
 
-            # Recalculate SaCo with updated attribution values
-            new_attributions = working_data['mean_attribution'].values
-            new_saco, _ = calculate_image_saco_with_details(
-                new_attributions, confidence_impacts, patch_ids)
+        # Recalculate SaCo with updated attribution values
+        new_attributions = working_data['mean_attribution'].values
+        new_saco, _ = calculate_image_saco_with_details(
+            new_attributions, confidence_impacts, patch_ids)
 
-            # Record iteration stats
-            iteration_stats.append({
-                'iteration': iteration + 1,
-                'saco_score': new_saco,
-                'reg_weight': reg_weight,
-                'improvement': new_saco - current_saco
-            })
+        # Record iteration stats
+        iteration_stats.append({
+            'iteration': iteration + 1,
+            'saco_score': new_saco,
+            'reg_weight': reg_weight,
+            'improvement': new_saco - current_saco
+        })
 
-            print(
-                f"Iteration {iteration+1}: SaCo {current_saco:.4f} -> {new_saco:.4f} "
-                f"(reg_weight: {reg_weight:.2f})")
+        print(
+            f"Iteration {iteration+1}: SaCo {current_saco:.4f} -> {new_saco:.4f} "
+            f"(reg_weight: {reg_weight:.2f})")
 
-            # Save intermediate results
-            if output_path:
-                np.save(
-                    output_path /
-                    f"{Path(image_name).stem}_iter{iteration+1}.npy",
-                    refined_map)
+        # Save intermediate results
+        if output_path:
+            np.save(
+                output_path / f"{Path(image_name).stem}_iter{iteration+1}.npy",
+                refined_map)
 
-            # Keep changes if SaCo improved - simplified logic
-            if new_saco > current_saco:
-                current_map = refined_map.copy()
-                current_saco = new_saco
+        # Keep changes if SaCo improved - simplified logic
+        if new_saco > current_saco:
+            current_map = refined_map.copy()
+            current_saco = new_saco
 
-                # Update best if this is the highest SaCo so far
-                if new_saco > best_saco:
-                    best_map = refined_map.copy()
-                    best_saco = new_saco
-            # If SaCo didn't improve, just keep the current map (no conservative step)
+            # Update best if this is the highest SaCo so far
+            if new_saco > best_saco:
+                best_map = refined_map.copy()
+                best_saco = new_saco
+        # If SaCo didn't improve, just keep the current map (no conservative step)
 
-            # Decay regularization weight
-            reg_weight = max(min_reg_weight, reg_weight * decay_rate)
-
-        except Exception as e:
-            print(f"Error in iteration {iteration+1}: {e}")
-            continue
+        # Decay regularization weight
+        reg_weight = max(min_reg_weight, reg_weight * decay_rate)
 
     # Save final refined map
     if output_path:
@@ -301,8 +294,8 @@ def run_refinement_pipeline(comparison_df: pd.DataFrame,
                             saco_scores: Dict[str, float],
                             original_results_df: pd.DataFrame,
                             output_dir: str = "./results/refined",
-                            max_iterations: int = 10,
-                            learning_rate: float = 0.05) -> pd.DataFrame:
+                            max_iterations: int = 15,
+                            learning_rate: float = 0.2) -> pd.DataFrame:
     """
     Run the refinement pipeline on a dataset using existing comparison data and SaCo scores.
     
@@ -333,60 +326,48 @@ def run_refinement_pipeline(comparison_df: pd.DataFrame,
     unique_images = comparison_df['original_image'].unique()
 
     for image_name in unique_images:
-        try:
-            # Get original attribution
-            image_rows = original_results_df[original_results_df['image_path']
-                                             == image_name]
-            if image_rows.empty:
-                print(
-                    f"Warning: No data found for {image_name} in original_results_df"
-                )
-                continue
-
-            original_attribution_path = image_rows['attribution_path'].iloc[0]
-            original_attribution = np.load(original_attribution_path)
-
-            print(f"\nRefining attribution for {image_name}")
-
-            # Get the initial SaCo score for this image
-            initial_saco = saco_scores.get(image_name, 0.0)
-
-            # Iteratively refine attribution - no per-image directories
-            refined_map, final_saco, iteration_stats = iterate_saco_refinement(
-                original_attribution=original_attribution,
-                comparison_df=comparison_df,
-                initial_saco=initial_saco,  # Pass only the relevant score
-                image_name=image_name,
-                max_iterations=max_iterations,
-                learning_rate=learning_rate,
-                output_dir=output_dir  # Save directly to the output directory
+        # Get original attribution
+        image_rows = original_results_df[original_results_df['image_path'] ==
+                                         image_name]
+        if image_rows.empty:
+            print(
+                f"Warning: No data found for {image_name} in original_results_df"
             )
-
-            # Save final refined attribution
-            refined_path = output_path / f"{Path(image_name).stem}_refined.npy"
-            np.save(refined_path, refined_map)
-
-            # Record results
-            refinement_results.append({
-                'original_image':
-                image_name,
-                'original_attribution_path':
-                original_attribution_path,
-                'refined_attribution_path':
-                str(refined_path),
-                'initial_saco':
-                initial_saco,
-                'final_saco':
-                final_saco,
-                'improvement':
-                final_saco - initial_saco,
-                'iterations':
-                len(iteration_stats)
-            })
-
-        except Exception as e:
-            print(f"Error refining attribution for {image_name}: {e}")
             continue
+
+        original_attribution_path = image_rows['attribution_path'].iloc[0]
+        original_attribution = np.load(original_attribution_path)
+
+        print(f"\nRefining attribution for {image_name}")
+
+        # Get the initial SaCo score for this image
+        initial_saco = saco_scores.get(image_name, 0.0)
+
+        # Iteratively refine attribution - no per-image directories
+        refined_map, final_saco, iteration_stats = iterate_saco_refinement(
+            original_attribution=original_attribution,
+            comparison_df=comparison_df,
+            initial_saco=initial_saco,  # Pass only the relevant score
+            image_name=image_name,
+            max_iterations=max_iterations,
+            learning_rate=learning_rate,
+            output_dir=output_dir  # Save directly to the output directory
+        )
+
+        # Save final refined attribution
+        refined_path = output_path / f"{Path(image_name).stem}_refined.npy"
+        np.save(refined_path, refined_map)
+
+        # Record results
+        refinement_results.append({
+            'original_image': image_name,
+            'original_attribution_path': original_attribution_path,
+            'refined_attribution_path': str(refined_path),
+            'initial_saco': initial_saco,
+            'final_saco': final_saco,
+            'improvement': final_saco - initial_saco,
+            'iterations': len(iteration_stats)
+        })
 
     # Create summary DataFrame
     results_df = pd.DataFrame(refinement_results)

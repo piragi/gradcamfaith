@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 import analysis
+import attribution_model.saco_refinement as saco_refinement
 import config
 import pipeline as pipe
 
@@ -14,6 +15,7 @@ def main():
     results_df, perturbed_df = pipe.run_pipeline(
         pipeline_config, source_dir=Path("./COVID-QU-Ex/"))
 
+    print("compare attributions")
     analysis.compare_attributions(results_df,
                                   perturbed_df,
                                   generate_visualizations=False)
@@ -41,6 +43,7 @@ def run_saco(output_dir: str = "./results",
     comparison_file = comparison_path or f"{output_dir}/patch_attribution_comparisons.csv"
     classification_file = classification_path or f"{output_dir}/classification_results.csv"
 
+    print("calculate SaCo")
     saco_scores, pair_data = analysis.calculate_saco_with_details(
         data_path=comparison_file, method=method)
 
@@ -80,4 +83,4 @@ def run_saco(output_dir: str = "./results",
 
 
 if __name__ == "__main__":
-    main()
+    run_saco()
