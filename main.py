@@ -3,10 +3,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
+import torch
 
 import analysis
 import attribution_model.saco_refinement as saco_refinement
 import config
+import io_utils
 import pipeline as pipe
 
 
@@ -19,6 +21,17 @@ def main():
     analysis.compare_attributions(results_df,
                                   perturbed_df,
                                   generate_visualizations=False)
+    run_saco()
+
+
+def classify_original_only():
+    pipeline_config = config.PipelineConfig()
+    # pipeline_config.file.use_cached = False
+    io_utils.ensure_directories(pipeline_config.directories)
+
+    device = torch.device("cuda")
+
+    pipe.run_classification(pipeline_config, device)
     run_saco()
 
 
@@ -83,4 +96,4 @@ def run_saco(output_dir: str = "./results",
 
 
 if __name__ == "__main__":
-    run_saco()
+    classify_original_only()

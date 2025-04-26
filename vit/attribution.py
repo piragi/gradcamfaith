@@ -188,12 +188,14 @@ def calculate_ffn_activity(ffn_input: torch.Tensor,
     return ffn_activity
 
 
-def transmm(model: VisionTransformer,
-            input_tensor: torch.Tensor,
-            target_class: Optional[int] = None,
-            gini_params: Optional[Tuple[float, float, float]] = None,
-            device: Optional[torch.device] = None,
-            img_size: int = 224) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
+def transmm(
+    model: VisionTransformer,
+    input_tensor: torch.Tensor,
+    target_class: Optional[int] = None,
+    gini_params: Optional[Tuple[float, float, float]] = None,
+    device: Optional[torch.device] = None,
+    img_size: int = 224
+) -> Tuple[np.ndarray, np.ndarray, List[Dict], List[Dict]]:
     """
     Memory-efficient implementation of TransMM.
     
@@ -325,7 +327,29 @@ def transmm(model: VisionTransformer,
     attribution = normalize(attribution)
     attribution_neg = normalize(attribution_neg)
 
-    return attribution, attribution_neg, ffn_activities
+    class_embedding_representations = token_class_embedding_representation(
+        model)
+
+    return attribution, attribution_neg, ffn_activities, class_embedding_representations
+
+
+def token_class_embedding_representation(model: VisionTransformer):
+    class_embedding_representations = []
+    for i, blk in enumerate(model.blocks, len(model.blocks) - 1):
+        attention_class_representation = model.get_class_embedding_space_representation(
+            blk.attn.output_tokens).detach().cpu()
+        mlp_class_representation = model.get_class_embedding_space_representation(
+            blk.mlp.output_tokens).detach().cpu()
+        class_embedding_representations.append({
+            'layer':
+            i,
+            'attention_class_representation':
+            attention_class_representation.squeeze(0).numpy(),
+            'mlp_class_representation':
+            mlp_class_representation.squeeze(0).numpy()
+        })
+
+    return class_embedding_representations
 
 
 def generate_attribution(model: VisionTransformer,
@@ -354,17 +378,19 @@ def generate_attribution(model: VisionTransformer,
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if method.lower() == "transmm":
-        pos_attr, neg_attr, ffn_activity = transmm(model=model,
-                                                   input_tensor=input_tensor,
-                                                   target_class=target_class,
-                                                   device=device,
-                                                   img_size=img_size,
-                                                   **kwargs)
+        pos_attr, neg_attr, ffn_activity, class_embedding_representation = transmm(
+            model=model,
+            input_tensor=input_tensor,
+            target_class=target_class,
+            device=device,
+            img_size=img_size,
+            **kwargs)
         return {
             "method": "transmm",
             "attribution_positive": pos_attr,
             "attribution_negative": neg_attr,
-            "ffn_activity": ffn_activity
+            "ffn_activity": ffn_activity,
+            "class_embedding_representation": class_embedding_representation
         }
 
     else:

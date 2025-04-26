@@ -163,9 +163,9 @@ def iterate_saco_refinement(
     image_name: str,
     max_iterations: int = 10,
     learning_rate: float = 0.05,
-    initial_reg_weight: float = 0.5,
-    min_reg_weight: float = 0.1,
-    decay_rate: float = 0.75,
+    initial_reg_weight: float = 0.2,
+    min_reg_weight: float = 0.01,
+    decay_rate: float = 0.85,
     patch_size: int = 16,
     output_dir: Optional[str] = "./results/refined"
 ) -> Tuple[np.ndarray, float, List[Dict[str, Any]]]:
@@ -294,8 +294,8 @@ def run_refinement_pipeline(comparison_df: pd.DataFrame,
                             saco_scores: Dict[str, float],
                             original_results_df: pd.DataFrame,
                             output_dir: str = "./results/refined",
-                            max_iterations: int = 15,
-                            learning_rate: float = 0.2) -> pd.DataFrame:
+                            max_iterations: int = 25,
+                            learning_rate: float = 0.6) -> pd.DataFrame:
     """
     Run the refinement pipeline on a dataset using existing comparison data and SaCo scores.
     

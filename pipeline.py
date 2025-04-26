@@ -63,10 +63,10 @@ def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
     return processed_paths
 
 
-def save_attribution_results(config: FileConfig, image_path: Path,
-                             attribution_map: np.ndarray,
-                             attribution_neg: np.ndarray,
-                             ffn_activity: List[Dict]) -> Dict[str, str]:
+def save_attribution_results(
+        config: FileConfig, image_path: Path, attribution_map: np.ndarray,
+        attribution_neg: np.ndarray, ffn_activity: List[Dict],
+        class_embedding_representation: List[Dict]) -> Dict[str, str]:
     """Save attribution results to files.
     
     Args:
@@ -82,6 +82,7 @@ def save_attribution_results(config: FileConfig, image_path: Path,
     attribution_path = config.attribution_dir / f"{image_path.stem}_attribution.npy"
     attribution_neg_path = config.attribution_dir / f"{image_path.stem}_attribution_neg.npy"
     ffn_activity_path = config.attribution_dir / f"{image_path.stem}_ffn_activity.npy"
+    class_embedding_representation_path = config.attribution_dir / f"{image_path.stem}_class_embedding_representation.npy"
 
     # Convert ffn_activities to numpy array format for saving
     ffn_activity_data = np.array([{
@@ -92,14 +93,28 @@ def save_attribution_results(config: FileConfig, image_path: Path,
     } for activity in ffn_activity],
                                  dtype=object)
 
+    # Convert ffn_activities to numpy array format for saving
+    class_embedding_representation_data = np.array([{
+        'layer':
+        activity['layer'],
+        'attention_class_representation':
+        activity['attention_class_representation'],
+        'mlp_class_representation':
+        activity['mlp_class_representation']
+    } for activity in class_embedding_representation],
+                                                   dtype=object)
+
     np.save(attribution_path, attribution_map)
     np.save(attribution_neg_path, attribution_neg)
     np.save(ffn_activity_path, ffn_activity_data)
+    np.save(class_embedding_representation_path,
+            class_embedding_representation_data)
 
     return {
         "attribution_path": str(attribution_path),
         "attribution_neg_path": str(attribution_neg_path),
-        "ffn_activity_path": str(ffn_activity_path)
+        "ffn_activity_path": str(ffn_activity_path),
+        "class_embedding_path": str(class_embedding_representation_path)
     }
 
 
@@ -145,6 +160,8 @@ def classify_explain_single_image(config: PipelineConfig, image_path: Path,
     pos_attr = attribution_result["attribution_positive"]
     neg_attr = attribution_result["attribution_negative"]
     ffn_activities = attribution_result["ffn_activity"]
+    class_embedding_representation = attribution_result[
+        "class_embedding_representation"]
 
     # Save attribution results
     attribution_paths = save_attribution_results(
@@ -152,8 +169,8 @@ def classify_explain_single_image(config: PipelineConfig, image_path: Path,
         image_path,
         pos_attr,  # Positive attribution map
         neg_attr,  # Negative attribution map
-        ffn_activities  # FFN activity data
-    )
+        ffn_activities,  # FFN activity data
+        class_embedding_representation)
 
     # Prepare the result
     result = {

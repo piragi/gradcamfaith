@@ -283,6 +283,9 @@ class VisionTransformer(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token'}
 
+    def get_class_embedding_space_representation(self, x):
+        return self.head(x)
+
     def forward(self, x, register_hook=False):
         B = x.shape[0]
         x = self.patch_embed(x)
