@@ -194,7 +194,8 @@ def transmm(
     target_class: Optional[int] = None,
     gini_params: Optional[Tuple[float, float, float]] = None,
     device: Optional[torch.device] = None,
-    img_size: int = 224
+    img_size: int = 224,
+    weigh_by_class_embedding: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, List[Dict], List[Dict]]:
     """
     Memory-efficient implementation of TransMM.
@@ -267,6 +268,30 @@ def transmm(
         # Process on CPU to save GPU memory
         cam_pos = avg_heads(cam, grad)
         cam_neg = avg_heads_min(cam, grad)
+
+        if weigh_by_class_embedding and i >= 7 and target_class >= 1:  # Only apply to layers 8-11
+            if target_class == 1:
+                output = blk.attn.output_tokens.detach()
+            if target_class == 2:
+                output = blk.mlp.output_tokens.detach()
+
+            # Get class logits for each token
+            class_logits = model.get_class_embedding_space_representation(
+                output)
+            target_class_logits = class_logits[:, :, target_class]
+
+            # Find tokens with high class relevance (top 50%)
+            threshold = torch.quantile(target_class_logits.flatten(), 0.0)
+            boost_mask = (target_class_logits > threshold).float()
+
+            # Create weights array (1.0 for normal, 1.2 for boosted)
+            boost_factor = 1.5
+            weights = torch.ones_like(boost_mask) + boost_factor * boost_mask
+            weights = weights.cpu()
+            # Apply weights to attention map
+            weights_rows = weights.view(-1, 1)
+            cam_pos = cam_pos * weights_rows
+
         R = R + apply_self_attention_rules(R, cam_pos)
         R_neg = R_neg + apply_self_attention_rules(R_neg, cam_neg)
 
@@ -335,7 +360,7 @@ def transmm(
 
 def token_class_embedding_representation(model: VisionTransformer):
     class_embedding_representations = []
-    for i, blk in enumerate(model.blocks, len(model.blocks) - 1):
+    for i, blk in enumerate(model.blocks):
         attention_class_representation = model.get_class_embedding_space_representation(
             blk.attn.output_tokens).detach().cpu()
         mlp_class_representation = model.get_class_embedding_space_representation(

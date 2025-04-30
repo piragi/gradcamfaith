@@ -6,10 +6,10 @@ import pandas as pd
 import torch
 
 import analysis
-import attribution_model.saco_refinement as saco_refinement
 import config
 import io_utils
 import pipeline as pipe
+import vit.model as model
 
 
 def main():
@@ -26,12 +26,16 @@ def main():
 
 def classify_original_only():
     pipeline_config = config.PipelineConfig()
-    # pipeline_config.file.use_cached = False
+    pipeline_config.file.use_cached = False
     io_utils.ensure_directories(pipeline_config.directories)
 
     device = torch.device("cuda")
 
-    pipe.run_classification(pipeline_config, device)
+    results_df = pipe.run_classification(pipeline_config, device)
+    perturbed_df = pd.read_csv("results/classification_results_perturbed.csv")
+    analysis.compare_attributions(results_df,
+                                  perturbed_df,
+                                  generate_visualizations=False)
     run_saco()
 
 
@@ -71,8 +75,11 @@ def run_saco(output_dir: str = "./results",
     faithfulness_df = analysis.analyze_faithfulness_vs_correctness(
         saco_scores, classification_results=classification_file)
 
+    vit_model = model.load_vit_model(num_classes=3)
+
     # Analyze attribution patterns
-    patterns_df = analysis.analyze_key_attribution_patterns(faithfulness_df)
+    patterns_df = analysis.analyze_key_attribution_patterns(
+        faithfulness_df, vit_model)
 
     # Save results if requested
     if save_results:
