@@ -2,17 +2,20 @@
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import numpy as np
 import pandas as pd
 import torch
+from PIL import Image
 
 import analysis
 import config
 import io_utils
 import pipeline as pipe
+import visualization
 import vit.model as model
 
 
-def main():
+def main(test: bool = True):
     pipeline_config = config.PipelineConfig()
     results_df, perturbed_df = pipe.run_pipeline(
         pipeline_config, source_dir=Path("./COVID-QU-Ex/"))
@@ -21,11 +24,15 @@ def main():
     analysis.compare_attributions(results_df,
                                   perturbed_df,
                                   generate_visualizations=False)
-    run_saco()
+    run_saco(output_dir="./results/")
 
 
 def classify_original_only():
     pipeline_config = config.PipelineConfig()
+    # pipeline_config.file.data_dir = Path("./images-test")
+    # pipeline_config.file.output_dir = Path("./results-test")
+    # pipeline_config.file.cache_dir = Path("./cache")
+    # pipeline_config.file.__post_init__()
     pipeline_config.file.use_cached = False
     io_utils.ensure_directories(pipeline_config.directories)
 
@@ -35,8 +42,9 @@ def classify_original_only():
     perturbed_df = pd.read_csv("results/classification_results_perturbed.csv")
     analysis.compare_attributions(results_df,
                                   perturbed_df,
+                                  output_dir="./results/",
                                   generate_visualizations=False)
-    run_saco()
+    run_saco(output_dir="./results")
 
 
 def run_saco(output_dir: str = "./results",
@@ -68,6 +76,8 @@ def run_saco(output_dir: str = "./results",
         'image_name': list(saco_scores.keys()),
         'saco_score': list(saco_scores.values())
     })
+    output_path = Path(output_dir)
+    saco_df.to_csv(output_path / "saco_scores_unchanged.csv", index=False)
 
     patch_metrics_df = analysis.analyze_patch_metrics(pair_data)
 
@@ -103,4 +113,4 @@ def run_saco(output_dir: str = "./results",
 
 
 if __name__ == "__main__":
-    classify_original_only()
+    main()

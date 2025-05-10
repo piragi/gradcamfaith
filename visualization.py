@@ -271,6 +271,8 @@ def visualize_attribution_map(attribution_map: np.ndarray,
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
 
+    plt.close(fig)  # Close the figure to prevent display
+
     return fig
 
 

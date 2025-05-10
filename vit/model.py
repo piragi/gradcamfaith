@@ -59,7 +59,8 @@ def load_vit_model(num_classes: int = 3,
 def get_prediction(model: nn.Module,
                    input_tensor: torch.Tensor,
                    class_map: Optional[Dict[int, str]] = None,
-                   device: Optional[torch.device] = None) -> Dict[str, Any]:
+                   device: Optional[torch.device] = None,
+                   eval: bool = True) -> Dict[str, Any]:
     """
     Get prediction from model for an input tensor.
     
@@ -79,7 +80,7 @@ def get_prediction(model: nn.Module,
         class_map = CLS2IDX
 
     # Ensure model is in eval mode
-    model.eval()
+    if eval: model.eval()
 
     # Add batch dimension if needed
     if input_tensor.dim() == 3:
@@ -87,8 +88,11 @@ def get_prediction(model: nn.Module,
 
     input_tensor = input_tensor.to(device)
 
-    with torch.no_grad():
-        outputs = model(input_tensor)
+    if eval:
+        with torch.no_grad():
+            outputs = model(input_tensor)
+    else:
+        outputs = model(input_tensor, register_hook=True)
 
     probs = F.softmax(outputs, dim=1)[0]
     pred_class_idx = probs.argmax().item()

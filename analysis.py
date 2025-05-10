@@ -292,6 +292,7 @@ def calculate_saco_with_details(
         pair_data[image_name] = image_pair_data
 
     print(f"Average SaCo score: {np.mean(list(results.values())):.4f}")
+    print(len(results))
     return results, pair_data
 
 
@@ -561,7 +562,7 @@ def get_key_attribution_metrics() -> List[str]:
     """
 
     # Define layer and class ranges based on your data
-    layers = range(0, 11)  # Adjust the range as needed
+    layers = range(0, 12)  # Adjust the range as needed
     classes = range(
         0, 3)  # Based on your classes 0, 1, 2 mentioned in the metrics
 
@@ -569,7 +570,9 @@ def get_key_attribution_metrics() -> List[str]:
     embedding_columns = []
     embedding_column_endings = [
         'mean_attn_logit', 'mean_mlp_logit', 'cls_token_attn_logit',
-        'cls_token_mlp_logit', 'var_attn_logit', 'var_mlp_logit'
+        'cls_token_mlp_logit', 'var_attn_logit', 'var_mlp_logit',
+        'mean_attn_alignment_change', 'var_attn_alignment_change',
+        'mean_mlp_alignment_change', 'var_mlp_alignment_change'
     ]
 
     # Class token MLP probabilities and logits
@@ -579,6 +582,37 @@ def get_key_attribution_metrics() -> List[str]:
                 embedding_columns.extend([
                     f'layer_{layer_idx}_class_{cls}_{ending}',
                 ])
+
+    # Add cross-class flow stats for class 0
+    # Add per-head stats
+    num_heads = 12  # Adjust based on your model
+    cross_class_stats_per_head = [
+        f'head_{h}_{stat}' for h in range(num_heads) for stat in [
+            'flow_from_class1_to_class0', 'flow_from_class2_to_class0',
+            'class0_gain_with_class1_attention',
+            'class0_gain_with_class2_attention', 'class0_gain_contrast_flow'
+        ]
+    ]
+    # Add cross-class flow columns for class 0
+    embedding_columns.extend([
+        f'layer_{l}_{stat}' for l in layers
+        for stat in cross_class_stats_per_head
+    ])
+
+    base_metrics = [
+        'mlp_mean_dist_to_pred_class',
+        'attn_mean_dist_to_pred_class',
+    ]
+
+    # Add class-specific distance metrics
+    for c in classes:
+        base_metrics.extend(
+            [f'mlp_mean_dist_to_class_{c}', f'attn_mean_dist_to_class_{c}'])
+
+    # Generate all column names with layer prefixes
+    geometry_metrics = [
+        f'layer_{l}_{metric}' for l in layers for metric in base_metrics
+    ]
 
     return [
         'neg_pos_ratio',
@@ -635,7 +669,8 @@ def get_key_attribution_metrics() -> List[str]:
         'attn_mean_dist_to_class_1',
         'attn_mean_dist_to_class_2',
         # Add all embedding columns
-        *embedding_columns
+        # *embedding_columns,
+        # *geometry_metrics
     ]
 
 
@@ -734,11 +769,13 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     # STATIC LAYERS/CLASSES/STATS - assumed constant across all rows
-    layers = range(0, 11)  # Only process layers 7-10
+    layers = range(0, 12)  # Only process layers 7-10
     classes = range(0, 3)  # 0-2
     stats = [
         'mean_attn_logit', 'mean_mlp_logit', 'cls_token_attn_logit',
-        'cls_token_mlp_logit', 'var_attn_logit', 'var_mlp_logit'
+        'cls_token_mlp_logit', 'var_attn_logit', 'var_mlp_logit',
+        'mean_attn_alignment_change', 'var_attn_alignment_change',
+        'mean_mlp_alignment_change', 'var_mlp_alignment_change'
     ]
 
     # Generate all column names
@@ -746,6 +783,20 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
         f'layer_{l}_class_{c}_{stat}' for l in layers for c in classes
         for stat in stats
     ]
+
+    # Add per-head stats
+    num_heads = 12  # Adjust based on your model
+    cross_class_stats_per_head = [
+        f'head_{h}_{stat}' for h in range(num_heads) for stat in [
+            'flow_from_class1_to_class0', 'flow_from_class2_to_class0',
+            'class0_gain_with_class1_attention',
+            'class0_gain_with_class2_attention', 'class0_gain_contrast_flow'
+        ]
+    ]  # Add cross-class flow columns for class 0
+    new_columns.extend([
+        f'layer_{l}_{stat}' for l in layers
+        for stat in cross_class_stats_per_head
+    ])
 
     # Pre-allocate results dictionary with NaN values
     results_dict = {col: np.full(len(df), np.nan) for col in new_columns}
@@ -762,8 +813,68 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                     continue
 
                 layer_data = embeddings[layer_idx]
+                attn_logits_input = layer_data[
+                    'attention_class_representation_input']
                 attn_logits = layer_data['attention_class_representation']
+                mlp_logits_input = layer_data['mlp_class_representation_input']
                 mlp_logits = layer_data['mlp_class_representation']
+
+                # Check if attention maps are available
+                if 'attention_map' in layer_data:
+                    attention_map = layer_data['attention_map']
+
+                    # Calculate cross-class information flow
+                    # Identify source tokens (high class 1/2 identifiability)
+                    class1_sources = (attn_logits_input[:, 1] > np.mean(
+                        attn_logits_input[:, 1])).astype(float)
+                    class2_sources = (attn_logits_input[:, 2] > np.mean(
+                        attn_logits_input[:, 2])).astype(float)
+
+                    # Identify tokens that GAINED COVID identifiability
+                    covid_gain = attn_logits[:, 0] - attn_logits_input[:, 0]
+
+                    # Process per head
+                    # Attention map should be [heads, seq, seq]
+                    num_heads = attention_map.shape[0]
+
+                    # Only process up to num_heads available
+                    actual_heads = min(
+                        num_heads,
+                        12)  # or whatever your model's head count is
+
+                    for h in range(actual_heads):
+                        attention_head = attention_map[h, :, :]  # [seq, seq]
+
+                        # Calculate flow for this head
+                        # einsum 'ij,j->i' means: for each token i, sum attention to all source tokens j
+                        flow_from_class1 = np.einsum('ij,j->i', attention_head,
+                                                     class1_sources)
+                        flow_from_class2 = np.einsum('ij,j->i', attention_head,
+                                                     class2_sources)
+
+                        # Weight by COVID gain
+                        class1_contribution = flow_from_class1 * covid_gain
+                        class2_contribution = flow_from_class2 * covid_gain
+
+                        # Calculate contrast flow
+                        contrast_flow = class1_contribution - 0.5 * class2_contribution
+
+                        # Store per-head metrics
+                        results_dict[
+                            f'layer_{layer_idx}_head_{h}_flow_from_class1_to_class0'][
+                                idx] = np.mean(flow_from_class1)
+                        results_dict[
+                            f'layer_{layer_idx}_head_{h}_flow_from_class2_to_class0'][
+                                idx] = np.mean(flow_from_class2)
+                        results_dict[
+                            f'layer_{layer_idx}_head_{h}_class0_gain_with_class1_attention'][
+                                idx] = np.mean(class1_contribution)
+                        results_dict[
+                            f'layer_{layer_idx}_head_{h}_class0_gain_with_class2_attention'][
+                                idx] = np.mean(class2_contribution)
+                        results_dict[
+                            f'layer_{layer_idx}_head_{h}_class0_gain_contrast_flow'][
+                                idx] = np.mean(contrast_flow)
 
                 for cls in classes:
                     # Calculate all metrics at once
@@ -775,10 +886,23 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                     cls_token_mlp = mlp_logits[0, cls]
                     var_mlp = np.var(mlp_logits[:, cls])
 
+                    alignment_change_mlp = mlp_logits[:,
+                                                      cls] - mlp_logits_input[:,
+                                                                              cls]
+                    alignment_change_attn = attn_logits[:,
+                                                        cls] - attn_logits_input[:,
+                                                                                 cls]
+
                     # Store in results dictionary
                     results_dict[
                         f'layer_{layer_idx}_class_{cls}_mean_attn_logit'][
                             idx] = mean_attn
+                    results_dict[
+                        f'layer_{layer_idx}_class_{cls}_mean_attn_alignment_change'][
+                            idx] = np.mean(alignment_change_attn)
+                    results_dict[
+                        f'layer_{layer_idx}_class_{cls}_var_attn_alignment_change'][
+                            idx] = np.var(alignment_change_attn)
                     results_dict[
                         f'layer_{layer_idx}_class_{cls}_cls_token_attn_logit'][
                             idx] = cls_token_attn
@@ -789,6 +913,12 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                     results_dict[
                         f'layer_{layer_idx}_class_{cls}_mean_mlp_logit'][
                             idx] = mean_mlp
+                    results_dict[
+                        f'layer_{layer_idx}_class_{cls}_mean_mlp_alignment_change'][
+                            idx] = np.mean(alignment_change_mlp)
+                    results_dict[
+                        f'layer_{layer_idx}_class_{cls}_var_mlp_alignment_change'][
+                            idx] = np.var(alignment_change_mlp)
                     results_dict[
                         f'layer_{layer_idx}_class_{cls}_cls_token_mlp_logit'][
                             idx] = cls_token_mlp
@@ -805,6 +935,48 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
     # Create a DataFrame from results_dict and join with original df
     results_df = pd.DataFrame(results_dict, index=df.index)
     return pd.concat([df, results_df], axis=1)
+
+
+def track_cross_class_information_flow(blk, model, target_class=0):
+    """Track how information flows from other classes to build COVID representations"""
+
+    # Get attention patterns
+    attention_map = blk.attn.get_attention_map()  # [batch, heads, seq, seq]
+
+    # Get class identifiability before and after
+    input_tokens = blk.attn.input_tokens
+    output_tokens = blk.attn.output_tokens
+
+    input_logits = model.get_class_embedding_space_representation(input_tokens)
+    output_logits = model.get_class_embedding_space_representation(
+        output_tokens)
+
+    # Identify source tokens (high class 1 or 2)
+    class1_sources = (input_logits[:, :, 1] > input_logits[:, :,
+                                                           1].mean()).float()
+    class2_sources = (input_logits[:, :, 2] > input_logits[:, :,
+                                                           2].mean()).float()
+
+    # Identify tokens that GAINED COVID identifiability
+    covid_gain = output_logits[:, :, 0] - input_logits[:, :, 0]
+    covid_receivers = (covid_gain > 0).float()
+
+    # Track attention flow from sources to receivers
+    attn_from_class1 = torch.einsum('bhij,bi->bhj', attention_map,
+                                    class1_sources).mean(1)
+    attn_from_class2 = torch.einsum('bhij,bi->bhj', attention_map,
+                                    class2_sources).mean(1)
+
+    # Weight by COVID gain
+    class1_contribution = attn_from_class1 * covid_gain
+    class2_contribution = attn_from_class2 * covid_gain
+
+    # Important tokens are those that:
+    # 1. Receive info from class 1 (pathological) and gain COVID
+    # 2. Don't receive much from class 2 (healthy) and gain COVID
+    importance = class1_contribution - 0.5 * class2_contribution
+
+    return importance
 
 
 # Metric Calculation Functions
@@ -1421,14 +1593,14 @@ def calculate_token_variances(ffn_data: np.ndarray) -> List[float]:
 def add_embedding_space_metrics(df: pd.DataFrame,
                                 model: VisionTransformer) -> pd.DataFrame:
     """
-    Add distance-based metrics from the class embedding space.
+    Add distance-based metrics from the class embedding space for all layers.
     
     Args:
         df: DataFrame with class embedding paths
         model: The trained Vision Transformer model
         
     Returns:
-        DataFrame with added embedding space metrics
+        DataFrame with added embedding space metrics for all layers
     """
     # Extract class prototypes from the model's classification head
     class_prototypes = model.head.weight.detach().cpu().numpy(
@@ -1440,19 +1612,28 @@ def add_embedding_space_metrics(df: pd.DataFrame,
     class_to_idx = {'COVID-19': 0, 'Non-COVID': 1, 'Normal': 2}
     num_classes = len(class_to_idx)
 
-    # Pre-allocate result columns with NaN values
-    result_cols = [
+    # STATIC LAYERS - assumed constant across all rows
+    layers = range(
+        0, 12)  # Process layers 0-10, same as add_class_embedding_metrics
+
+    # Define base metrics
+    base_metrics = [
         'mlp_mean_dist_to_pred_class', 'mlp_mean_decision_margin',
         'mlp_embedding_dist_variance', 'attn_mean_dist_to_pred_class',
         'attn_mean_decision_margin', 'attn_embedding_dist_variance'
     ]
 
-    # Add class-specific distance columns
+    # Add class-specific distance metrics
     for c in range(num_classes):
-        result_cols.extend(
+        base_metrics.extend(
             [f'mlp_mean_dist_to_class_{c}', f'attn_mean_dist_to_class_{c}'])
 
-    # Create a results dictionary to store all computed metrics
+    # Generate all column names with layer prefixes
+    result_cols = [
+        f'layer_{l}_{metric}' for l in layers for metric in base_metrics
+    ]
+
+    # Pre-allocate result columns with NaN values
     results_dict = {col: np.full(len(df), np.nan) for col in result_cols}
 
     # Process each row
@@ -1460,46 +1641,56 @@ def add_embedding_space_metrics(df: pd.DataFrame,
         try:
             embeddings = np.load(row['class_embedding_path'],
                                  allow_pickle=True)
-            last_layer = embeddings[0]
-
-            # Get logits from both MLP and attention
-            attn_logits = last_layer['attention_class_representation']
-            mlp_logits = last_layer['mlp_class_representation']
 
             # Get predicted class index
             pred_class = class_to_idx[row['predicted_class']]
 
-            # Process both MLP and Attention representations
-            for rep_type, logits in [('mlp', mlp_logits),
-                                     ('attn', attn_logits)]:
-                # For each token, calculate distances (negative logits as proxy for distances)
-                token_distances = -logits  # Higher logit = closer
+            # Process each layer
+            for layer_idx in layers:
+                if layer_idx >= len(embeddings):
+                    continue
 
-                # Mean distance to predicted class across all tokens
-                mean_dist_to_pred = np.mean(token_distances[:, pred_class])
+                layer_data = embeddings[layer_idx]
 
-                # Decision margins for each token (distance between closest and 2nd closest class)
-                sorted_dists = np.sort(token_distances, axis=1)
-                decision_margins = sorted_dists[:,
-                                                1] - sorted_dists[:,
-                                                                  0]  # Gap between closest and 2nd closest
-                mean_decision_margin = np.mean(decision_margins)
+                # Get logits from both MLP and attention
+                attn_logits = layer_data['attention_class_representation']
+                mlp_logits = layer_data['mlp_class_representation']
 
-                # Distance variance (spread of tokens from prototypes)
-                dist_variance = np.var(token_distances)
+                # Process both MLP and Attention representations
+                for rep_type, logits in [('mlp', mlp_logits),
+                                         ('attn', attn_logits)]:
+                    # For each token, calculate distances (negative logits as proxy for distances)
+                    token_distances = -logits  # Higher logit = closer
 
-                # Store computed metrics in results_dict
-                results_dict[f'{rep_type}_mean_dist_to_pred_class'][
-                    idx] = mean_dist_to_pred
-                results_dict[f'{rep_type}_mean_decision_margin'][
-                    idx] = mean_decision_margin
-                results_dict[f'{rep_type}_embedding_dist_variance'][
-                    idx] = dist_variance
+                    # Mean distance to predicted class across all tokens
+                    mean_dist_to_pred = np.mean(token_distances[:, pred_class])
 
-                # Store distances to each class
-                for c in range(num_classes):
-                    results_dict[f'{rep_type}_mean_dist_to_class_{c}'][
-                        idx] = np.mean(token_distances[:, c])
+                    # Decision margins for each token (distance between closest and 2nd closest class)
+                    sorted_dists = np.sort(token_distances, axis=1)
+                    decision_margins = sorted_dists[:,
+                                                    1] - sorted_dists[:,
+                                                                      0]  # Gap between closest and 2nd closest
+                    mean_decision_margin = np.mean(decision_margins)
+
+                    # Distance variance (spread of tokens from prototypes)
+                    dist_variance = np.var(token_distances)
+
+                    # Store computed metrics in results_dict with layer prefix
+                    results_dict[
+                        f'layer_{layer_idx}_{rep_type}_mean_dist_to_pred_class'][
+                            idx] = mean_dist_to_pred
+                    results_dict[
+                        f'layer_{layer_idx}_{rep_type}_mean_decision_margin'][
+                            idx] = mean_decision_margin
+                    results_dict[
+                        f'layer_{layer_idx}_{rep_type}_embedding_dist_variance'][
+                            idx] = dist_variance
+
+                    # Store distances to each class
+                    for c in range(num_classes):
+                        results_dict[
+                            f'layer_{layer_idx}_{rep_type}_mean_dist_to_class_{c}'][
+                                idx] = np.mean(token_distances[:, c])
 
         except Exception as e:
             print(f"Error processing {row.get('filename', 'unknown')}: {e}")

@@ -7,9 +7,11 @@ import pandas as pd
 import torch
 from diffusers import StableDiffusionInpaintPipeline
 from PIL import Image
+from tqdm import tqdm
 
 import io_utils
 import perturbation
+import visualization
 import vit.attribution as attribution
 import vit.model as model
 import vit.preprocessing as preprocessing
@@ -56,6 +58,8 @@ def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
             print(f"Processed: {image_file.name} -> {output_path}")
         except Exception as e:
             print(f"Error processing {image_file.name}: {e}")
+            print("here")
+            continue
 
     print(
         f"Preprocessing complete. {len(processed_paths)} images saved to {config.file.data_dir}"
@@ -65,8 +69,10 @@ def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
 
 def save_attribution_results(
         config: FileConfig, image_path: Path, attribution_map: np.ndarray,
-        attribution_neg: np.ndarray, ffn_activity: List[Dict],
-        class_embedding_representation: List[Dict]) -> Dict[str, str]:
+        attribution_neg: Optional[np.ndarray],
+        ffn_activity: Optional[List[Dict]],
+        class_embedding_representation: Optional[List[Dict]]
+) -> Dict[str, str]:
     """Save attribution results to files.
     
     Args:
@@ -85,30 +91,39 @@ def save_attribution_results(
     class_embedding_representation_path = config.attribution_dir / f"{image_path.stem}_class_embedding_representation.npy"
 
     # Convert ffn_activities to numpy array format for saving
-    ffn_activity_data = np.array([{
-        'layer': activity['layer'],
-        'mean_activity': activity['mean_activity'],
-        'cls_activity': activity['cls_activity'],
-        'activity': activity['activity']
-    } for activity in ffn_activity],
-                                 dtype=object)
+    if ffn_activity:
+        ffn_activity_data = np.array(
+            [{
+                'layer': activity['layer'],
+                'mean_activity': activity['mean_activity'],
+                'cls_activity': activity['cls_activity'],
+                'activity': activity['activity']
+            } for activity in ffn_activity],
+            dtype=object)
+        np.save(ffn_activity_path, ffn_activity_data)
 
-    # Convert ffn_activities to numpy array format for saving
-    class_embedding_representation_data = np.array([{
-        'layer':
-        activity['layer'],
-        'attention_class_representation':
-        activity['attention_class_representation'],
-        'mlp_class_representation':
-        activity['mlp_class_representation']
-    } for activity in class_embedding_representation],
-                                                   dtype=object)
+    # Convert class representations to numpy array format for saving
+    if class_embedding_representation:
+        class_embedding_representation_data = np.array([{
+            'layer':
+            activity['layer'],
+            'attention_class_representation_input':
+            activity['attention_class_representation_input'],
+            'attention_map':
+            activity['attention_map'],
+            'attention_class_representation':
+            activity['attention_class_representation'],
+            'mlp_class_representation_input':
+            activity['mlp_class_representation_input'],
+            'mlp_class_representation':
+            activity['mlp_class_representation']
+        } for activity in class_embedding_representation],
+                                                       dtype=object)
+        np.save(class_embedding_representation_path,
+                class_embedding_representation_data)
 
     np.save(attribution_path, attribution_map)
-    np.save(attribution_neg_path, attribution_neg)
-    np.save(ffn_activity_path, ffn_activity_data)
-    np.save(class_embedding_representation_path,
-            class_embedding_representation_data)
+    if attribution_neg: np.save(attribution_neg_path, attribution_neg)
 
     return {
         "attribution_path": str(attribution_path),
@@ -145,18 +160,19 @@ def classify_explain_single_image(config: PipelineConfig, image_path: Path,
     original_image, input_tensor = preprocessing.preprocess_image(
         str(image_path), img_size=config.classify.target_size[0])
 
-    prediction = model.get_prediction(vit_model, input_tensor, device=device)
+    # prediction = model.get_prediction(vit_model, input_tensor, device=device)
 
     attribution_result = attribution.generate_attribution(
         model=vit_model,
         input_tensor=input_tensor,
         method="transmm",
-        target_class=prediction['predicted_class_idx'],
+        target_class=None,
         device=device,
         img_size=config.classify.target_size[0],
         gini_params=config.classify.gini_params)
 
     # Extract attribution maps and FFN activities
+    prediction = attribution_result['predictions']
     pos_attr = attribution_result["attribution_positive"]
     neg_attr = attribution_result["attribution_negative"]
     ffn_activities = attribution_result["ffn_activity"]
@@ -211,11 +227,16 @@ def classify_dataset(config: PipelineConfig,
     image_paths = list(config.file.data_dir.glob("*.png"))
     results = []
 
-    for i, image_path in enumerate(image_paths):
-        print(f"Processing image {i+1}/{len(image_paths)}: {image_path.name}")
-        result = classify_explain_single_image(config, image_path, vit_model,
-                                               device)
-        results.append(result)
+    for i, image_path in tqdm(enumerate(image_paths),
+                              total=len(image_paths),
+                              desc="Processing images"):
+        try:
+            result = classify_explain_single_image(config, image_path,
+                                                   vit_model, device)
+            results.append(result)
+        except Exception as e:
+            print(f"Error processing {image_path}: {e}")
+            continue
 
     df = pd.DataFrame(results)
     results_path = config.file.output_dir / f"classification_results{config.file.output_suffix}.csv"
@@ -289,7 +310,7 @@ def perturb_single_patch(
                 strength=config.perturb.strength)
         else:
             result_image, np_mask = perturbation.perturb_patch_mean(
-                original_filename, (x, y, patch_size))
+                original_filename, (x, y, patch_size), config.file)
 
         result_image.save(perturbed_image_path)
         np.save(mask_path, np_mask)
@@ -382,13 +403,11 @@ def perturb_dataset(
     processing_df = results_df.head(
         config.perturb.max_images) if config.perturb.max_images else results_df
 
-    for idx, row in enumerate(processing_df.iterrows()):
+    for _, row in tqdm(enumerate(processing_df.iterrows()),
+                       total=len(processing_df),
+                       desc="Perturbing imaages"):
         _, row_data = row
         image_path = Path(row_data["image_path"])
-
-        print(
-            f"Processing image {idx+1}/{len(processing_df)}: {image_path.name}"
-        )
 
         image_paths = perturb_image_patches(config, image_path, sd_pipe)
         perturbed_image_paths.extend(image_paths)
@@ -437,11 +456,32 @@ def run_perturbation(config: PipelineConfig,
     return perturb_dataset(config, results_df, sd_pipe)
 
 
-def run_pipeline(
-    config: PipelineConfig,
-    source_dir: Optional[Path] = None,
-    device: Optional[torch.device] = None
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def visualize_attributions(results_df: pd.DataFrame):
+    for _, row in results_df.iterrows():
+        # Extract file locations from the DataFrame row
+        image_path = row["image_path"]
+        attribution_path = row["attribution_path"]
+
+        # Load the original image
+        original_image = Image.open(image_path)
+
+        # Load the attribution map from the stored .npy file
+        attribution_map = np.load(attribution_path)
+
+        # Call the visualization function
+        visualization.visualize_attribution_map(
+            attribution_map,
+            original_image,
+            save_path=
+            f'./results/vit_inputs_unweighted/{Path(image_path).stem}_visualization.png'
+        )
+
+
+def run_pipeline(config: PipelineConfig,
+                 source_dir: Optional[Path] = None,
+                 device: Optional[torch.device] = None,
+                 visualization: bool = True,
+                 test: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run the complete pipeline: preprocess, classify, and perturb.
     
@@ -466,11 +506,14 @@ def run_pipeline(
 
     results_df = run_classification(config, device)
 
+    if visualization: visualize_attributions(results_df)
+
     perturbed_paths = run_perturbation(config, results_df)
     print(f"Generated {len(perturbed_paths)} perturbed patch images")
 
     config.file.output_suffix = "_perturbed"
-    config.file.data_dir = Path("./results/patches")
+    suffix = "-test" if test else ""
+    config.file.data_dir = Path(f"./results{suffix}/patches")
     perturbed_df = run_classification(config, device)
 
     return results_df, perturbed_df

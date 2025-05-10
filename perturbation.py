@@ -7,6 +7,8 @@ from PIL import Image, ImageStat
 from skimage.metrics import structural_similarity as ssim
 from torchvision import transforms
 
+from config import FileConfig
+
 device = "cuda"
 
 
@@ -123,9 +125,8 @@ def perturb_patch_sd(model_pipe: StableDiffusionInpaintPipeline,
     return result_image, np_mask
 
 
-def perturb_patch_mean(
-        image_identifier: str,
-        patch_info: Tuple[int, int, int]) -> Tuple[Image.Image, np.ndarray]:
+def perturb_patch_mean(image_identifier: str, patch_info: Tuple[int, int, int],
+                       config: FileConfig) -> Tuple[Image.Image, np.ndarray]:
     """
     Replace a patch with the mean color of the image.
     
@@ -138,7 +139,7 @@ def perturb_patch_mean(
     """
     x, y, patch_size = patch_info
 
-    image = Image.open(f'./images/{image_identifier}.png')
+    image = Image.open(f'{config.data_dir}/{image_identifier}.png')
 
     mean_channels = ImageStat.Stat(image).mean
     mean_color = int(mean_channels[0])
