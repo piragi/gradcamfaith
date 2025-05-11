@@ -1,170 +1,237 @@
 # analysis.py
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
-from PIL import Image
 from scipy import stats
 from scipy.ndimage import gaussian_filter
-from scipy.special import softmax
 from sklearn.metrics import mutual_info_score
 from tqdm import tqdm
 
-import perturbation
-import visualization
+from data_types import (AnalysisContext, ClassificationResult,
+                        PerturbationPatchInfo)
 from vit.model import VisionTransformer
 
 
-def compare_attributions(original_results_df: pd.DataFrame,
-                         perturbed_results_df: pd.DataFrame,
-                         output_dir: str = "./results",
-                         generate_visualizations: bool = True) -> pd.DataFrame:
+def generate_perturbation_comparison_dataframe(
+        context: AnalysisContext,
+        generate_visualizations: bool = True) -> pd.DataFrame:
     """
-    Compare attributions between original and perturbed images.
-    
-    Args:
-        original_results_df: DataFrame with original classification results
-        perturbed_results_df: DataFrame with perturbed classification results
-        output_dir: Directory to save comparison results
-        generate_visualizations: Whether to generate and save visualizations
-        compute_statistics: Whether to compute detailed attribution statistics
-        
-    Returns:
-        DataFrame with attribution comparison results
+    Generates the comparison DataFrame needed for SaCo scores, 
+    mimicking the initial part of the old `compare_attributions`.
+    This DataFrame will contain paths and basic computed info.
     """
-    output_path = Path(output_dir)
-    comparison_dir = output_path / "comparisons"
-    patch_mask_dir = output_path / "patch_masks"
+    comparison_data_list = []
+    analysis_results_dir = context.config.file.output_dir
+    viz_comparison_subdir = analysis_results_dir / "saco_perturbation_comparisons_viz"
 
-    # Only create visualization directory if needed
     if generate_visualizations:
-        comparison_dir.mkdir(exist_ok=True, parents=True)
+        viz_comparison_subdir.mkdir(parents=True, exist_ok=True)
 
-    comparison_results = []
-
-    print("start comparing attributions")
-    original_stems = {
-        Path(path).stem: idx
-        for idx, path in original_results_df["image_path"].items()
+    # Efficiently map original results by their image path for quick lookup
+    original_results_map: Dict[Path, ClassificationResult] = {
+        orig_res.image_path: orig_res
+        for orig_res in context.original_results
     }
-    for _, perturbed_row in tqdm(perturbed_results_df.iterrows(),
-                                 total=len(perturbed_results_df),
-                                 desc="Comparing attributions"):
-        perturbed_path = Path(perturbed_row["image_path"])
-        perturbed_filename = perturbed_path.stem
 
-        # Extract the original filename part (before "_patch")
-        if "_patch" not in perturbed_filename:
-            print(f"Skipping {perturbed_filename}: not a patch-perturbed file")
+    print("Generating perturbation comparison data for SaCo...")
+    for p_record in tqdm(context.all_perturbed_records,
+                         desc="Processing Perturbations"):
+        original_image_path = p_record.original_image_path
+        perturbed_image_path = p_record.perturbed_image_path
+
+        if original_image_path not in original_results_map:
+            print(
+                f"Warning: Original result for {original_image_path} not found. Skipping perturbation {perturbed_image_path.name}."
+            )
             continue
 
-        original_part = perturbed_filename.split("_patch")[0]
-        if original_part in original_stems:
-            original_row = original_results_df.iloc[
-                original_stems[original_part]]
-        try:
-            # Load attributions
-            original_attribution = np.load(original_row["attribution_path"])
+        original_class_res = original_results_map[original_image_path]
+        perturbed_class_res = context.perturbed_classification_results_map.get(
+            perturbed_image_path)
 
-            # Initialize comparison path and diff_stats
-            comparison_path = None
-            diff_stats = {}
-
-            # Generate comparison visualization if requested
-            if generate_visualizations:
-                # Get mask path
-                mask_path = Path(
-                    f"{patch_mask_dir}/{perturbed_filename}_mask.npy")
-
-                if not mask_path.exists():
-                    print(f"Mask file not found: {mask_path}")
-                    continue
-
-                perturbed_attribution = np.load(
-                    perturbed_row["attribution_path"])
-                np_mask = np.load(mask_path)
-                comparison_path = comparison_dir / f"{perturbed_filename}_comparison.png"
-                diff_stats = visualization.visualize_attribution_diff(
-                    original_attribution,
-                    perturbed_attribution,
-                    np_mask,
-                    base_name=perturbed_filename,
-                    save_dir=str(comparison_dir))
-
-            # Extract patch information
-            patch_info = extract_patch_info_from_filename(perturbed_filename)
-            patch_id, x, y = patch_info["patch_id"], patch_info[
-                "x"], patch_info["y"]
-
-            # Calculate mean attribution in the patch if coordinates are found
-            mean_attribution = calculate_patch_mean_attribution(
-                original_attribution, x, y, patch_size=16)
-
-            # Prepare comparison result
-            result = {
-                "original_image":
-                original_row["image_path"],
-                "perturbed_image":
-                str(perturbed_path),
-                "patch_id":
-                patch_id,
-                "x":
-                x,
-                "y":
-                y,
-                "mean_attribution":
-                mean_attribution,
-                "original_class":
-                original_row["predicted_class"],
-                "perturbed_class":
-                perturbed_row["predicted_class"],
-                "class_changed":
-                original_row["predicted_class_idx"]
-                != perturbed_row["predicted_class_idx"],
-                "original_confidence":
-                original_row["confidence"],
-                "perturbed_confidence":
-                perturbed_row["confidence"],
-                "confidence_delta":
-                perturbed_row["confidence"] - original_row["confidence"],
-                "confidence_delta_abs":
-                abs(perturbed_row["confidence"] - original_row["confidence"]),
-            }
-
-            # Add comparison path if visualization was generated
-            if comparison_path:
-                result["comparison_path"] = str(comparison_path)
-
-            # Add key metrics from diff_stats if available
-            for category in [
-                    "original_stats", "perturbed_stats", "difference_stats"
-            ]:
-                if category in diff_stats:
-                    for key, value in diff_stats[category].items():
-                        result[f"{category}_{key}"] = value
-
-            comparison_results.append(result)
-
-        except Exception as e:
-            print(f"Error processing {perturbed_filename}: {e}")
+        if perturbed_class_res is None:
             continue
 
-    # Create DataFrame
-    comparison_df = pd.DataFrame(comparison_results)
+        original_attr_np = None
+        if original_class_res.attribution_paths and original_class_res.attribution_paths.attribution_path.exists(
+        ):
+            try:
+                original_attr_np = np.load(
+                    original_class_res.attribution_paths.attribution_path)
+            except Exception as e:
+                print(
+                    f"Error loading original attribution for {original_class_res.image_path.name}: {e}"
+                )
+                continue  # Skip if essential data is missing
+        else:
+            continue
 
-    if not comparison_df.empty:
-        # Add rankings for impact and attribution
-        print("adding rankings")
-        comparison_df = add_rankings_to_comparison_df(comparison_df)
-        comparison_df.to_csv(output_path / "patch_attribution_comparisons.csv",
-                             index=False)
-    else:
-        print("Warning: No comparison results were generated.")
+        # Perturbed attribution (positive) - only if visualizations are needed or if SaCo uses it directly
+        perturbed_attr_np = None
+        if generate_visualizations:  # Or if perturbed attribution itself is a metric
+            if perturbed_class_res.attribution_paths and perturbed_class_res.attribution_paths.attribution_path.exists(
+            ):
+                try:
+                    perturbed_attr_np = np.load(
+                        perturbed_class_res.attribution_paths.attribution_path)
+                except Exception as e:
+                    print(
+                        f"Error loading perturbed positive attribution for {perturbed_class_res.image_path.name}: {e}"
+                    )
+
+        # Patch info from PerturbedImageRecord
+        patch_info_obj: PerturbationPatchInfo = p_record.patch_info
+        patch_id = patch_info_obj.patch_id
+        x_coord = patch_info_obj.x
+        y_coord = patch_info_obj.y
+
+        # Calculate mean attribution in the patch on the original image
+        mean_original_patch_attr = calculate_patch_mean_attribution(
+            original_attr_np,
+            x_coord,
+            y_coord,
+            patch_size=context.config.perturb.patch_size)
+
+        row_data = {
+            "original_image":
+            str(original_class_res.image_path),  # Old: "original_image"
+            "perturbed_image":
+            str(perturbed_class_res.image_path),  # Old: "perturbed_image"
+            "patch_id":
+            patch_id,
+            "x":
+            x_coord,  # Assuming these were used by SaCo or for context
+            "y":
+            y_coord,  # Assuming these were used by SaCo or for context
+            "original_patch_mean_attribution":
+            mean_original_patch_attr,  # Critical for SaCo - old: "mean_attribution"
+            "original_predicted_class":
+            original_class_res.prediction.
+            predicted_class_label,  # Old: "original_class"
+            "original_predicted_idx":
+            original_class_res.prediction.predicted_class_idx,
+            "original_confidence":
+            original_class_res.prediction.
+            confidence,  # Old: "original_confidence"
+            "perturbed_predicted_class":
+            perturbed_class_res.prediction.
+            predicted_class_label,  # Old: "perturbed_class"
+            "perturbed_predicted_idx":
+            perturbed_class_res.prediction.predicted_class_idx,
+            "perturbed_confidence":
+            perturbed_class_res.prediction.
+            confidence,  # Old: "perturbed_confidence"
+            "class_changed":
+            original_class_res.prediction.predicted_class_idx
+            != perturbed_class_res.prediction.predicted_class_idx,
+            "confidence_delta":
+            perturbed_class_res.prediction.confidence -
+            original_class_res.prediction.confidence,
+            "confidence_delta_abs":
+            abs(perturbed_class_res.prediction.confidence -
+                original_class_res.prediction.confidence),  # Critical for SaCo
+
+            # Paths for potential later detailed loading if other analyses need them
+            "original_attribution_path":
+            str(original_class_res.attribution_paths.attribution_path)
+            if original_class_res.attribution_paths else None,
+            "perturbed_attribution_path":
+            str(perturbed_class_res.attribution_paths.attribution_path)
+            if perturbed_class_res.attribution_paths else None,
+            "mask_path":
+            str(p_record.mask_path)
+        }
+
+        comparison_data_list.append(row_data)
+
+    comparison_df = pd.DataFrame(comparison_data_list)
+
+    if 'original_patch_mean_attribution' in comparison_df.columns:
+        comparison_df = comparison_df.rename(
+            columns={'original_patch_mean_attribution': 'mean_attribution'})
+
+    # Save this intermediate DataFrame
+    output_csv_path = analysis_results_dir / f"perturbation_comparison_for_saco{context.config.file.output_suffix}.csv"
+    comparison_df.to_csv(output_csv_path, index=False)
+    print(f"Base comparison DataFrame for SaCo saved to {output_csv_path}")
 
     return comparison_df
+
+
+def run_saco_analysis(
+    context: AnalysisContext,
+    perturbation_comparison_df: pd.DataFrame,
+    perturb_method_filter: str = "mean"
+) -> Tuple[Dict[str, float], Dict[str, pd.DataFrame], Optional[pd.DataFrame]]:
+    """
+    Orchestrates SaCo calculation using the provided comparison DataFrame.
+    """
+    if perturbation_comparison_df.empty:
+        print("SaCo Analysis: Input comparison DataFrame is empty. Skipping.")
+        return {}, {}, None
+
+    saco_scores, pair_data = calculate_saco_with_details_from_df(
+        perturbation_comparison_df,  # Pass the DataFrame directly
+        method_filter_str=
+        perturb_method_filter  # For any internal filtering if still needed
+    )
+
+    avg_saco = np.mean(list(saco_scores.values())) if saco_scores else 0
+    print(
+        f"Average SaCo score for method '{perturb_method_filter}': {avg_saco:.4f} (over {len(saco_scores)} images)"
+    )
+
+    patch_analysis_df = analyze_patch_metrics(pair_data)  # This should be fine
+
+    # Save patch_analysis_df
+    patch_analysis_csv_path = context.config.file.output_dir / f"saco_patch_analysis_{perturb_method_filter}{context.config.file.output_suffix}.csv"
+    patch_analysis_df.to_csv(patch_analysis_csv_path, index=False)
+    print(f"SaCo patch analysis saved to {patch_analysis_csv_path}")
+
+    return saco_scores, pair_data, patch_analysis_df
+
+
+def calculate_saco_with_details_from_df(  # NEW: Takes DF instead of CSV path
+    comparison_df: pd.DataFrame,
+    method_filter_str: Optional[str] = None
+) -> Tuple[Dict[str, float], Dict[str, pd.DataFrame]]:
+    """
+    Calculate SaCo (Saliency Correlation) scores from comparison data DataFrame.
+    Modified from original to take DataFrame.
+    """
+    data_df = comparison_df.copy()  # Work on a copy
+
+    results = {}
+    pair_data_map = {}  # Renamed from pair_data to avoid conflict
+
+    if 'mean_attribution' not in data_df.columns or \
+       'confidence_delta_abs' not in data_df.columns or \
+       'patch_id' not in data_df.columns:
+        print(
+            "Error: SaCo requires 'mean_attribution', 'confidence_delta_abs', and 'patch_id' columns in the DataFrame."
+        )
+        return {}, {}
+
+    for image_name, image_data_group in data_df.groupby('original_image'):
+        # Original code sorts by 'mean_attribution'
+        image_data_sorted = image_data_group.sort_values(
+            'mean_attribution', ascending=False).reset_index(drop=True)
+
+        attributions_np = image_data_sorted['mean_attribution'].values
+        confidence_impacts_np = image_data_sorted[
+            'confidence_delta_abs'].values
+        patch_ids_np = image_data_sorted['patch_id'].values
+
+        saco_score, image_pair_df = calculate_image_saco_with_details(
+            attributions_np, confidence_impacts_np, patch_ids_np)
+
+        results[image_name] = saco_score
+        pair_data_map[image_name] = image_pair_df
+
+    return results, pair_data_map
 
 
 def extract_patch_info_from_filename(filename: str) -> Dict[str, int]:
@@ -230,31 +297,9 @@ def calculate_patch_mean_attribution(attribution: np.ndarray,
     return None
 
 
-def add_rankings_to_comparison_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add rankings for impact and attribution to the comparison DataFrame.
-    
-    Args:
-        df: DataFrame with comparison results
-        
-    Returns:
-        DataFrame with added ranking columns
-    """
-    if "confidence_delta_abs" in df.columns:
-        df["impact_rank"] = df["confidence_delta_abs"].rank(ascending=False)
-
-    if "mean_attribution" in df.columns:
-        df["attribution_rank"] = df["mean_attribution"].rank(ascending=False)
-
-    if "impact_rank" in df.columns and "attribution_rank" in df.columns:
-        df["rank_difference"] = df["attribution_rank"] - df["impact_rank"]
-
-    return df
-
-
 # SaCo Calculation Functions
 def calculate_saco_with_details(
-        data_path: str = "./results/patch_attribution_comparisons.csv",
+        data_path: Path,
         method: str = "mean"
 ) -> Tuple[Dict[str, float], Dict[str, pd.DataFrame]]:
     """
@@ -444,66 +489,85 @@ def calculate_patch_specific_metrics(patch_id: int, pairs_with_i: pd.DataFrame,
 
 
 # Correlation Analysis Functions
-def analyze_faithfulness_vs_correctness(
-    saco_scores: Dict[str, float],
-    classification_results: str = "./results/classification_results.csv"
+def analyze_faithfulness_vs_correctness_from_objects(  # Renamed for clarity
+    saco_scores: Dict[
+        str, float],  # Key is string representation of original image path
+    original_classification_results: List[ClassificationResult]
 ) -> pd.DataFrame:
     """
-    Analyze the relationship between attribution faithfulness and prediction correctness.
+    Analyze the relationship between attribution faithfulness (SaCo) and prediction correctness.
     
     Args:
-        saco_scores: Dictionary mapping image names to SaCo scores
-        classification_results: Path to classification results CSV
+        saco_scores: Dictionary mapping string original image paths to SaCo scores.
+        original_classification_results: List of ClassificationResult objects for original images.
         
     Returns:
-        DataFrame with SaCo scores, correctness, and confidence information
+        DataFrame with SaCo scores, correctness, confidence, and paths for further analysis.
     """
-    df = pd.read_csv(classification_results)
-    results = []
+    analysis_data_list = []
 
-    for _, row in df.iterrows():
-        filename = row['image_path']
-        saco_score = saco_scores.get(filename)
-        if saco_score is None:
-            continue
+    for original_res in original_classification_results:
+        image_path_str = str(original_res.image_path)
+        saco_score = saco_scores.get(image_path_str)
 
-        # Get true class from filename
-        true_class = extract_true_class_from_filename(filename)
-        if true_class is None:
-            continue
+        # Extract true class from the image_path using the helper
+        true_class_label = extract_true_class_from_filename(
+            original_res.image_path)
 
-        # Store all relevant information
-        results.append({
-            'filename': filename,
-            'saco_score': saco_score,
-            'predicted_class': row['predicted_class'],
-            'true_class': true_class,
-            'is_correct': row['predicted_class'] == true_class,
-            'confidence': row['confidence'],
-            'attribution_path': row['attribution_path'],
-            'attribution_neg_path': row['attribution_neg_path'],
-            'ffn_activity_path': row['ffn_activity_path'],
-            'class_embedding_path': row['class_embedding_path']
-        })
+        prediction_info = original_res.prediction
+        attribution_paths_info = original_res.attribution_paths  # This is an AttributionOutputPaths object or None
 
-    return pd.DataFrame(results)
+        row_data = {
+            'filename':
+            image_path_str,  # Keep 'filename' for consistency with old DF structure
+            'saco_score':
+            saco_score,
+            'predicted_class':
+            prediction_info.predicted_class_label,
+            'predicted_idx':
+            prediction_info.predicted_class_idx,  # Good to have
+            'true_class':
+            true_class_label,
+            'is_correct':
+            prediction_info.predicted_class_label == true_class_label,
+            'confidence':
+            prediction_info.confidence,
+            # These come from the AttributionOutputPaths dataclass associated with ClassificationResult
+            'attribution_path':
+            str(attribution_paths_info.attribution_path)
+            if attribution_paths_info else None,
+            'attribution_neg_path':
+            str(attribution_paths_info.attribution_neg_path)
+            if attribution_paths_info
+            and attribution_paths_info.attribution_neg_path else None,
+            'ffn_activity_path':
+            str(attribution_paths_info.ffn_activity_path)
+            if attribution_paths_info
+            and attribution_paths_info.ffn_activity_path else None,
+            'class_embedding_path':
+            str(attribution_paths_info.class_embedding_path)
+            if attribution_paths_info
+            and attribution_paths_info.class_embedding_path else None,
+            'probabilities':
+            prediction_info.probabilities
+        }
+        analysis_data_list.append(row_data)
+
+    return pd.DataFrame(analysis_data_list)
 
 
-def extract_true_class_from_filename(filename: str) -> Optional[str]:
+def extract_true_class_from_filename(
+        filename: Union[str, Path]) -> Optional[str]:
     """
     Extract the true class from a filename based on path patterns.
-    
-    Args:
-        filename: Image filepath
-        
-    Returns:
-        True class name or None if pattern doesn't match
     """
-    if filename.startswith("images/Normal"):
+    filepath_str = str(filename)
+
+    if "Normal" in filepath_str:  # Be careful with generic terms if they appear elsewhere
         return "Normal"
-    elif filename.startswith("images/covid"):
+    elif "covid" in filepath_str:  # Case-insensitive for "covid"
         return "COVID-19"
-    elif filename.startswith("images/non_COVID"):
+    elif "non_COVID" in filepath_str:
         return "Non-COVID"
     return None
 
@@ -527,11 +591,12 @@ def analyze_key_attribution_patterns(df: pd.DataFrame, model) -> pd.DataFrame:
     # df = add_attribution_consistency_metrics(df)
     # df = add_robustness_metrics(df)
     df = add_ffn_activity_metrics(df)
-    df = add_class_embedding_metrics(df)
-    df = add_embedding_space_metrics(df, model)
+    # df = add_class_embedding_metrics(df)
+    # df = add_embedding_space_metrics(df, model)
 
     # Clean data
     df_clean = df.dropna(subset=['saco_score'])
+    print(df_clean.head())
 
     # Define key metrics to analyze
     key_metrics = get_key_attribution_metrics()
@@ -815,9 +880,10 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                 layer_data = embeddings[layer_idx]
                 attn_logits_input = layer_data[
                     'attention_class_representation_input']
-                attn_logits = layer_data['attention_class_representation']
+                attn_logits = layer_data[
+                    'attention_class_representation_output']
                 mlp_logits_input = layer_data['mlp_class_representation_input']
-                mlp_logits = layer_data['mlp_class_representation']
+                mlp_logits = layer_data['mlp_class_representation_output']
 
                 # Check if attention maps are available
                 if 'attention_map' in layer_data:
@@ -1612,9 +1678,7 @@ def add_embedding_space_metrics(df: pd.DataFrame,
     class_to_idx = {'COVID-19': 0, 'Non-COVID': 1, 'Normal': 2}
     num_classes = len(class_to_idx)
 
-    # STATIC LAYERS - assumed constant across all rows
-    layers = range(
-        0, 12)  # Process layers 0-10, same as add_class_embedding_metrics
+    layers = range(0, 12)
 
     # Define base metrics
     base_metrics = [
@@ -1653,8 +1717,9 @@ def add_embedding_space_metrics(df: pd.DataFrame,
                 layer_data = embeddings[layer_idx]
 
                 # Get logits from both MLP and attention
-                attn_logits = layer_data['attention_class_representation']
-                mlp_logits = layer_data['mlp_class_representation']
+                attn_logits = layer_data[
+                    'attention_class_representation_output']
+                mlp_logits = layer_data['mlp_class_representation_output']
 
                 # Process both MLP and Attention representations
                 for rep_type, logits in [('mlp', mlp_logits),

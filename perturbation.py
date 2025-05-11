@@ -139,7 +139,7 @@ def perturb_patch_mean(image_identifier: str, patch_info: Tuple[int, int, int],
     """
     x, y, patch_size = patch_info
 
-    image = Image.open(f'{config.data_dir}/{image_identifier}.png')
+    image = Image.open(image_identifier)
 
     mean_channels = ImageStat.Stat(image).mean
     mean_color = int(mean_channels[0])

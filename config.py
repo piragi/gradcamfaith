@@ -1,40 +1,57 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
+
+Modes = Literal["test", "val"]
 
 
 @dataclass
 class FileConfig:
     """Configuration for file paths and I/O operations."""
-    # Base directories
-    data_dir: Path = Path("./images")
-    output_dir: Path = Path("./results")
-    cache_dir: Path = Path("./cache")
+    base_pipeline_dir: Path = Path("./results")
+    current_mode: Modes = "test"
 
-    # Output suffix for mean/sd perturbation
     output_suffix: str = ""
 
     # Caching behavior
-    use_cached: bool = True
+    use_cached_original: bool = True
+    use_cached_perturbed: bool = True
 
-    # Output subdirectories - computed after initialization
-    attribution_dir: Path = field(init=False)
-    vit_inputs_dir: Path = field(init=False)
-    perturbed_dir: Path = field(init=False)
-    mask_dir: Path = field(init=False)
+    @property
+    def output_dir(self) -> Path:
+        return self.base_pipeline_dir / self.current_mode
 
-    def __post_init__(self):
-        """Initialize derived paths."""
-        self.attribution_dir = self.output_dir / f"attributions{self.output_suffix}"
-        self.vit_inputs_dir = self.output_dir / "vit_inputs"
-        self.perturbed_dir = self.output_dir / "patches"
-        self.mask_dir = self.output_dir / "patch_masks"
+    @property
+    def data_dir(self) -> Path:
+        return self.output_dir / "preprocessed"
+
+    @property
+    def cache_dir(self) -> Path:
+        """Cache directory specific to this mode."""
+        return self.output_dir / "cache"
+
+    @property
+    def attribution_dir(self) -> Path:
+        # Suffix application is now more explicit for filenames/sub-subdirs if needed
+        return self.output_dir / f"attributions{self.output_suffix}"
+
+    @property
+    def vit_inputs_dir(self) -> Path:  # If still used, make it mode-specific
+        return self.output_dir / "vit_inputs"
+
+    @property
+    def perturbed_dir(self) -> Path:
+        return self.output_dir / "patches"  # Patches of perturbed images
+
+    @property
+    def mask_dir(self) -> Path:
+        return self.output_dir / "patch_masks"
 
     @property
     def directories(self) -> List[Path]:
         """Return a list of all directories used by the pipeline."""
         return [
-            self.data_dir, self.output_dir, self.cache_dir,
+            self.output_dir, self.data_dir, self.cache_dir,
             self.attribution_dir, self.vit_inputs_dir, self.perturbed_dir,
             self.mask_dir
         ]
@@ -43,8 +60,8 @@ class FileConfig:
     def directory_map(self) -> Dict[str, Path]:
         """Return a map of all directories."""
         return {
+            "output_dir": self.output_dir,
             "data": self.data_dir,
-            "output": self.output_dir,
             "cache": self.cache_dir,
             "attribution": self.attribution_dir,
             "vit_inputs": self.vit_inputs_dir,
@@ -67,6 +84,9 @@ class ClassificationConfig:
     pretransform: bool = False
     gini_params: Tuple[float, float, float] = (0.65, 8.0, 0.5)
     attribution_method: str = "transmm"
+
+    weigh_by_class_embedding = False
+    data_collection = False
 
     # Device configuration
     device: Optional[str] = None  # None will use CUDA if available
