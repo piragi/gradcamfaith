@@ -76,75 +76,108 @@ def adaptive_weighting(layer_idx: int, target_class: int, blk: Block,
     batch_size = blk.attn.output_tokens.shape[0]
     seq_len = blk.attn.output_tokens.shape[1]
     weights_rows = torch.ones((batch_size * seq_len, 1), device='cpu')
-    if target_class == 2 and layer_idx >= 7:
+
+    # works better if you just boost all with a certain factor funnily enough
+    if target_class == 2:
+        correlation_boost_factor = 5.0
+        boost_factor_formula = lambda x: (
+            1 + x.get(layer_idx, 0.0
+                      )) * correlation_boost_factor if layer_idx in x else 2.0
+
+        # Get attention outputs and compute class logits
         attn_output = blk.attn.output_tokens.detach()
-        mlp_output = blk.mlp.output_tokens.detach()
         attn_class_logits = model_nn.get_class_embedding_space_representation(
-            attn_output)  # model -> model_nn
-        mlp_class_logits = model_nn.get_class_embedding_space_representation(
-            mlp_output)  # model -> model_nn
+            attn_output)
         attn_target_logits = attn_class_logits[:, :, target_class]
-        mlp_target_logits = mlp_class_logits[:, :, target_class]
-        if layer_idx == 10:
-            attn_weight, mlp_weight = 0.6, 0.4
-            threshold_percentile = 0.0
-        elif layer_idx == 11:
-            attn_weight, mlp_weight = 0.9, 0.1
-            threshold_percentile = 0.0
-        else:
-            attn_weight, mlp_weight = 0.5, 0.5
-            threshold_percentile = 0.0
+        argmax_classes = torch.argmax(attn_class_logits, dim=2)
+        argmax_mask = (argmax_classes == target_class).float()
+
+        # Set threshold percentile (always 0.0 for target_class 2)
+        threshold_percentile = 0.0
+
+        # Calculate threshold and create boost mask
         attn_threshold = torch.quantile(attn_target_logits.flatten(),
                                         threshold_percentile)
-        mlp_threshold = torch.quantile(mlp_target_logits.flatten(),
-                                       threshold_percentile)
         attn_boost_mask = (attn_target_logits > attn_threshold).float()
-        mlp_boost_mask = (mlp_target_logits > mlp_threshold).float()
-        combined_mask = attn_weight * attn_boost_mask
-        if mlp_weight > 0: combined_mask += mlp_weight * mlp_boost_mask
-        layer_boost_factors = {7: 2.0, 8: 2.2, 9: 2.5, 10: 5.0, 11: 1.2}
-        boost_factor = layer_boost_factors.get(layer_idx, 1.0)
-        weights = torch.ones_like(combined_mask) + boost_factor * combined_mask
-        weights[:, 0] *= 1.5
+
+        # Apply layer-specific boost factors
+        layer_boost_factors = {
+            5: 0.4,
+            6: 0.2,
+            7: 0.5,
+            8: 0.47,
+            9: 0.55,
+            10: 0.55,
+            11: 0.55
+        }
+
+        class_boost_factors = {
+            5: 0.428,
+            6: 0.395,
+            8: 0.330,
+        }
+
+        boost_factor = boost_factor_formula(layer_boost_factors)
+        cls_boost_factor = boost_factor_formula(class_boost_factors)
+
+        # Create weights with boosting
+        boost_mask = attn_boost_mask * argmax_mask
+        weights = torch.ones_like(attn_boost_mask) + boost_factor * boost_mask
+
+        # Special boost for CLS token
+        weights[:, 0] *= cls_boost_factor
+
+        # Convert to CPU and reshape
         weights = weights.cpu()
         weights_rows = weights.view(-1, 1)
-    elif target_class == 1 and layer_idx >= 4:
+
+    elif target_class == 1 and layer_idx >= 8:
+        correlation_boost_factor = 2.5
+        boost_factor_formula = lambda x: (
+            1 + x.get(layer_idx, 0.0
+                      )) * correlation_boost_factor if layer_idx in x else 1.0
+
+        # Get attention outputs and compute class logits
         attn_output = blk.attn.output_tokens.detach()
-        mlp_output = blk.mlp.output_tokens.detach()
         attn_class_logits = model_nn.get_class_embedding_space_representation(
-            attn_output)  # model -> model_nn
-        mlp_class_logits = model_nn.get_class_embedding_space_representation(
-            mlp_output)  # model -> model_nn
-        if layer_idx == 10:
-            attn_target_logits = attn_class_logits[:, :, 1]
-            mlp_target_logits = -1.0 * attn_class_logits[:, :, 0]
-            attn_weight, mlp_weight = 1.0, 0.0
-            threshold_percentile = 0.0
-            boost_factor = 2.5
-        elif layer_idx == 11:
-            attn_target_logits = attn_class_logits[:, :, 2]
-            mlp_target_logits = -1.0 * mlp_class_logits[:, :, 0]
-            attn_weight, mlp_weight = 1.0, 0.0
-            threshold_percentile = 0.6
-            boost_factor = 1.5
-        else:
-            attn_target_logits = attn_class_logits[:, :, 1]
-            mlp_target_logits = mlp_class_logits[:, :, 1]
-            attn_weight, mlp_weight = 0.5, 0.5
-            threshold_percentile = 0.0
-            boost_factor = 1.0
+            attn_output)
+
+        class_alignment_change = {8: 2, 9: 2, 10: 1, 11: 2}
+
+        layer_boost_factors = {
+            9: 0.22,
+            10: 0.2,
+            11: 0.36,
+        }
+        class_boost_factors = {
+            8: 0.3,
+        }
+
+        # Different handling for specific layers
+        class_alignment = class_alignment_change.get(layer_idx, 1)
+        attn_target_logits = attn_class_logits[:, :, class_alignment]
+        argmax_classes = torch.argmax(attn_class_logits, dim=2)
+        argmax_mask = (argmax_classes == target_class).float()
+        threshold_percentile = 0.0
+
+        # Calculate threshold and create boost mask
         attn_threshold = torch.quantile(attn_target_logits.flatten(),
                                         threshold_percentile)
-        mlp_threshold = torch.quantile(mlp_target_logits.flatten(),
-                                       threshold_percentile)
         attn_boost_mask = (attn_target_logits > attn_threshold).float()
-        mlp_boost_mask = (mlp_target_logits > mlp_threshold).float()
-        combined_mask = attn_weight * attn_boost_mask
-        if mlp_weight > 0: combined_mask += mlp_weight * mlp_boost_mask
-        weights = torch.ones_like(combined_mask) + boost_factor * combined_mask
-        weights[:, 0] *= 1.5
+
+        boost_factor = boost_factor_formula(layer_boost_factors)
+        cls_boost_factor = boost_factor_formula(class_boost_factors)
+        # Create weights with boosting
+        boost_mask = attn_boost_mask * argmax_mask
+        weights = torch.ones_like(attn_boost_mask) + boost_factor * boost_mask
+
+        # Special boost for CLS token
+        weights[:, 0] *= cls_boost_factor
+
+        # Convert to CPU and reshape
         weights = weights.cpu()
         weights_rows = weights.view(-1, 1)
+
     return weights_rows
 
 
@@ -165,6 +198,8 @@ def token_class_embedding_representation(
     for i, blk in enumerate(model_nn.blocks):
         attn_input_tokens = getattr(blk.attn, 'input_tokens', None)
         attn_output_tokens = getattr(blk.attn, 'output_tokens', None)
+        attn_map = getattr(blk.attn, 'attention_map',
+                           None).detach().cpu().squeeze(0).numpy()
 
         # MLP part
         mlp_input_tokens = getattr(blk.mlp, 'input_tokens', None)
@@ -185,9 +220,7 @@ def token_class_embedding_representation(
             'mlp_class_representation_output':
             mlp_class_repr_data,
             'attention_map':
-            blk.attn.attention_map.detach().cpu().squeeze(0).numpy()
-            if hasattr(blk.attn, 'attention_map')
-            and blk.attn.attention_map is not None else np.array([]),
+            attn_map,
             'attention_class_representation_input':
             get_representation(attn_input_tokens),
             'mlp_class_representation_input':
@@ -249,6 +282,10 @@ def transmm(
     for i, blk in enumerate(model_nn.blocks):
         grad = blk.attn.get_attn_gradients().detach()
         cam = blk.attn.get_attention_map().detach()
+
+        if weigh_by_class_embedding and False:
+            cam = cam * adaptive_weighting_per_head(i, effective_target_class,
+                                                    blk, model_nn)
 
         if gini_params:
             gini_threshold, steepness, max_power = gini_params

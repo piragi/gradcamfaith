@@ -38,6 +38,7 @@ class ClassEmbeddingRepresentationItem:
     mlp_class_representation_input: np.ndarray
     attention_class_representation_output: np.ndarray
     mlp_class_representation_output: np.ndarray
+    attention_map: np.ndarray
 
     def __eq__(self, other):
         if not isinstance(other, ClassEmbeddingRepresentationItem):
@@ -50,7 +51,8 @@ class ClassEmbeddingRepresentationItem:
                 and np.array_equal(self.attention_class_representation_output,
                                    other.attention_class_representation_output)
                 and np.array_equal(self.mlp_class_representation_output,
-                                   other.mlp_class_representation_output))
+                                   other.mlp_class_representation_output)
+                and np.array_equal(self.attention_map, other.attention_map))
 
 
 @dataclass

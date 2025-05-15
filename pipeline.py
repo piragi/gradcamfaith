@@ -1,10 +1,11 @@
 # pipeline.py
-from dataclasses import asdict, dataclass, field
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import quantus
 import torch
 from diffusers import StableDiffusionInpaintPipeline
 from PIL import Image
@@ -44,10 +45,8 @@ def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
     for image_file in image_files:
         output_path = config.file.data_dir / image_file.name
 
+        # Skip if exists
         if output_path.exists():
-            print(
-                f"Skipping {output_path.name} - already exists in {config.file.data_dir}"
-            )
             processed_paths.append(output_path)
             continue
 
@@ -122,6 +121,8 @@ def save_attribution_bundle_to_files(
                 item.mlp_class_representation_input,
                 'attention_class_representation_output':
                 item.attention_class_representation_output,
+                'attention_map':
+                item.attention_map,
                 'mlp_class_representation_output':
                 item.mlp_class_representation_output
             })
@@ -258,6 +259,7 @@ def classify_explain_single_image(
                         "mlp_class_representation_output"],
                     attention_class_representation_input=cer_dict[
                         "attention_class_representation_input"],
+                    attention_map=cer_dict["attention_map"],
                     mlp_class_representation_input=cer_dict[
                         "mlp_class_representation_input"]))
 
@@ -595,6 +597,10 @@ def run_pipeline(
     original_results_explained = classify_and_explain_dataset(
         config, vit_model, device, original_image_paths, originals_csv_path)
 
+    print("Evaluate Faithfulness with Bhatt et al. (2020)")
+    evaluate_and_report_faithfulness(config, vit_model, device,
+                                     original_results_explained)
+
     paths_for_perturbation = [
         res.image_path for res in original_results_explained
     ]
@@ -621,3 +627,288 @@ def run_pipeline(
     print("Full pipeline finished.")
     return original_results_explained, (perturbed_image_records,
                                         perturbed_results_classified_only)
+
+
+def calc_faithfulness(vit_model: model.VisionTransformer,
+                      x_batch: np.ndarray,
+                      y_batch: np.ndarray,
+                      a_batch_expl: np.ndarray,
+                      device: torch.device,
+                      n_trials: int = 5,
+                      nr_runs: int = 200,
+                      subset_size: int = 98) -> Dict[str, Any]:
+    """
+    Calculate faithfulness scores with statistical robustness through multiple trials.
+    
+    Args:
+        vit_model: The ViT model
+        x_batch: Batch of input images (numpy array)
+        y_batch: Batch of target classes (numpy array)
+        a_batch_expl: Batch of attributions (numpy array)
+        device: Device to run calculations on
+        n_trials: Number of trials to run for statistical robustness
+        nr_runs: Number of random perturbations per image
+        subset_size: Size of feature subset to perturb (should be less than total features)
+        
+    Returns:
+        Dictionary with faithfulness statistics
+    """
+    # For ViT-B/16 with 224x224 input, there are 196 patches + 1 CLS token = 197 features
+    # Subset size should be less than this
+    assert subset_size < 197, f"Subset size {subset_size} too large for ViT-B/16 (max 196)"
+
+    all_results = []
+
+    for trial in range(n_trials):
+        # Set seed for this trial
+        trial_seed = 42 + trial
+
+        # Save original numpy random state
+        original_state = np.random.get_state()
+
+        # Set specific seed for this evaluation
+        np.random.seed(trial_seed)
+
+        faithfulness_estimator = quantus.FaithfulnessCorrelation(
+            perturb_func=quantus.perturb_func.baseline_replacement_by_indices,
+            similarity_func=quantus.similarity_func.correlation_pearson,
+            subset_size=subset_size,
+            perturb_baseline="mean",
+            return_aggregate=False,
+            normalise=True,
+            nr_runs=nr_runs  # More runs per image for stability
+        )
+
+        faithfulness_estimate = faithfulness_estimator(
+            model=vit_model,
+            x_batch=x_batch,
+            y_batch=y_batch,
+            a_batch=a_batch_expl,
+            device=str(device),
+        )
+
+        # Restore random state
+        np.random.set_state(original_state)
+
+        all_results.append(np.array(faithfulness_estimate))
+
+    # Stack results from all trials
+    all_results = np.stack(all_results, axis=0)
+
+    # Calculate mean and std across trials for each sample
+    mean_scores = np.mean(all_results, axis=0)
+    std_scores = np.std(all_results, axis=0)
+
+    return {
+        "mean_scores": mean_scores,
+        "std_scores": std_scores,
+        "all_trials": all_results,
+        "n_trials": n_trials,
+        "nr_runs": nr_runs,
+        "subset_size": subset_size
+    }
+
+
+def evaluate_faithfulness_for_results(
+    config: PipelineConfig, vit_model: model.VisionTransformer,
+    device: torch.device, classification_results: List[ClassificationResult]
+) -> Tuple[Dict[str, Any], np.ndarray]:
+    """
+    Evaluate faithfulness scores for classification results with attributions.
+    
+    Args:
+        config: Pipeline configuration
+        vit_model: The ViT model
+        device: Device to run calculations on
+        classification_results: List of classification results with attribution paths
+        
+    Returns:
+        Tuple of (faithfulness statistics dict, class labels array)
+    """
+    x_batch_list = []
+    y_batch_list = []
+    a_batch_list = []
+
+    for result in classification_results:
+        # Load the image and preprocess
+        img_path = result.image_path
+        _, input_tensor = preprocessing.preprocess_image(
+            str(img_path), img_size=config.classify.target_size[0])
+        x_batch_list.append(input_tensor.cpu().numpy())
+
+        # Get the class prediction
+        class_idx = result.prediction.predicted_class_idx
+        y_batch_list.append(class_idx)
+
+        # Load the attribution
+        attribution_path = result.attribution_paths.attribution_path
+        if attribution_path.exists():
+            attribution = np.load(attribution_path)
+            a_batch_list.append(attribution)
+        else:
+            print(f"Attribution file not found: {attribution_path}")
+            continue
+
+    if not a_batch_list:
+        print("No valid attributions found")
+        return {"mean_scores": np.array([])}, np.array([])
+
+    # Convert lists to numpy arrays
+    x_batch = np.stack(x_batch_list)
+    y_batch = np.array(y_batch_list)
+    a_batch = np.stack(a_batch_list)
+
+    # Calculate faithfulness with the robust method
+    # Use a reasonable subset size for ViT (half of the 196 patches)
+    faithfulness_results = calc_faithfulness(vit_model,
+                                             x_batch,
+                                             y_batch,
+                                             a_batch,
+                                             device,
+                                             n_trials=5,
+                                             nr_runs=100,
+                                             subset_size=25)
+
+    return faithfulness_results, y_batch
+
+
+def calculate_faithfulness_stats_by_class(
+        faithfulness_results: Dict[str, Any],
+        class_labels: np.ndarray) -> Dict[int, Dict[str, float]]:
+    """
+    Calculate statistics for faithfulness scores grouped by class.
+    
+    Args:
+        faithfulness_results: Dictionary with faithfulness results
+        class_labels: Array of class labels corresponding to each score
+        
+    Returns:
+        Dictionary with class indices as keys and statistics as values
+    """
+    # Use the mean scores for statistics
+    faithfulness_scores = faithfulness_results["mean_scores"]
+    faithfulness_stds = faithfulness_results["std_scores"]
+
+    # Group scores by class
+    scores_by_class = defaultdict(list)
+    stds_by_class = defaultdict(list)
+
+    for score, std, label in zip(faithfulness_scores, faithfulness_stds,
+                                 class_labels):
+        scores_by_class[int(label)].append(float(score))
+        stds_by_class[int(label)].append(float(std))
+
+    # Calculate statistics for each class
+    stats_by_class = {}
+    for class_idx, scores in scores_by_class.items():
+        scores_array = np.array(scores)
+        stds_array = np.array(stds_by_class[class_idx])
+
+        stats_by_class[class_idx] = {
+            'count': len(scores),
+            'mean': float(np.mean(scores_array)),
+            'median': float(np.median(scores_array)),
+            'min': float(np.min(scores_array)),
+            'max': float(np.max(scores_array)),
+            'std': float(np.std(scores_array)),
+            'avg_trial_std':
+            float(np.mean(stds_array)),  # Average std across trials
+        }
+
+    return stats_by_class
+
+
+def evaluate_and_report_faithfulness(
+    config: PipelineConfig,
+    vit_model: model.VisionTransformer,
+    device: torch.device,
+    classification_results: List[ClassificationResult],
+) -> Dict[str, Any]:
+    """
+    Evaluate faithfulness with statistical robustness and report statistics by class.
+    
+    Args:
+        config: Pipeline configuration
+        vit_model: The ViT model
+        device: Device to run calculations on
+        classification_results: List of classification results
+        
+    Returns:
+        Dictionary with overall and per-class statistics
+    """
+    faithfulness_results, class_labels = evaluate_faithfulness_for_results(
+        config, vit_model, device, classification_results)
+
+    # Get the mean scores for overall statistics
+    faithfulness_scores = faithfulness_results["mean_scores"]
+    faithfulness_stds = faithfulness_results["std_scores"]
+
+    # Calculate overall statistics
+    overall_stats = {
+        'count': len(faithfulness_scores),
+        'mean': float(np.mean(faithfulness_scores)),
+        'median': float(np.median(faithfulness_scores)),
+        'min': float(np.min(faithfulness_scores)),
+        'max': float(np.max(faithfulness_scores)),
+        'std': float(np.std(faithfulness_scores)),
+        'avg_trial_std':
+        float(np.mean(faithfulness_stds)),  # Average std across trials
+        'method_params': {
+            'n_trials': faithfulness_results["n_trials"],
+            'nr_runs': faithfulness_results["nr_runs"],
+            'subset_size': faithfulness_results["subset_size"]
+        }
+    }
+
+    # Calculate per-class statistics
+    class_stats = calculate_faithfulness_stats_by_class(
+        faithfulness_results, class_labels)
+
+    # Print summary with added stability information
+    print(
+        f"Overall faithfulness statistics (across {faithfulness_results['n_trials']} trials):"
+    )
+    print(f"  Mean: {overall_stats['mean']:.4f}")
+    print(f"  Median: {overall_stats['median']:.4f}")
+    print(f"  Count: {overall_stats['count']}")
+    print(
+        f"  Avg trial std: {overall_stats['avg_trial_std']:.4f} (lower is more stable)"
+    )
+
+    print("\nPer-class faithfulness statistics:")
+    for class_idx, stats in class_stats.items():
+        print(f"  Class {class_idx}:")
+        print(f"    Mean: {stats['mean']:.4f}")
+        print(f"    Median: {stats['median']:.4f}")
+        print(f"    Count: {stats['count']}")
+        print(f"    Avg trial std: {stats['avg_trial_std']:.4f}")
+
+    # Save the results with the extra statistical information
+    results = {
+        'overall': overall_stats,
+        'by_class': class_stats,
+        'mean_scores': faithfulness_scores.tolist(),
+        'std_scores': faithfulness_stds.tolist(),
+        'class_labels': class_labels.tolist()
+    }
+
+    # Save to files
+    results_path = config.file.output_dir / f"faithfulness_stats{config.file.output_suffix}.json"
+    scores_path = config.file.output_dir / f"faithfulness_scores{config.file.output_suffix}.npy"
+
+    # Save JSON stats
+    with open(results_path, 'w') as f:
+        import json
+        json.dump(results, f, indent=2)
+
+    # Save raw scores and additional data as numpy array
+    np.savez(scores_path,
+             mean_scores=faithfulness_scores,
+             std_scores=faithfulness_stds,
+             class_labels=class_labels,
+             all_trials=faithfulness_results["all_trials"])
+
+    print(f"Faithfulness statistics saved to {results_path}")
+    print(f"Raw scores saved to {scores_path}.npz")
+
+    return results

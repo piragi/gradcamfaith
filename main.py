@@ -3,20 +3,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-import torch
 
 import analysis
 import config
-import io_utils
 import pipeline as pipe
 import vit.model as model
 
 
 def main():
     pipeline_config = config.PipelineConfig()
-    pipeline_config.file.use_cached_original = False
-    pipeline_config.file.current_mode = "val"
-    pipeline_config.classify.weigh_by_class_embedding = False
+    pipeline_config.file.use_cached_original = True
+    pipeline_config.file.current_mode = "test"
+    pipeline_config.file.weighted = True
+
+    pipeline_config.classify.weigh_by_class_embedding = True
     pipeline_config.classify.data_collection = True
 
     original_classification, (

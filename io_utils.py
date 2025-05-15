@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from pipeline import ClassificationResult
+from data_types import ClassificationResult
 
 
 def ensure_directories(directories: List[Path]) -> None:

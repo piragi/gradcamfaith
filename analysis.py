@@ -590,7 +590,7 @@ def analyze_key_attribution_patterns(df: pd.DataFrame, model) -> pd.DataFrame:
     # df = add_sparsity_metrics(df)
     # df = add_attribution_consistency_metrics(df)
     # df = add_robustness_metrics(df)
-    df = add_ffn_activity_metrics(df)
+    # df = add_ffn_activity_metrics(df)
     # df = add_class_embedding_metrics(df)
     # df = add_embedding_space_metrics(df, model)
 
@@ -634,10 +634,14 @@ def get_key_attribution_metrics() -> List[str]:
     # Generate column names for all embedding metrics
     embedding_columns = []
     embedding_column_endings = [
-        'mean_attn_logit', 'mean_mlp_logit', 'cls_token_attn_logit',
-        'cls_token_mlp_logit', 'var_attn_logit', 'var_mlp_logit',
-        'mean_attn_alignment_change', 'var_attn_alignment_change',
-        'mean_mlp_alignment_change', 'var_mlp_alignment_change'
+        'mean_attn_logit',
+        'mean_mlp_logit',
+        'cls_token_attn_logit',
+        'cls_token_mlp_logit',
+        'var_attn_logit',
+        'var_mlp_logit',
+        'mean_attn_alignment_change',
+        'cls_attn_alignment_change',
     ]
 
     # Class token MLP probabilities and logits
@@ -648,21 +652,17 @@ def get_key_attribution_metrics() -> List[str]:
                     f'layer_{layer_idx}_class_{cls}_{ending}',
                 ])
 
-    # Add cross-class flow stats for class 0
-    # Add per-head stats
+    # Add per-head metrics for each class
     num_heads = 12  # Adjust based on your model
-    cross_class_stats_per_head = [
-        f'head_{h}_{stat}' for h in range(num_heads) for stat in [
-            'flow_from_class1_to_class0', 'flow_from_class2_to_class0',
-            'class0_gain_with_class1_attention',
-            'class0_gain_with_class2_attention', 'class0_gain_contrast_flow'
-        ]
+    head_stats = ['mean_attn_logit', 'cls_token_attn_logit']
+
+    # Per-head and per-class metrics
+    head_class_columns = [
+        f'layer_{l}_head_{h}_class_{c}_{stat}' for l in layers
+        for h in range(num_heads) for c in classes for stat in head_stats
     ]
-    # Add cross-class flow columns for class 0
-    embedding_columns.extend([
-        f'layer_{l}_{stat}' for l in layers
-        for stat in cross_class_stats_per_head
-    ])
+
+    # embedding_columns.extend(head_class_columns)
 
     base_metrics = [
         'mlp_mean_dist_to_pred_class',
@@ -734,7 +734,7 @@ def get_key_attribution_metrics() -> List[str]:
         'attn_mean_dist_to_class_1',
         'attn_mean_dist_to_class_2',
         # Add all embedding columns
-        # *embedding_columns,
+        *embedding_columns,
         # *geometry_metrics
     ]
 
@@ -834,34 +834,42 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     # STATIC LAYERS/CLASSES/STATS - assumed constant across all rows
-    layers = range(0, 12)  # Only process layers 7-10
+    layers = range(0, 12)  # Process all layers 0-11
     classes = range(0, 3)  # 0-2
     stats = [
-        'mean_attn_logit', 'mean_mlp_logit', 'cls_token_attn_logit',
-        'cls_token_mlp_logit', 'var_attn_logit', 'var_mlp_logit',
-        'mean_attn_alignment_change', 'var_attn_alignment_change',
-        'mean_mlp_alignment_change', 'var_mlp_alignment_change'
+        'mean_attn_logit',
+        'mean_mlp_logit',
+        'cls_token_attn_logit',
+        'cls_token_mlp_logit',
+        'var_attn_logit',
+        'var_mlp_logit',
+        'mean_attn_alignment_change',
+        'cls_attn_alignment_change',
     ]
 
-    # Generate all column names
+    # Generate all column names for layer-level metrics
     new_columns = [
         f'layer_{l}_class_{c}_{stat}' for l in layers for c in classes
         for stat in stats
     ]
 
-    # Add per-head stats
+    # Add per-head metrics for each class
     num_heads = 12  # Adjust based on your model
-    cross_class_stats_per_head = [
-        f'head_{h}_{stat}' for h in range(num_heads) for stat in [
-            'flow_from_class1_to_class0', 'flow_from_class2_to_class0',
-            'class0_gain_with_class1_attention',
-            'class0_gain_with_class2_attention', 'class0_gain_contrast_flow'
-        ]
-    ]  # Add cross-class flow columns for class 0
-    new_columns.extend([
-        f'layer_{l}_{stat}' for l in layers
-        for stat in cross_class_stats_per_head
-    ])
+
+    # Generate column names for head-specific metrics for each class
+    head_class_columns = []
+    for l in layers:
+        for h in range(num_heads):
+            for c in classes:
+                # Mean attention logit per class for each head
+                head_class_columns.append(
+                    f'layer_{l}_head_{h}_class_{c}_mean_attn_logit')
+                # CLS token attention logit per class for each head
+                head_class_columns.append(
+                    f'layer_{l}_head_{h}_class_{c}_cls_token_attn_logit')
+
+    # Combine all columns
+    new_columns.extend(head_class_columns)
 
     # Pre-allocate results dictionary with NaN values
     results_dict = {col: np.full(len(df), np.nan) for col in new_columns}
@@ -872,7 +880,7 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
             embeddings = np.load(row['class_embedding_path'],
                                  allow_pickle=True)
 
-            # Process only the layers we're interested in
+            # Process each layer
             for layer_idx in layers:
                 if layer_idx >= len(embeddings):
                     continue
@@ -885,63 +893,9 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                 mlp_logits_input = layer_data['mlp_class_representation_input']
                 mlp_logits = layer_data['mlp_class_representation_output']
 
-                # Check if attention maps are available
-                if 'attention_map' in layer_data:
-                    attention_map = layer_data['attention_map']
+                attention_map = layer_data['attention_map']
 
-                    # Calculate cross-class information flow
-                    # Identify source tokens (high class 1/2 identifiability)
-                    class1_sources = (attn_logits_input[:, 1] > np.mean(
-                        attn_logits_input[:, 1])).astype(float)
-                    class2_sources = (attn_logits_input[:, 2] > np.mean(
-                        attn_logits_input[:, 2])).astype(float)
-
-                    # Identify tokens that GAINED COVID identifiability
-                    covid_gain = attn_logits[:, 0] - attn_logits_input[:, 0]
-
-                    # Process per head
-                    # Attention map should be [heads, seq, seq]
-                    num_heads = attention_map.shape[0]
-
-                    # Only process up to num_heads available
-                    actual_heads = min(
-                        num_heads,
-                        12)  # or whatever your model's head count is
-
-                    for h in range(actual_heads):
-                        attention_head = attention_map[h, :, :]  # [seq, seq]
-
-                        # Calculate flow for this head
-                        # einsum 'ij,j->i' means: for each token i, sum attention to all source tokens j
-                        flow_from_class1 = np.einsum('ij,j->i', attention_head,
-                                                     class1_sources)
-                        flow_from_class2 = np.einsum('ij,j->i', attention_head,
-                                                     class2_sources)
-
-                        # Weight by COVID gain
-                        class1_contribution = flow_from_class1 * covid_gain
-                        class2_contribution = flow_from_class2 * covid_gain
-
-                        # Calculate contrast flow
-                        contrast_flow = class1_contribution - 0.5 * class2_contribution
-
-                        # Store per-head metrics
-                        results_dict[
-                            f'layer_{layer_idx}_head_{h}_flow_from_class1_to_class0'][
-                                idx] = np.mean(flow_from_class1)
-                        results_dict[
-                            f'layer_{layer_idx}_head_{h}_flow_from_class2_to_class0'][
-                                idx] = np.mean(flow_from_class2)
-                        results_dict[
-                            f'layer_{layer_idx}_head_{h}_class0_gain_with_class1_attention'][
-                                idx] = np.mean(class1_contribution)
-                        results_dict[
-                            f'layer_{layer_idx}_head_{h}_class0_gain_with_class2_attention'][
-                                idx] = np.mean(class2_contribution)
-                        results_dict[
-                            f'layer_{layer_idx}_head_{h}_class0_gain_contrast_flow'][
-                                idx] = np.mean(contrast_flow)
-
+                # Process layer-level metrics for each class
                 for cls in classes:
                     # Calculate all metrics at once
                     mean_attn = np.mean(attn_logits[:, cls])
@@ -952,14 +906,13 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                     cls_token_mlp = mlp_logits[0, cls]
                     var_mlp = np.var(mlp_logits[:, cls])
 
-                    alignment_change_mlp = mlp_logits[:,
-                                                      cls] - mlp_logits_input[:,
-                                                                              cls]
+                    alignment_change_attn_cls = mlp_logits[
+                        0, cls] - mlp_logits_input[0, cls]
                     alignment_change_attn = attn_logits[:,
                                                         cls] - attn_logits_input[:,
                                                                                  cls]
 
-                    # Store in results dictionary
+                    # Store in results dictionary for layer-level metrics
                     results_dict[
                         f'layer_{layer_idx}_class_{cls}_mean_attn_logit'][
                             idx] = mean_attn
@@ -967,8 +920,8 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                         f'layer_{layer_idx}_class_{cls}_mean_attn_alignment_change'][
                             idx] = np.mean(alignment_change_attn)
                     results_dict[
-                        f'layer_{layer_idx}_class_{cls}_var_attn_alignment_change'][
-                            idx] = np.var(alignment_change_attn)
+                        f'layer_{layer_idx}_class_{cls}_cls_attn_alignment_change'][
+                            idx] = alignment_change_attn_cls
                     results_dict[
                         f'layer_{layer_idx}_class_{cls}_cls_token_attn_logit'][
                             idx] = cls_token_attn
@@ -980,17 +933,51 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                         f'layer_{layer_idx}_class_{cls}_mean_mlp_logit'][
                             idx] = mean_mlp
                     results_dict[
-                        f'layer_{layer_idx}_class_{cls}_mean_mlp_alignment_change'][
-                            idx] = np.mean(alignment_change_mlp)
-                    results_dict[
-                        f'layer_{layer_idx}_class_{cls}_var_mlp_alignment_change'][
-                            idx] = np.var(alignment_change_mlp)
-                    results_dict[
                         f'layer_{layer_idx}_class_{cls}_cls_token_mlp_logit'][
                             idx] = cls_token_mlp
                     results_dict[
                         f'layer_{layer_idx}_class_{cls}_var_mlp_logit'][
                             idx] = var_mlp
+
+                # Check if attention maps are available
+                if 'attention_map' in layer_data and len(
+                        layer_data['attention_map']) > 0 and False:
+                    attention_map = layer_data['attention_map']
+
+                    # Attention map should be [heads, seq, seq]
+                    num_heads = attention_map.shape[0]
+                    actual_heads = min(num_heads,
+                                       12)  # Cap at expected head count
+
+                    for h in range(actual_heads):
+                        attention_head = attention_map[h, :, :]  # [seq, seq]
+
+                        # For each class, calculate the head's contribution to class representation
+                        for cls in classes:
+                            # Following the paper's approach of analyzing how attention transforms
+                            # representations in the class embedding space
+
+                            # 1. Calculate the change in class representation due to this head
+                            # The attention output is a weighted sum of input values based on attention weights
+                            head_class_contributions = np.zeros(
+                                attn_logits_input.shape[0])
+
+                            for i in range(attn_logits_input.shape[0]):
+                                # weighted sum of input class logits based on attention weights
+                                weighted_inputs = attention_head[
+                                    i, :] * attn_logits_input[:, cls]
+                                head_class_contributions[i] = np.sum(
+                                    weighted_inputs)
+
+                            # 2. Store the mean attention logit per class for this head
+                            results_dict[
+                                f'layer_{layer_idx}_head_{h}_class_{cls}_mean_attn_logit'][
+                                    idx] = np.mean(head_class_contributions)
+
+                            # 3. Store the CLS token attention logit per class for this head
+                            results_dict[
+                                f'layer_{layer_idx}_head_{h}_class_{cls}_cls_token_attn_logit'][
+                                    idx] = head_class_contributions[0]
 
         except Exception as e:
             print(

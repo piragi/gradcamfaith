@@ -10,6 +10,7 @@ class FileConfig:
     """Configuration for file paths and I/O operations."""
     base_pipeline_dir: Path = Path("./results")
     current_mode: Modes = "test"
+    weighted = False
 
     output_suffix: str = ""
 
@@ -18,8 +19,13 @@ class FileConfig:
     use_cached_perturbed: bool = True
 
     @property
-    def output_dir(self) -> Path:
+    def mode_dir(self) -> Path:
         return self.base_pipeline_dir / self.current_mode
+
+    @property
+    def output_dir(self) -> Path:
+        weighted_suffix = "_weighted" if self.weighted else ""
+        return self.base_pipeline_dir / f'{self.current_mode}{weighted_suffix}'
 
     @property
     def data_dir(self) -> Path:
@@ -36,16 +42,16 @@ class FileConfig:
         return self.output_dir / f"attributions{self.output_suffix}"
 
     @property
-    def vit_inputs_dir(self) -> Path:  # If still used, make it mode-specific
-        return self.output_dir / "vit_inputs"
+    def vit_inputs_dir(self) -> Path:
+        return self.mode_dir / "vit_inputs"
 
     @property
     def perturbed_dir(self) -> Path:
-        return self.output_dir / "patches"  # Patches of perturbed images
+        return self.mode_dir / "patches"  # Patches of perturbed images
 
     @property
     def mask_dir(self) -> Path:
-        return self.output_dir / "patch_masks"
+        return self.mode_dir / "patch_masks"
 
     @property
     def directories(self) -> List[Path]:
@@ -53,7 +59,7 @@ class FileConfig:
         return [
             self.output_dir, self.data_dir, self.cache_dir,
             self.attribution_dir, self.vit_inputs_dir, self.perturbed_dir,
-            self.mask_dir
+            self.mask_dir, self.mode_dir
         ]
 
     @property
@@ -61,6 +67,7 @@ class FileConfig:
         """Return a map of all directories."""
         return {
             "output_dir": self.output_dir,
+            "mode_dir": self.mode_dir,
             "data": self.data_dir,
             "cache": self.cache_dir,
             "attribution": self.attribution_dir,
