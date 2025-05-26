@@ -150,6 +150,8 @@ class Attention(nn.Module):
 
         out = torch.einsum('bhij,bhjd->bhid', attn, v)
 
+        self.head_contributions = out.detach().clone()
+
         self.save_attention_map(attn)
         if register_hook:
             attn.register_hook(self.save_attn_gradients)

@@ -14,7 +14,6 @@ class ClassificationPrediction:
     confidence: float
     probabilities: List[float]
 
-
 @dataclass
 class FFNActivityItem:
     layer: Union[int, str]
@@ -29,6 +28,18 @@ class FFNActivityItem:
                 and np.isclose(self.mean_activity, other.mean_activity)
                 and np.isclose(self.cls_activity, other.cls_activity)
                 and np.array_equal(self.activity_data, other.activity_data))
+
+
+@dataclass
+class HeadContributionItem:
+    layer: Union[int, str]
+    stacked_contribution: np.ndarray
+
+    def __eq__(self, other):
+        if not isinstance(other, HeadContributionItem):
+            return NotImplemented
+        return (self.layer == other.layer and np.array_equal(
+            self.stacked_contribution, other.stacked_contribution))
 
 
 @dataclass
@@ -58,38 +69,41 @@ class ClassEmbeddingRepresentationItem:
 @dataclass
 class AttributionDataBundle:
     positive_attribution: np.ndarray
-    negative_attribution: Optional[np.ndarray]  # Can be None
+    logits: Optional[np.ndarray]  # Can be None
     ffn_activities: List[FFNActivityItem]
     class_embedding_representations: List[ClassEmbeddingRepresentationItem]
+    head_contribution: List[HeadContributionItem]
 
     def __eq__(self, other):
         if not isinstance(other, AttributionDataBundle):
             return NotImplemented
 
-        neg_attr_equal = False
-        if self.negative_attribution is None and other.negative_attribution is None:
-            neg_attr_equal = True
-        elif self.negative_attribution is not None and other.negative_attribution is not None:
-            neg_attr_equal = np.array_equal(self.negative_attribution,
-                                            other.negative_attribution)
+        logits_equal = False
+        if self.logits is None and other.logits is None:
+            logits_equal = True
+        elif self.logits is not None and other.logits is not None:
+            logits_equal = np.array_equal(self.logits,
+                                            other.logits)
         else:  # one is None, other is not
-            neg_attr_equal = False
+            logits_equal = False
 
         return (np.array_equal(self.positive_attribution,
-                               other.positive_attribution) and neg_attr_equal
+                               other.positive_attribution) and logits_equal
                 and self.ffn_activities == other.ffn_activities
                 and  # Relies on FFNActivityItem.__eq__
                 self.class_embedding_representations
-                == other.class_embedding_representations
+                == other.class_embedding_representations and
+                self.head_contribution == other.head_contribution
                 )  # Relies on ClassEmbeddingRepresentationItem.__eq__
 
 
 @dataclass
 class AttributionOutputPaths:
     attribution_path: Path
-    attribution_neg_path: Path  # Path to file which might contain an empty array
+    logits: Path  # Path to file which might contain an empty array
     ffn_activity_path: Path
     class_embedding_path: Path
+    head_contribution_path: Path
 
 
 @dataclass

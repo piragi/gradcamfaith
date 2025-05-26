@@ -1,6 +1,6 @@
 # main.py
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List
 
 import pandas as pd
 
@@ -13,12 +13,15 @@ import vit.model as model
 def main():
     pipeline_config = config.PipelineConfig()
     pipeline_config.file.use_cached_original = True
-    pipeline_config.file.current_mode = "test"
-    pipeline_config.file.weighted = True
+    pipeline_config.file.current_mode = "train"
+    pipeline_config.file.weighted = False
+    pipeline_config.classify.analysis = False
 
-    pipeline_config.classify.weigh_by_class_embedding = True
-    pipeline_config.classify.data_collection = True
+    pipeline_config.classify.data_collection = False  #not pipeline_config.file.weighted
 
+    print(
+        f"Run pipeline with:\nCurrent Mode: {pipeline_config.file.current_mode}, {'Weighted' if pipeline_config.file.weighted else 'Unweighted'}, {'Analysis activated' if pipeline_config.classify.analysis else 'No Analysis'}"
+    )
     original_classification, (
         perturbed_image_records, perturbed_classification) = pipe.run_pipeline(
             pipeline_config,
@@ -95,7 +98,8 @@ def run_saco_from_pipeline_outputs(
     print("Analyzing key attribution patterns...")
     model_instance = model.load_vit_model()
     patterns_df = analysis.analyze_key_attribution_patterns(
-        saco_analysis_results["faithfulness_correctness"], model_instance)
+        saco_analysis_results["faithfulness_correctness"], model_instance,
+        pipeline_config)
     saco_analysis_results["attribution_patterns"] = patterns_df
 
     if save_analysis_results:

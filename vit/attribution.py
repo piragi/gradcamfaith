@@ -71,18 +71,40 @@ def calculate_ffn_activity(ffn_input: torch.Tensor,
     return ffn_activity
 
 
+def adaptive_weighting_per_head(layer_idx: int, target_class: int, blk: Block,
+                                model_nn: VisionTransformer) -> torch.Tensor:
+    cam_ones = torch.ones((1, 1, 12, 197, 197))
+    boost_factor = 2.5
+    head_id = None
+    head_boost_factor = {}
+    if target_class == 0:
+        head_boost_factor = {9: [6]}
+    if target_class == 1:
+        head_boost_factor = {9: [0], 11: [6], 8: [9]}
+    if target_class == 2:
+        head_boost_factor = {8: [9]}
+
+    head_id = head_boost_factor.get(layer_idx, None)
+
+    if head_id:
+        cam_ones[:, :, head_id, :, :] *= boost_factor
+
+    return cam_ones
+
+
 def adaptive_weighting(layer_idx: int, target_class: int, blk: Block,
                        model_nn: VisionTransformer) -> torch.Tensor:
     batch_size = blk.attn.output_tokens.shape[0]
     seq_len = blk.attn.output_tokens.shape[1]
     weights_rows = torch.ones((batch_size * seq_len, 1), device='cpu')
 
-    # works better if you just boost all with a certain factor funnily enough
+    correlation_boost_factor_class2 = 1.2
+    correlation_boost_factor_class1 = 1.7
+
     if target_class == 2:
-        correlation_boost_factor = 5.0
         boost_factor_formula = lambda x: (
-            1 + x.get(layer_idx, 0.0
-                      )) * correlation_boost_factor if layer_idx in x else 2.0
+            1 + x.get(layer_idx, 0.0)
+        ) * correlation_boost_factor_class2 if layer_idx in x else 1.0
 
         # Get attention outputs and compute class logits
         attn_output = blk.attn.output_tokens.detach()
@@ -101,20 +123,11 @@ def adaptive_weighting(layer_idx: int, target_class: int, blk: Block,
         attn_boost_mask = (attn_target_logits > attn_threshold).float()
 
         # Apply layer-specific boost factors
-        layer_boost_factors = {
-            5: 0.4,
-            6: 0.2,
-            7: 0.5,
-            8: 0.47,
-            9: 0.55,
-            10: 0.55,
-            11: 0.55
-        }
+        layer_boost_factors = {7: 0.45, 8: 0.43, 9: 0.51, 10: 0.48, 11: 0.52}
 
         class_boost_factors = {
             5: 0.428,
-            6: 0.395,
-            8: 0.330,
+            8: 0.29,
         }
 
         boost_factor = boost_factor_formula(layer_boost_factors)
@@ -132,26 +145,24 @@ def adaptive_weighting(layer_idx: int, target_class: int, blk: Block,
         weights_rows = weights.view(-1, 1)
 
     elif target_class == 1 and layer_idx >= 8:
-        correlation_boost_factor = 2.5
         boost_factor_formula = lambda x: (
-            1 + x.get(layer_idx, 0.0
-                      )) * correlation_boost_factor if layer_idx in x else 1.0
+            1 + x.get(layer_idx, 0.0)
+        ) * correlation_boost_factor_class1 if layer_idx in x else 1.0
 
         # Get attention outputs and compute class logits
         attn_output = blk.attn.output_tokens.detach()
         attn_class_logits = model_nn.get_class_embedding_space_representation(
             attn_output)
 
-        class_alignment_change = {8: 2, 9: 2, 10: 1, 11: 2}
+        class_alignment_change = {7: 2, 8: 2, 9: 2, 10: 1, 11: 1}
 
         layer_boost_factors = {
-            9: 0.22,
-            10: 0.2,
-            11: 0.36,
+            7: 0.36,
+            9: 0.20,
+            10: 0.18,
+            # 11: 0.36,
         }
-        class_boost_factors = {
-            8: 0.3,
-        }
+        class_boost_factors = {7: 0.22, 8: 0.19, 10: 0.43, 11: 0.1}
 
         # Different handling for specific layers
         class_alignment = class_alignment_change.get(layer_idx, 1)
@@ -181,52 +192,100 @@ def adaptive_weighting(layer_idx: int, target_class: int, blk: Block,
     return weights_rows
 
 
-def token_class_embedding_representation(
-        model_nn: VisionTransformer) -> List[Dict[str, Any]]:
+def class_embedding_representation_data_capture(
+        blk: Block, i: int, model_nn: VisionTransformer) -> Dict[str, Any]:
     """
     Collects class embedding representations for attention and MLP outputs per layer.
     Returns data structured for FFNActivityItem and ClassEmbeddingRepresentationItem.
     """
-    class_embedding_data_list: List[Dict[str, Any]] = []
-    if not hasattr(model_nn, 'blocks') or not isinstance(
-            model_nn.blocks, torch.nn.ModuleList):
-        print(
-            "Warning: Model does not have 'blocks' or it's not a ModuleList. Skipping CER collection."
-        )
-        return class_embedding_data_list
+    attn_input_tokens = getattr(blk.attn, 'input_tokens', None)
+    attn_output_tokens = getattr(blk.attn, 'output_tokens', None)
+    attn_map = getattr(blk.attn, 'attention_map',
+                       None).detach().cpu().squeeze(0).numpy()
 
-    for i, blk in enumerate(model_nn.blocks):
-        attn_input_tokens = getattr(blk.attn, 'input_tokens', None)
-        attn_output_tokens = getattr(blk.attn, 'output_tokens', None)
-        attn_map = getattr(blk.attn, 'attention_map',
-                           None).detach().cpu().squeeze(0).numpy()
+    # MLP part
+    mlp_input_tokens = getattr(blk.mlp, 'input_tokens', None)
+    mlp_output_tokens = getattr(blk.mlp, 'output_tokens', None)
 
-        # MLP part
-        mlp_input_tokens = getattr(blk.mlp, 'input_tokens', None)
-        mlp_output_tokens = getattr(blk.mlp, 'output_tokens', None)
+    def get_representation(tokens):
+        return model_nn.get_class_embedding_space_representation(
+            tokens).detach().cpu().squeeze(0).numpy()
 
-        def get_representation(tokens):
-            return model_nn.get_class_embedding_space_representation(
-                tokens).detach().cpu().squeeze(0).numpy()
+    attn_class_repr_data = get_representation(attn_output_tokens)
+    mlp_class_repr_data = get_representation(mlp_output_tokens)
 
-        attn_class_repr_data = get_representation(attn_output_tokens)
-        mlp_class_repr_data = get_representation(mlp_output_tokens)
+    return {
+        'layer':
+        i,
+        'attention_class_representation_output':
+        attn_class_repr_data,
+        'mlp_class_representation_output':
+        mlp_class_repr_data,
+        'attention_map':
+        attn_map,
+        'attention_class_representation_input':
+        get_representation(attn_input_tokens),
+        'mlp_class_representation_input':
+        get_representation(mlp_input_tokens),
+    }
 
-        class_embedding_data_list.append({
+
+def ffn_activities_data_capture(blk: Block, i: int) -> Dict[str, Any]:
+    ffn_input = getattr(blk.mlp, 'input_tokens', None)
+    ffn_output = getattr(blk.mlp, 'output_tokens', None)
+    ffn_activity = {}
+
+    if ffn_input is not None and ffn_output is not None:
+        ffn_input_cpu = ffn_input.detach().cpu()
+        ffn_output_cpu = ffn_output.detach().cpu()
+        ffn_activity_metric = calculate_ffn_activity(
+            ffn_input_cpu, ffn_output_cpu)  # Returns CPU tensor
+
+        activity_data_np = ffn_activity_metric.squeeze(0).numpy(
+        ) if ffn_activity_metric.dim() > 1 else ffn_activity_metric.numpy()
+
+        ffn_activity = {
             'layer':
             i,
-            'attention_class_representation_output':
-            attn_class_repr_data,
-            'mlp_class_representation_output':
-            mlp_class_repr_data,
-            'attention_map':
-            attn_map,
-            'attention_class_representation_input':
-            get_representation(attn_input_tokens),
-            'mlp_class_representation_input':
-            get_representation(mlp_input_tokens),
-        })
-    return class_embedding_data_list
+            'activity':
+            activity_data_np,  # This is the np.ndarray for 'activity_data'
+            'mean_activity':
+            ffn_activity_metric.mean().item(),
+            'cls_activity':
+            ffn_activity_metric[0, 0].item() if ffn_activity_metric.dim() > 1
+            and ffn_activity_metric.shape[0] > 0
+            and ffn_activity_metric.shape[1] > 0 else
+            (ffn_activity_metric[0].item() if ffn_activity_metric.dim() > 0
+             and ffn_activity_metric.shape[0] > 0 else 0.0)
+        }
+    return ffn_activity
+
+
+def head_contribution_data_capture(blk: Block, i: int) -> Dict[str, Any]:
+    """Capture head contributions after projection"""
+    head_outputs = blk.attn.head_contributions  # Shape: [b, h, n, d_head]
+    b, h, n, d_head = head_outputs.shape
+    h_dim = h * d_head
+
+    # Process all heads at once for efficiency
+    contributions = []
+    for head_idx in range(h):
+        # Create tensor with only this head's output
+        single_head = torch.zeros(b, n, h_dim, device=head_outputs.device)
+        single_head[:, :, head_idx * d_head:(head_idx + 1) *
+                    d_head] = head_outputs[:, head_idx]
+
+        # Apply projection
+        head_contrib = blk.attn.proj(single_head)
+        contributions.append(head_contrib)
+
+    # Stack and convert to numpy
+    stacked_contributions = torch.stack(
+        contributions)  # Shape: [h, b, n, d_model]
+    return {
+        'layer': i,
+        'stacked_contribution': stacked_contributions.detach().cpu().numpy()
+    }
 
 
 def transmm(
@@ -239,7 +298,7 @@ def transmm(
     weigh_by_class_embedding: bool = True,
     data_collection: bool = False
 ) -> Tuple[Dict[str, Any], np.ndarray, Optional[np.ndarray], List[Dict[
-        str, Any]], List[Dict[str, Any]]]:
+        str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Memory-efficient implementation of TransMM.
     Returns: (prediction_dict, positive_attr_np, negative_attr_np_or_None, ffn_activity_list, cer_list)
@@ -275,17 +334,19 @@ def transmm(
 
     num_tokens = model_nn.blocks[0].attn.get_attention_map().shape[-1]
     R_pos = torch.eye(num_tokens, num_tokens, device='cpu')
-    # R_neg = torch.eye(num_tokens, num_tokens, device='cpu') # If negative attribution is calculated
 
+    class_embedding_data_list: List[Dict[str, Any]] = []
+    head_contribution_list: List[Dict[str, Any]] = []
     collected_ffn_activities: List[Dict[str, Any]] = []
-
     for i, blk in enumerate(model_nn.blocks):
         grad = blk.attn.get_attn_gradients().detach()
-        cam = blk.attn.get_attention_map().detach()
+        cam = blk.attn.get_attention_map().detach().cpu()
 
-        if weigh_by_class_embedding and False:
+        if weigh_by_class_embedding:
             cam = cam * adaptive_weighting_per_head(i, effective_target_class,
                                                     blk, model_nn)
+            random_noise = torch.rand_like(cam)
+            # cam += random_noise
 
         if gini_params:
             gini_threshold, steepness, max_power = gini_params
@@ -293,52 +354,25 @@ def transmm(
                                            max_power)
 
         cam_pos_avg = avg_heads(cam, grad)  # Returns CPU tensor
-        # cam_neg_avg = avg_heads_min(cam, grad) # If negative attribution calculated
 
-        if weigh_by_class_embedding:
+        if weigh_by_class_embedding and False:
             cam_pos_avg = cam_pos_avg * adaptive_weighting(
                 i, effective_target_class, blk, model_nn)
 
         R_pos = R_pos + apply_self_attention_rules(R_pos, cam_pos_avg)
-        # R_neg = R_neg + apply_self_attention_rules(R_neg, cam_neg_avg)
 
         if data_collection:
-            ffn_input = getattr(blk.mlp, 'input_tokens', None)
-            ffn_output = getattr(blk.mlp, 'output_tokens', None)
-
-            if ffn_input is not None and ffn_output is not None:
-                ffn_input_cpu = ffn_input.detach().cpu()
-                ffn_output_cpu = ffn_output.detach().cpu()
-                ffn_activity_metric = calculate_ffn_activity(
-                    ffn_input_cpu, ffn_output_cpu)  # Returns CPU tensor
-
-                activity_data_np = ffn_activity_metric.squeeze(
-                    0).numpy() if ffn_activity_metric.dim(
-                    ) > 1 else ffn_activity_metric.numpy()
-
-                collected_ffn_activities.append({
-                    'layer':
-                    i,
-                    'activity':
-                    activity_data_np,  # This is the np.ndarray for 'activity_data'
-                    'mean_activity':
-                    ffn_activity_metric.mean().item(),
-                    'cls_activity':
-                    ffn_activity_metric[0, 0].item()
-                    if ffn_activity_metric.dim() > 1
-                    and ffn_activity_metric.shape[0] > 0
-                    and ffn_activity_metric.shape[1] > 0 else
-                    (ffn_activity_metric[0].item()
-                     if ffn_activity_metric.dim() > 0
-                     and ffn_activity_metric.shape[0] > 0 else 0.0)
-                })
-                del ffn_input_cpu, ffn_output_cpu, ffn_activity_metric, activity_data_np
-            del ffn_input, ffn_output
+            collected_ffn_activities.append(ffn_activities_data_capture(
+                blk, i))
+            class_embedding_data_list.append(
+                class_embedding_representation_data_capture(blk, i, model_nn))
+            if i >= 7:
+                head_contribution_list.append(
+                    head_contribution_data_capture(blk, i))
 
         del grad, cam, cam_pos_avg  #, cam_neg_avg
 
     transformer_attribution_pos = R_pos[0, 1:].clone()
-    # transformer_attribution_neg = R_neg[0, 1:].clone()
     del R_pos  #, R_neg
 
     def process_attribution_map(attr_tensor: torch.Tensor) -> np.ndarray:
@@ -352,25 +386,15 @@ def transmm(
         return attr_interpolated.squeeze().cpu().detach().numpy()
 
     attribution_pos_np = process_attribution_map(transformer_attribution_pos)
-    # attribution_neg_np = process_attribution_map(transformer_attribution_neg) # If calculated
-    attribution_neg_np = None  # Per current transmm, it returns None for negative
 
     # Normalize
     normalize_fn = lambda x: (x - np.min(x)) / (np.max(x) - np.min(
         x) + 1e-8) if (np.max(x) - np.min(x)) > 1e-8 else x
 
     attribution_pos_np = normalize_fn(attribution_pos_np)
-    # attribution_neg_np = normalize_fn(attribution_neg_np)
-
-    collected_class_embedding_representations: List[Dict[str, Any]] = []
-    if data_collection:
-        collected_class_embedding_representations = token_class_embedding_representation(
-            model_nn)
 
     # Clean up
-    del transformer_attribution_pos, input_tensor, logits, one_hot, loss
-    if 'transformer_attribution_neg' in locals():
-        del transformer_attribution_neg
+    del transformer_attribution_pos, input_tensor, one_hot, loss
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -381,10 +405,11 @@ def transmm(
     return (
         prediction_result_dict,  # Dict from model_handler.get_prediction
         attribution_pos_np,
-        attribution_neg_np,  # Optional[np.ndarray]
+        logits.cpu().detach().numpy()
+        if data_collection else None,  # Optional[np.ndarray]
         collected_ffn_activities,  # List[Dict for FFNActivityItem]
-        collected_class_embedding_representations  # List[Dict for ClassEmbeddingRepresentationItem]
-    )
+        class_embedding_data_list,  # List[Dict for ClassEmbeddingRepresentationItem]
+        head_contribution_list)
 
 
 def generate_attribution(
@@ -412,26 +437,27 @@ def generate_attribution(
         weigh_by_class_embedding = kwargs.get('weigh_by_class_embedding',
                                               False)
 
-        (pred_dict, pos_attr_np, neg_attr_np, ffn_list, cer_list) = transmm(
-            model_nn=model,  # Pass the VisionTransformer instance
-            input_tensor=input_tensor,
-            target_class=target_class,
-            gini_params=gini_params,
-            device=device,
-            img_size=img_size,
-            weigh_by_class_embedding=weigh_by_class_embedding,
-            data_collection=data_collection  # Pass this flag
-        )
+        (pred_dict, pos_attr_np, logits, ffn_list, cer_list,
+         head_contribution) = transmm(
+             model_nn=model,  # Pass the VisionTransformer instance
+             input_tensor=input_tensor,
+             target_class=target_class,
+             gini_params=gini_params,
+             device=device,
+             img_size=img_size,
+             weigh_by_class_embedding=weigh_by_class_embedding,
+             data_collection=data_collection  # Pass this flag
+         )
 
         # Structure the output dictionary as expected by pipeline.py
         return {
             "predictions":
             pred_dict,  # The dict from model_handler.get_prediction via transmm
             "attribution_positive": pos_attr_np,
-            "attribution_negative":
-            neg_attr_np,  # This will be None if transmm returns None
+            "logits": logits,  # This will be None if transmm returns None
             "ffn_activity": ffn_list,  # List of dicts
-            "class_embedding_representation": cer_list  # List of dicts
+            "class_embedding_representation": cer_list,  # List of dicts
+            "head_contribution": head_contribution
         }
     else:
         raise ValueError(f"Unsupported attribution method: {method}")

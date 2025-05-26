@@ -80,14 +80,14 @@ def save_classification_results_to_csv(results: List[ClassificationResult],
             'predicted_class_label': res.prediction.predicted_class_label,
             'predicted_class_idx': res.prediction.predicted_class_idx,
             'confidence': res.prediction.confidence,
-            'probabilities': res.prediction.probabilities,
+            'probabilities': res.prediction.probabilities
         }
         if res.attribution_paths:
             row.update({
                 'attribution_path':
                 str(res.attribution_paths.attribution_path),
-                'attribution_neg_path':
-                str(res.attribution_paths.attribution_neg_path),
+                'logits':
+                str(res.attribution_paths.logits),
                 'ffn_activity_path':
                 str(res.attribution_paths.ffn_activity_path),
                 'class_embedding_path':
@@ -96,7 +96,7 @@ def save_classification_results_to_csv(results: List[ClassificationResult],
         else:
             row.update({
                 'attribution_path': None,
-                'attribution_neg_path': None,
+                'logits': None,
                 'ffn_activity_path': None,
                 'class_embedding_path': None
             })

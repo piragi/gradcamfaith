@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 
-Modes = Literal["test", "val"]
+Modes = Literal["train", "test", "val", "dev"]
 
 
 @dataclass
@@ -29,7 +29,7 @@ class FileConfig:
 
     @property
     def data_dir(self) -> Path:
-        return self.output_dir / "preprocessed"
+        return self.mode_dir / "preprocessed"
 
     @property
     def cache_dir(self) -> Path:
@@ -85,14 +85,14 @@ class ClassificationConfig:
 
     # Model parameters
     model_type: str = "vit_base_patch16_224"
-    num_classes: int = 2
+    num_classes: int = 3
 
     # Explanation parameters
     pretransform: bool = False
     gini_params: Tuple[float, float, float] = (0.65, 8.0, 0.5)
     attribution_method: str = "transmm"
 
-    weigh_by_class_embedding = False
+    analysis = False
     data_collection = False
 
     # Device configuration

@@ -536,10 +536,9 @@ def analyze_faithfulness_vs_correctness_from_objects(  # Renamed for clarity
             'attribution_path':
             str(attribution_paths_info.attribution_path)
             if attribution_paths_info else None,
-            'attribution_neg_path':
-            str(attribution_paths_info.attribution_neg_path)
-            if attribution_paths_info
-            and attribution_paths_info.attribution_neg_path else None,
+            'logits':
+            str(attribution_paths_info.logits) if attribution_paths_info
+            and attribution_paths_info.logits else None,
             'ffn_activity_path':
             str(attribution_paths_info.ffn_activity_path)
             if attribution_paths_info
@@ -572,7 +571,8 @@ def extract_true_class_from_filename(
     return None
 
 
-def analyze_key_attribution_patterns(df: pd.DataFrame, model) -> pd.DataFrame:
+def analyze_key_attribution_patterns(df: pd.DataFrame, model,
+                                     config) -> pd.DataFrame:
     """
     Comprehensive analysis of attribution patterns with correlation calculations.
     
@@ -591,12 +591,12 @@ def analyze_key_attribution_patterns(df: pd.DataFrame, model) -> pd.DataFrame:
     # df = add_attribution_consistency_metrics(df)
     # df = add_robustness_metrics(df)
     # df = add_ffn_activity_metrics(df)
-    # df = add_class_embedding_metrics(df)
-    # df = add_embedding_space_metrics(df, model)
+    if config.classify.data_collection:
+        df = add_class_embedding_metrics(df)
+        df = add_embedding_space_metrics(df, model)
 
     # Clean data
     df_clean = df.dropna(subset=['saco_score'])
-    print(df_clean.head())
 
     # Define key metrics to analyze
     key_metrics = get_key_attribution_metrics()
@@ -1054,8 +1054,7 @@ def add_basic_attribution_metrics(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         try:
             pos_attr = np.load(row['attribution_path'])
-            neg_attr = np.load(
-                row['attribution_neg_path'])  # Already absolute values
+            neg_attr = np.load(row['logits'])  # Already absolute values
 
             # Print diagnostics for first few files
             if len(metrics['neg_magnitude']) < 3:
@@ -1112,7 +1111,7 @@ def add_entropy_metrics(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         try:
             pos_attr = np.load(row['attribution_path'])
-            neg_attr = np.load(row['attribution_neg_path'])
+            neg_attr = np.load(row['logits_path'])
 
             # Normalize distributions for entropy calculation
             pos_norm = pos_attr / (np.sum(pos_attr) + 1e-10)
@@ -1161,7 +1160,7 @@ def add_concentration_metrics(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         try:
             pos_attr = np.load(row['attribution_path']).flatten()
-            neg_attr = np.load(row['attribution_neg_path']).flatten()
+            neg_attr = np.load(row['logits_path']).flatten()
 
             # Calculate Gini coefficients
             metrics['neg_gini'].append(calculate_gini(neg_attr))
@@ -1229,7 +1228,7 @@ def add_information_theory_metrics(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         try:
             pos_attr = np.load(row['attribution_path'])
-            neg_attr = np.load(row['attribution_neg_path'])
+            neg_attr = np.load(row['logits_path'])
 
             if pos_attr.shape != neg_attr.shape:
                 for key in metrics:
@@ -1295,7 +1294,7 @@ def add_gradient_based_metrics(df: pd.DataFrame) -> pd.DataFrame:
             # For gradient-based metrics, we'll use the positive and negative
             # attribution maps as proxies for gradient information
             pos_attr = np.load(row['attribution_path'])
-            neg_attr = np.load(row['attribution_neg_path'])
+            neg_attr = np.load(row['logits_path'])
 
             # Combined attribution (absolute values)
             combined_attr = np.abs(pos_attr) + np.abs(neg_attr)
@@ -1352,7 +1351,7 @@ def add_sparsity_metrics(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         try:
             pos_attr = np.load(row['attribution_path'])
-            neg_attr = np.load(row['attribution_neg_path'])
+            neg_attr = np.load(row['logits_path'])
 
             flat_pos = pos_attr.flatten()
             flat_neg = neg_attr.flatten()
@@ -1418,7 +1417,7 @@ def add_attribution_consistency_metrics(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         try:
             pos_attr = np.load(row['attribution_path'])
-            neg_attr = np.load(row['attribution_neg_path'])
+            neg_attr = np.load(row['logits_path'])
 
             # Correlation between positive and negative maps
             flat_pos = pos_attr.flatten()
