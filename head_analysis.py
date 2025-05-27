@@ -4,10 +4,9 @@ Head analysis module for calculating and analyzing head contributions to class d
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
-import torch
 from tqdm import tqdm
 
 from config import PipelineConfig
@@ -207,7 +206,7 @@ def analyze_class_specific_head_importance(
         for layer in range(num_layers):
             for head in range(num_heads):
                 similarity = focus_similarities[layer, head]
-                if similarity > importance_threshold:
+                if abs(similarity) <= importance_threshold:
                     class_head_importance[pred_class][layer, head] += 1
 
     # Calculate similarity stats for informative threshold setting
@@ -301,58 +300,67 @@ def analyze_class_specific_head_importance(
 
     return results
 
-def analyze_token_activation_patterns(direction_similarities, cls_idx, pca_components=20, n_clusters=5):
+
+def analyze_token_activation_patterns(direction_similarities,
+                                      cls_idx,
+                                      pca_components=20,
+                                      n_clusters=5):
     """
     Find recurring patterns of token activations across images of the same class.
     """
     import numpy as np
-    from sklearn.decomposition import PCA
     from sklearn.cluster import KMeans
-    
+    from sklearn.decomposition import PCA
+
     # Extract activation data for all images in this class
     class_images = []
     activation_matrices = []
-    
+
     for img_name, data in direction_similarities.items():
         if data['predicted_class'] == cls_idx:
             class_images.append(img_name)
             # Get similarity values for 'all' direction
-            similarities = data['similarities']['all']  # [layers, heads, tokens]
+            similarities = data['similarities'][
+                'all']  # [layers, heads, tokens]
             # Flatten to 1D vector
             flat_activations = similarities.flatten()
             activation_matrices.append(flat_activations)
-            
+
     if not activation_matrices:
         return None
-    
+
     # Create feature matrix where rows=images, columns=token-head activations
     feature_matrix = np.array(activation_matrices)
-    
+
     # Step 1: Apply PCA to reduce dimensions
     pca = PCA(n_components=min(pca_components, len(activation_matrices)))
     pca_result = pca.fit_transform(feature_matrix)
-    
+
     # Step 2: Apply k-means to identify clusters
     kmeans = KMeans(n_clusters=min(n_clusters, len(activation_matrices)))
     cluster_labels = kmeans.fit_predict(pca_result)
-    
+
     # Analyze clusters
     cluster_stats = []
     for cluster_id in range(kmeans.n_clusters):
         # Get images in this cluster
-        cluster_images = [class_images[i] for i in range(len(class_images)) 
-                          if cluster_labels[i] == cluster_id]
-        
+        cluster_images = [
+            class_images[i] for i in range(len(class_images))
+            if cluster_labels[i] == cluster_id
+        ]
+
         # Get centroid in original space
         centroid_pca = kmeans.cluster_centers_[cluster_id]
-        centroid_original = pca.inverse_transform(centroid_pca.reshape(1, -1)).flatten()
-        
+        centroid_original = pca.inverse_transform(centroid_pca.reshape(
+            1, -1)).flatten()
+
         # Reshape back to [layers, heads, tokens]
         layers, heads, tokens = similarities.shape
         centroid_reshaped = centroid_original.reshape(layers, heads, tokens)
-        
+
         # Find top activated token-head pairs
-        flat_indices = np.argsort(centroid_original)[-20:]  # Top 20 activations
+        flat_indices = np.argsort(centroid_original)[
+            -20:]  # Top 20 activations
         top_activations = []
         for idx in flat_indices:
             l = idx // (heads * tokens)
@@ -360,15 +368,20 @@ def analyze_token_activation_patterns(direction_similarities, cls_idx, pca_compo
             t = idx % tokens
             activation = centroid_original[idx]
             top_activations.append((l, h, t, activation))
-        
+
         cluster_stats.append({
-            'cluster_id': cluster_id,
-            'size': len(cluster_images),
-            'percentage': len(cluster_images) / len(class_images),
-            'top_activations': top_activations,
-            'image_examples': cluster_images[:5]  # First 5 examples
+            'cluster_id':
+            cluster_id,
+            'size':
+            len(cluster_images),
+            'percentage':
+            len(cluster_images) / len(class_images),
+            'top_activations':
+            top_activations,
+            'image_examples':
+            cluster_images[:5]  # First 5 examples
         })
-    
+
     return {
         'n_images': len(class_images),
         'clusters': cluster_stats,
@@ -422,56 +435,80 @@ def run_head_analysis(original_results: List[ClassificationResult],
     head_importance = analyze_class_specific_head_importance(
         direction_similarities, num_classes, num_heads, num_layers_to_analyze,
         importance_threshold, cls_token_only, save_dir, config)
-    
+
     token_patterns = {}
     if analyze_token_patterns:
         print("Step 3: Analyzing token activation patterns...")
         # Check which classes have images
-        classes_with_images = {cls_idx: count for cls_idx, count in head_importance['class_image_counts'].items() 
-                              if count > 0}
-        
+        classes_with_images = {
+            cls_idx: count
+            for cls_idx, count in
+            head_importance['class_image_counts'].items() if count > 0
+        }
+
         for cls_idx, count in classes_with_images.items():
             if count >= n_clusters:  # Only run if enough images for clustering
-                print(f"  Analyzing patterns for class {cls_idx} ({count} images)...")
+                print(
+                    f"  Analyzing patterns for class {cls_idx} ({count} images)..."
+                )
                 patterns = analyze_token_activation_patterns(
-                    direction_similarities, 
+                    direction_similarities,
                     cls_idx,
                     pca_components=pca_components,
-                    n_clusters=min(n_clusters, count)
-                )
-                
+                    n_clusters=min(n_clusters, count))
+
                 if patterns:
                     token_patterns[cls_idx] = patterns
-                    
+
                     # Save patterns to file
                     output_path = save_dir / f"token_patterns_class_{cls_idx}{config.file.output_suffix}.npy"
                     np.save(output_path, patterns)
-                    
+
                     # Create human-readable summary
-                    with open(save_dir / f"token_patterns_summary_class_{cls_idx}{config.file.output_suffix}.txt", 'w') as f:
-                        f.write(f"TOKEN ACTIVATION PATTERNS FOR CLASS {cls_idx}\n")
+                    with open(
+                            save_dir /
+                            f"token_patterns_summary_class_{cls_idx}{config.file.output_suffix}.txt",
+                            'w') as f:
+                        f.write(
+                            f"TOKEN ACTIVATION PATTERNS FOR CLASS {cls_idx}\n")
                         f.write("=======================================\n\n")
-                        f.write(f"Total images analyzed: {patterns['n_images']}\n")
-                        f.write(f"PCA explained variance: {sum(patterns['explained_variance'][:pca_components]):.4f}\n\n")
-                        
+                        f.write(
+                            f"Total images analyzed: {patterns['n_images']}\n")
+                        f.write(
+                            f"PCA explained variance: {sum(patterns['explained_variance'][:pca_components]):.4f}\n\n"
+                        )
+
                         f.write("PATTERN CLUSTERS:\n")
                         for i, cluster in enumerate(patterns['clusters']):
                             f.write(f"\nCluster {i+1}:\n")
-                            f.write(f"  Size: {cluster['size']} images ({cluster['percentage']*100:.1f}%)\n")
-                            f.write(f"  Example images: {', '.join(cluster['image_examples'])}\n")
-                            f.write("  Top token activations (Layer, Head, Token, Value):\n")
-                            
-                            # Correct layer numbering - add offset to show actual layer numbers 
+                            f.write(
+                                f"  Size: {cluster['size']} images ({cluster['percentage']*100:.1f}%)\n"
+                            )
+                            f.write(
+                                f"  Example images: {', '.join(cluster['image_examples'])}\n"
+                            )
+                            f.write(
+                                "  Top token activations (Layer, Head, Token, Value):\n"
+                            )
+
+                            # Correct layer numbering - add offset to show actual layer numbers
                             # (if analyzing last 5 layers of a 12-layer model)
                             layer_offset = 12 - num_layers_to_analyze
-                            
-                            for l, h, t, v in sorted(cluster['top_activations'], key=lambda x: x[3], reverse=True)[:10]:
+
+                            for l, h, t, v in sorted(
+                                    cluster['top_activations'],
+                                    key=lambda x: x[3],
+                                    reverse=True)[:10]:
                                 actual_layer = l + layer_offset
-                                f.write(f"    Layer {actual_layer}, Head {h}, Token {t}: {v:.5f}\n")
-                        
+                                f.write(
+                                    f"    Layer {actual_layer}, Head {h}, Token {t}: {v:.5f}\n"
+                                )
+
                         f.write("\n\n")
             else:
-                print(f"  Skipping class {cls_idx}: not enough images for clustering ({count})")
+                print(
+                    f"  Skipping class {cls_idx}: not enough images for clustering ({count})"
+                )
 
     print("Head analysis complete!")
     print(f"Results saved to {save_dir}")

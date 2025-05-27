@@ -2,6 +2,7 @@ import json
 import os
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -88,11 +89,12 @@ def faithfulness_road():
 
 
 def faithfulness_sufficiency():
-    return quantus.Sufficiency(threshold=0.4,
+    return quantus.Sufficiency(threshold=0.5,
                                return_aggregate=False,
                                abs=False,
                                normalise=False,
-                               distance_func=quantus.similarity_func.cosine)
+                               distance_func=quantus.similarity_func.cosine,
+                               normalise_func=lambda x: x)
 
 
 def calc_faithfulness(vit_model: model.VisionTransformer,
@@ -125,32 +127,17 @@ def calc_faithfulness(vit_model: model.VisionTransformer,
 
     # Define all the estimators to use
     estimator_configs = [
-        # FaithfulnessEstimatorConfig(name="FaithfulnessEstimate",
-        # n_trials=n_trials,
-        # estimator_fn=faithfulness_estimation,
-        # kwargs={"features": subset_size}),
-        # FaithfulnessEstimatorConfig(name="FaithfulnessCorrelation",
-        # n_trials=n_trials,
-        # estimator_fn=faithfulness_correlation,
-        # kwargs={
-        # "subset_size": subset_size,
-        # "nr_runs": nr_runs
-        # }),
-        # FaithfulnessEstimatorConfig(name="Monotonicity",
-        # n_trials=n_trials,
-        # estimator_fn=faithfulness_monotonicity,
-        # kwargs={"features": 224}),
-        # FaithfulnessEstimatorConfig(
-        # name="MonotonicityCorrelation",
-        # estimator_fn=faithfulness_monotonicity_correlation),
-        # FaithfulnessEstimatorConfig(name="PixelFlipping",
-        # n_trials=n_trials,
-        # estimator_fn=faithfulness_pixel_flipping),
-        # FaithfulnessEstimatorConfig(name="ROAD",
-        # estimator_fn=faithfulness_road),
-        FaithfulnessEstimatorConfig(name="Sufficiency",
+        FaithfulnessEstimatorConfig(name="FaithfulnessCorrelation",
                                     n_trials=n_trials,
-                                    estimator_fn=faithfulness_sufficiency)
+                                    estimator_fn=faithfulness_correlation,
+                                    kwargs={
+                                        "subset_size": subset_size,
+                                        "nr_runs": nr_runs
+                                    }),
+        FaithfulnessEstimatorConfig(
+            name="Sufficiency",
+            n_trials=1,  # Deterministic metric - so one trial enough
+            estimator_fn=faithfulness_sufficiency)
     ]
     results_by_estimator = {}
 
@@ -160,7 +147,7 @@ def calc_faithfulness(vit_model: model.VisionTransformer,
         estimator_results = {
             "n_trials": n_trials,
             "nr_runs": nr_runs,
-            "subset_size": subset_size
+            "subset_size": subset_size,
         }
 
         for trial in range(estimator_config.n_trials):
@@ -285,8 +272,8 @@ def evaluate_faithfulness_for_results(
                                              y_batch,
                                              a_batch,
                                              device,
-                                             n_trials=1,
-                                             nr_runs=10,
+                                             n_trials=3,
+                                             nr_runs=20,
                                              subset_size=224)
 
     return faithfulness_results, y_batch
@@ -393,10 +380,18 @@ def evaluate_and_report_faithfulness(
         config, vit_model, device, classification_results)
 
     # Initialize results structure
-    results = {'metrics': {}, 'class_labels': class_labels.tolist()}
+    results = {
+        'boosting_method': 'head_boosting',
+        'boost_factor_per_head': config.classify.adaptive_weighting_per_head,
+        'head_boost_factors':
+        config.classify.head_boost_factor_per_head_per_class,
+        'metrics': {},
+        'class_labels': class_labels.tolist()
+    }
 
     # Check if existing results file exists
-    results_path = config.file.output_dir / f"faithfulness_stats{config.file.output_suffix}.json"
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    results_path = config.file.output_dir / f"faithfulness_stats{config.file.output_suffix}_{timestamp}.json"
     if os.path.exists(results_path):
         try:
             with open(results_path, 'r') as f:

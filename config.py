@@ -88,8 +88,28 @@ class ClassificationConfig:
     num_classes: int = 3
 
     # Explanation parameters
-    pretransform: bool = False
     gini_params: Tuple[float, float, float] = (0.65, 8.0, 0.5)
+    adaptive_weighting: Tuple[float, float] = (1.2, 1.7)
+    adaptive_weighting_per_head: float = 2.5
+    # Dict for head-specific boosting per class per layer
+    # {class: {layer: head}}
+    head_boost_factor_per_head_per_class: Dict[int, Dict[int, int]] = field(
+        default_factory=lambda: {
+            0: {
+                9: 6,
+                10: 6,
+                11: 3,
+            },
+            1: {
+                9: 0,
+                11: 6,
+                8: 9
+            },
+            2: {
+                8: 9,
+                9: 2
+            }
+        })
     attribution_method: str = "transmm"
 
     analysis = False

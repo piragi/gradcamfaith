@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vit.model as model_handler
+from config import PipelineConfig
 from translrp.ViT_new import Block, VisionTransformer
 
 
@@ -71,23 +72,16 @@ def calculate_ffn_activity(ffn_input: torch.Tensor,
     return ffn_activity
 
 
-def adaptive_weighting_per_head(layer_idx: int, target_class: int, blk: Block,
-                                model_nn: VisionTransformer) -> torch.Tensor:
+def adaptive_weighting_per_head(layer_idx: int, target_class: int,
+                                config: PipelineConfig) -> torch.Tensor:
     cam_ones = torch.ones((1, 1, 12, 197, 197))
-    boost_factor = 2.5
-    head_id = None
-    head_boost_factor = {}
-    if target_class == 0:
-        head_boost_factor = {9: [6]}
-    if target_class == 1:
-        head_boost_factor = {9: [0], 11: [6], 8: [9]}
-    if target_class == 2:
-        head_boost_factor = {8: [9]}
-
+    head_boost_factor = config.classify.head_boost_factor_per_head_per_class[
+        target_class]
     head_id = head_boost_factor.get(layer_idx, None)
 
     if head_id:
-        cam_ones[:, :, head_id, :, :] *= boost_factor
+        cam_ones[:, :,
+                 head_id, :, :] *= config.classify.adaptive_weighting_per_head
 
     return cam_ones
 
@@ -291,12 +285,11 @@ def head_contribution_data_capture(blk: Block, i: int) -> Dict[str, Any]:
 def transmm(
     model_nn: VisionTransformer,
     input_tensor: torch.Tensor,
+    config: PipelineConfig,
     target_class: Optional[int] = None,
     gini_params: Optional[Tuple[float, float, float]] = None,
     device: Optional[torch.device] = None,
     img_size: int = 224,
-    weigh_by_class_embedding: bool = True,
-    data_collection: bool = False
 ) -> Tuple[Dict[str, Any], np.ndarray, Optional[np.ndarray], List[Dict[
         str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
@@ -342,11 +335,9 @@ def transmm(
         grad = blk.attn.get_attn_gradients().detach()
         cam = blk.attn.get_attention_map().detach().cpu()
 
-        if weigh_by_class_embedding:
+        if config.file.weighted:
             cam = cam * adaptive_weighting_per_head(i, effective_target_class,
-                                                    blk, model_nn)
-            random_noise = torch.rand_like(cam)
-            # cam += random_noise
+                                                    config)
 
         if gini_params:
             gini_threshold, steepness, max_power = gini_params
@@ -355,13 +346,13 @@ def transmm(
 
         cam_pos_avg = avg_heads(cam, grad)  # Returns CPU tensor
 
-        if weigh_by_class_embedding and False:
+        if config.file.weighted and False:
             cam_pos_avg = cam_pos_avg * adaptive_weighting(
                 i, effective_target_class, blk, model_nn)
 
         R_pos = R_pos + apply_self_attention_rules(R_pos, cam_pos_avg)
 
-        if data_collection:
+        if config.classify.data_collection:
             collected_ffn_activities.append(ffn_activities_data_capture(
                 blk, i))
             class_embedding_data_list.append(
@@ -406,21 +397,20 @@ def transmm(
         prediction_result_dict,  # Dict from model_handler.get_prediction
         attribution_pos_np,
         logits.cpu().detach().numpy()
-        if data_collection else None,  # Optional[np.ndarray]
+        if config.classify.data_collection else None,  # Optional[np.ndarray]
         collected_ffn_activities,  # List[Dict for FFNActivityItem]
         class_embedding_data_list,  # List[Dict for ClassEmbeddingRepresentationItem]
         head_contribution_list)
 
 
 def generate_attribution(
-    model: VisionTransformer,  # Type hint for clarity
-    input_tensor: torch.Tensor,
-    method: str = "transmm",  # Defaulting to transmm as it's the one detailed
-    target_class: Optional[int] = None,
-    device: Optional[torch.device] = None,
-    img_size: int = 224,
-    data_collection: bool = False,  # Pass this through
-    **kwargs: Any  # For other params like gini_params
+        model: VisionTransformer,  # Type hint for clarity
+        input_tensor: torch.Tensor,
+        config: PipelineConfig,
+        target_class: Optional[int] = None,
+        device: Optional[torch.device] = None,
+        img_size: int = 224,
+        **kwargs: Any  # For other params like gini_params
 ) -> Dict[str, Any]:
     """
     Unified interface for generating attribution maps.
@@ -432,7 +422,7 @@ def generate_attribution(
     # Ensure input_tensor is on the correct device
     input_tensor = input_tensor.to(device)
 
-    if method.lower() == "transmm":
+    if config.classify.attribution_method.lower() == "transmm":
         gini_params = kwargs.get('gini_params')
         weigh_by_class_embedding = kwargs.get('weigh_by_class_embedding',
                                               False)
@@ -441,13 +431,11 @@ def generate_attribution(
          head_contribution) = transmm(
              model_nn=model,  # Pass the VisionTransformer instance
              input_tensor=input_tensor,
+             config=config,
              target_class=target_class,
              gini_params=gini_params,
              device=device,
-             img_size=img_size,
-             weigh_by_class_embedding=weigh_by_class_embedding,
-             data_collection=data_collection  # Pass this flag
-         )
+             img_size=img_size)
 
         # Structure the output dictionary as expected by pipeline.py
         return {

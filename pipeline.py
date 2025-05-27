@@ -1,5 +1,6 @@
 # pipeline.py
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -11,6 +12,7 @@ from diffusers import StableDiffusionInpaintPipeline
 from PIL import Image
 from tqdm import tqdm
 
+import analysis
 import io_utils
 import perturbation
 import visualization
@@ -24,6 +26,8 @@ from data_types import (AttributionDataBundle, AttributionOutputPaths,
                         FFNActivityItem, HeadContributionItem,
                         PerturbationPatchInfo, PerturbedImageRecord)
 from faithfulness import evaluate_and_report_faithfulness
+from head_analysis import run_head_analysis
+from translrp.ViT_new import VisionTransformer
 
 
 def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
@@ -231,12 +235,10 @@ def classify_explain_single_image(
     raw_attribution_result_dict = attribution.generate_attribution(
         model=vit_model,
         input_tensor=input_tensor,
-        method=config.classify.attribution_method,
+        config=config,
         target_class=None,
         device=device,
-        img_size=config.classify.target_size[0],
-        weigh_by_class_embedding=config.file.weighted,
-        data_collection=config.classify.data_collection)
+        img_size=config.classify.target_size[0])
 
     # 3. Instantiate ClassificationPrediction from the "predictions" field
     prediction_data = raw_attribution_result_dict["predictions"]
@@ -591,12 +593,107 @@ def run_classification_standalone(
     return results
 
 
+def run_saco_from_pipeline_outputs(
+        config: PipelineConfig,
+        original_pipeline_results: List[ClassificationResult],
+        vit_model: VisionTransformer,
+        device: torch.device,
+        generate_visualizations: bool = False,
+        save_analysis_results: bool = True):
+    """
+    Run SaCo (Saliency Correlation) analysis using direct outputs from the pipeline.
+    
+    Args:
+        pipeline_config: The configuration used for the pipeline run (for paths, params).
+        original_pipeline_results: List of ClassificationResult for original images.
+        all_perturbed_image_records: List of PerturbedImageRecord for all generated perturbations.
+        perturbed_pipeline_results: List of ClassificationResult for perturbed images.
+        model_instance: The loaded VisionTransformer model, if needed for pattern analysis.
+        generate_visualizations: Whether to generate comparison visualizations.
+        save_analysis_results: Whether to save all generated analysis DataFrames.
+        
+    Returns:
+        Dictionary with analysis DataFrames.
+    """
+    print("Perturbations for SaCo")
+    paths_for_perturbation = [
+        res.image_path for res in original_pipeline_results
+    ]
+
+    perturbed_image_records: List[PerturbedImageRecord] = run_perturbation(
+        config, paths_for_perturbation)
+
+    perturbed_image_paths_to_classify = [
+        rec.perturbed_image_path for rec in perturbed_image_records
+        if rec.perturbed_image_path.exists()
+    ]
+    config.file.output_suffix = config.file.output_suffix + "_perturbed"
+
+    perturbed_csv_path = config.file.output_dir / f"classification_results_perturbed_classified_only{config.file.output_suffix}.csv"
+    print(
+        f"Running Classify ONLY for perturbed images (suffix: '{config.file.output_suffix}')"
+    )
+
+    perturbed_pipeline_results = classify_dataset_only(
+        config, vit_model, device, perturbed_image_paths_to_classify,
+        perturbed_csv_path)
+
+    saco_analysis_results: Dict[str, pd.DataFrame] = {}
+
+    print("Building analysis context...")
+    analysis_context = analysis.AnalysisContext.build(
+        config=config,
+        original_results=original_pipeline_results,
+        all_perturbed_records=perturbed_image_records,
+        perturbed_classification_results=perturbed_pipeline_results)
+
+    print("Generating perturbation comparison DataFrame for SaCo...")
+    perturbation_comparison_df = analysis.generate_perturbation_comparison_dataframe(
+        analysis_context, generate_visualizations=generate_visualizations)
+
+    print("Running core SaCo calculations...")
+    saco_scores_dict, _, _ = analysis.run_saco_analysis(
+        context=analysis_context,
+        perturbation_comparison_df=perturbation_comparison_df,
+        perturb_method_filter=config.perturb.method)
+
+    saco_df = pd.DataFrame({
+        'image_name': list(saco_scores_dict.keys()),
+        'saco_score': list(saco_scores_dict.values())
+    })
+    saco_analysis_results["saco_scores"] = saco_df
+
+    saco_scores_map_for_analysis: Dict[str, float] = pd.Series(
+        saco_analysis_results["saco_scores"].saco_score.values,
+        index=saco_analysis_results["saco_scores"].image_name).to_dict()
+
+    faithfulness_df = analysis.analyze_faithfulness_vs_correctness_from_objects(
+        saco_scores_map_for_analysis,  # Pass the dictionary: {str(image_path): score}
+        original_pipeline_results  # Pass the List[ClassificationResult]
+    )
+    saco_analysis_results["faithfulness_correctness"] = faithfulness_df
+
+    print("Analyzing key attribution patterns...")
+    vit_model = model.load_vit_model()
+    patterns_df = analysis.analyze_key_attribution_patterns(
+        saco_analysis_results["faithfulness_correctness"], vit_model, config)
+    saco_analysis_results["attribution_patterns"] = patterns_df
+
+    if save_analysis_results:
+        print("Saving analysis results...")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        for name, df_to_save in saco_analysis_results.items():
+            if isinstance(df_to_save, pd.DataFrame) and not df_to_save.empty:
+                # Use a consistent naming convention, incorporating the mode and output_file_tag
+                save_path = config.file.output_dir / f"analysis_{name}_{timestamp}.csv"
+                df_to_save.to_csv(save_path, index=False)
+                print(f"Saved {name} to {save_path}")
+
+
 def run_pipeline(
-    config: PipelineConfig,
-    source_dir_for_preprocessing: Path,
-    device: Optional[torch.device] = None
-) -> Tuple[List[ClassificationResult], Tuple[List[PerturbedImageRecord],
-                                             List[ClassificationResult]]]:
+        config: PipelineConfig,
+        source_dir_for_preprocessing: Path,
+        device: Optional[torch.device] = None) -> List[ClassificationResult]:
     """
     Streamlined full pipeline:
     1. (Optional) Preprocess dataset.
@@ -628,29 +725,12 @@ def run_pipeline(
         evaluate_and_report_faithfulness(config, vit_model, device,
                                          original_results_explained)
 
-    paths_for_perturbation = [
-        res.image_path for res in original_results_explained
-    ]
+    # print("Run Head Analysis")
+    # run_head_analysis(original_results_explained, vit_model, config)
 
-    perturbed_image_records: List[PerturbedImageRecord] = run_perturbation(
-        config, paths_for_perturbation)
-
-    perturbed_image_paths_to_classify = [
-        rec.perturbed_image_path for rec in perturbed_image_records
-        if rec.perturbed_image_path.exists()
-    ]
-
-    config.file.output_suffix = config.file.output_suffix + "_perturbed"
-
-    perturbed_csv_path = config.file.output_dir / f"classification_results_perturbed_classified_only{config.file.output_suffix}.csv"
-    print(
-        f"Running Classify ONLY for perturbed images (suffix: '{config.file.output_suffix}')"
-    )
-
-    perturbed_results_classified_only = classify_dataset_only(
-        config, vit_model, device, perturbed_image_paths_to_classify,
-        perturbed_csv_path)
+    print("Compare attributions")
+    run_saco_from_pipeline_outputs(config, original_results_explained,
+                                   vit_model, device)
 
     print("Full pipeline finished.")
-    return original_results_explained, (perturbed_image_records,
-                                        perturbed_results_classified_only)
+    return original_results_explained
