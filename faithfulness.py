@@ -37,19 +37,20 @@ def faithfulness_estimation(features):
         features_in_step=features,
         perturb_baseline="black",
         normalise=False,
-        display_progressbar=True)
+        display_progressbar=True
+    )
 
 
 def faithfulness_correlation(subset_size, nr_runs):
     return quantus.FaithfulnessCorrelation(
-        perturb_func=quantus.functions.perturb_func.
-        baseline_replacement_by_indices,
+        perturb_func=quantus.functions.perturb_func.baseline_replacement_by_indices,
         similarity_func=quantus.similarity_func.correlation_spearman,
         subset_size=subset_size,
         perturb_baseline="black",
         return_aggregate=False,
         normalise=False,
-        nr_runs=nr_runs)
+        nr_runs=nr_runs
+    )
 
 
 def faithfulness_monotonicity(features):
@@ -89,22 +90,26 @@ def faithfulness_road():
 
 
 def faithfulness_sufficiency():
-    return quantus.Sufficiency(threshold=0.5,
-                               return_aggregate=False,
-                               abs=False,
-                               normalise=False,
-                               distance_func=quantus.similarity_func.cosine,
-                               normalise_func=lambda x: x)
+    return quantus.Sufficiency(
+        threshold=0.5,
+        return_aggregate=False,
+        abs=False,
+        normalise=False,
+        distance_func=quantus.similarity_func.cosine,
+        normalise_func=lambda x: x
+    )
 
 
-def calc_faithfulness(vit_model: model.VisionTransformer,
-                      x_batch: np.ndarray,
-                      y_batch: np.ndarray,
-                      a_batch_expl: np.ndarray,
-                      device: torch.device,
-                      n_trials: int = 5,
-                      nr_runs: int = 200,
-                      subset_size: int = 98) -> Dict[str, Any]:
+def calc_faithfulness(
+    vit_model: model.VisionTransformer,
+    x_batch: np.ndarray,
+    y_batch: np.ndarray,
+    a_batch_expl: np.ndarray,
+    device: torch.device,
+    n_trials: int = 5,
+    nr_runs: int = 200,
+    subset_size: int = 98
+) -> Dict[str, Any]:
     """
     Calculate faithfulness scores with statistical robustness through multiple trials.
     
@@ -121,23 +126,24 @@ def calc_faithfulness(vit_model: model.VisionTransformer,
     Returns:
         Dictionary with faithfulness statistics for each estimator
     """
-    print(
-        f'Settings - n_trials: {n_trials}, nr_runs: {nr_runs}, subset_size: {subset_size}'
-    )
+    print(f'Settings - n_trials: {n_trials}, nr_runs: {nr_runs}, subset_size: {subset_size}')
 
     # Define all the estimators to use
     estimator_configs = [
-        FaithfulnessEstimatorConfig(name="FaithfulnessCorrelation",
-                                    n_trials=n_trials,
-                                    estimator_fn=faithfulness_correlation,
-                                    kwargs={
-                                        "subset_size": subset_size,
-                                        "nr_runs": nr_runs
-                                    }),
+        FaithfulnessEstimatorConfig(
+            name="FaithfulnessCorrelation",
+            n_trials=n_trials,
+            estimator_fn=faithfulness_correlation,
+            kwargs={
+                "subset_size": subset_size,
+                "nr_runs": nr_runs
+            }
+        ),
         FaithfulnessEstimatorConfig(
             name="Sufficiency",
             n_trials=1,  # Deterministic metric - so one trial enough
-            estimator_fn=faithfulness_sufficiency)
+            estimator_fn=faithfulness_sufficiency
+        )
     ]
     results_by_estimator = {}
 
@@ -177,22 +183,20 @@ def calc_faithfulness(vit_model: model.VisionTransformer,
                 # Process results - estimators can return different types of data
                 if isinstance(faithfulness_estimate, dict):
                     # For estimators that return dictionaries (like ROAD)
-                    faithfulness_score = np.array(
-                        faithfulness_estimate.get('auc', [0]))
+                    faithfulness_score = np.array(faithfulness_estimate.get('auc', [0]))
                 else:
                     faithfulness_score = np.array(faithfulness_estimate)
 
                 # Handle multi-dimensional results - some estimators return arrays per sample
                 # If results are multi-dimensional, compute mean across dimensions
-                if len(faithfulness_score.shape
-                       ) > 1 and faithfulness_score.shape[0] == len(y_batch):
+                if len(faithfulness_score.shape) > 1 and faithfulness_score.shape[0] == len(y_batch):
                     # For 2D arrays where rows are samples, keep as is
                     pass
                 elif len(faithfulness_score.shape) > 1:
                     # For arrays with multiple values per sample, take mean
                     faithfulness_score = np.mean(
-                        faithfulness_score,
-                        axis=tuple(range(1, len(faithfulness_score.shape))))
+                        faithfulness_score, axis=tuple(range(1, len(faithfulness_score.shape)))
+                    )
 
                 all_results.append(faithfulness_score)
             except Exception as e:
@@ -213,11 +217,7 @@ def calc_faithfulness(vit_model: model.VisionTransformer,
             std_scores = np.nanstd(all_results, axis=0)
 
             # Add the evaluation metrics to the results
-            estimator_results.update({
-                "mean_scores": mean_scores,
-                "std_scores": std_scores,
-                "all_trials": all_results
-            })
+            estimator_results.update({"mean_scores": mean_scores, "std_scores": std_scores, "all_trials": all_results})
 
             results_by_estimator[estimator_config.name] = estimator_results
 
@@ -225,8 +225,8 @@ def calc_faithfulness(vit_model: model.VisionTransformer,
 
 
 def evaluate_faithfulness_for_results(
-    config: PipelineConfig, vit_model: model.VisionTransformer,
-    device: torch.device, classification_results: List[ClassificationResult]
+    config: PipelineConfig, vit_model: model.VisionTransformer, device: torch.device,
+    classification_results: List[ClassificationResult]
 ) -> Tuple[Dict[str, Any], np.ndarray]:
     """
     Evaluate faithfulness scores for classification results with attributions.
@@ -247,8 +247,7 @@ def evaluate_faithfulness_for_results(
     for result in classification_results:
         # Load the image and preprocess
         img_path = result.image_path
-        _, input_tensor = preprocessing.preprocess_image(
-            str(img_path), img_size=config.classify.target_size[0])
+        _, input_tensor = preprocessing.preprocess_image(str(img_path), img_size=config.classify.target_size[0])
         x_batch_list.append(input_tensor.cpu().numpy())
 
         # Get the class prediction
@@ -267,21 +266,15 @@ def evaluate_faithfulness_for_results(
 
     # Calculate faithfulness with the robust method
     # Use a reasonable subset size for ViT (half of the 196 patches)
-    faithfulness_results = calc_faithfulness(vit_model,
-                                             x_batch,
-                                             y_batch,
-                                             a_batch,
-                                             device,
-                                             n_trials=3,
-                                             nr_runs=20,
-                                             subset_size=224)
+    faithfulness_results = calc_faithfulness(
+        vit_model, x_batch, y_batch, a_batch, device, n_trials=3, nr_runs=20, subset_size=224
+    )
 
     return faithfulness_results, y_batch
 
 
-def calculate_faithfulness_stats_by_class(
-        faithfulness_results: Dict[str, Dict[str, Any]],
-        class_labels: np.ndarray) -> Dict[str, Dict[int, Dict[str, float]]]:
+def calculate_faithfulness_stats_by_class(faithfulness_results: Dict[str, Dict[str, Any]],
+                                          class_labels: np.ndarray) -> Dict[str, Dict[int, Dict[str, float]]]:
     """
     Calculate statistics for faithfulness scores grouped by class for each estimator.
     
@@ -303,8 +296,7 @@ def calculate_faithfulness_stats_by_class(
         scores_by_class = defaultdict(list)
         stds_by_class = defaultdict(list)
 
-        for score, std, label in zip(faithfulness_scores, faithfulness_stds,
-                                     class_labels):
+        for score, std, label in zip(faithfulness_scores, faithfulness_stds, class_labels):
             # Handle multi-dimensional scores - some estimators return arrays per sample
             if hasattr(score, 'shape') and len(score.shape) > 0:
                 # For array scores, use mean as the representative value
@@ -333,8 +325,7 @@ def calculate_faithfulness_stats_by_class(
                 'min': float(np.min(scores_array)),
                 'max': float(np.max(scores_array)),
                 'std': float(np.std(scores_array)),
-                'avg_trial_std':
-                float(np.mean(stds_array)),  # Average std across trials
+                'avg_trial_std': float(np.mean(stds_array)),  # Average std across trials
             }
 
         stats_by_estimator_and_class[estimator_name] = stats_by_class
@@ -350,9 +341,7 @@ def handle_array_values(arr):
     if isinstance(arr, list):
         # If the array has nested arrays, convert them too
         return [
-            handle_array_values(item)
-            if hasattr(item, 'tolist') or isinstance(item, list) else item
-            for item in arr
+            handle_array_values(item) if hasattr(item, 'tolist') or isinstance(item, list) else item for item in arr
         ]
 
     return arr
@@ -377,14 +366,14 @@ def evaluate_and_report_faithfulness(
         Dictionary with overall and per-class statistics for each estimator
     """
     faithfulness_results, class_labels = evaluate_faithfulness_for_results(
-        config, vit_model, device, classification_results)
+        config, vit_model, device, classification_results
+    )
 
     # Initialize results structure
     results = {
         'boosting_method': 'head_boosting',
-        'boost_factor_per_head': config.classify.adaptive_weighting_per_head,
-        'head_boost_factors':
-        config.classify.head_boost_factor_per_head_per_class,
+        'boost_factor_per_head': config.classify.head_boost_value,
+        'head_boost_factors': config.classify.head_boost_factor_per_head_per_class,
         'metrics': {},
         'class_labels': class_labels.tolist()
     }
@@ -417,50 +406,48 @@ def evaluate_and_report_faithfulness(
             float(
                 np.nanmean(
                     np.array([
-                        np.mean(s)
-                        if hasattr(s, 'shape') and len(s.shape) > 0 else s
-                        for s in faithfulness_scores
-                    ]))),
+                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
+                    ])
+                )
+            ),
             'median':
             float(
                 np.nanmedian(
                     np.array([
-                        np.mean(s)
-                        if hasattr(s, 'shape') and len(s.shape) > 0 else s
-                        for s in faithfulness_scores
-                    ]))),
+                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
+                    ])
+                )
+            ),
             'min':
             float(
                 np.nanmin(
                     np.array([
-                        np.mean(s)
-                        if hasattr(s, 'shape') and len(s.shape) > 0 else s
-                        for s in faithfulness_scores
-                    ]))),
+                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
+                    ])
+                )
+            ),
             'max':
             float(
                 np.nanmax(
                     np.array([
-                        np.mean(s)
-                        if hasattr(s, 'shape') and len(s.shape) > 0 else s
-                        for s in faithfulness_scores
-                    ]))),
+                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
+                    ])
+                )
+            ),
             'std':
             float(
                 np.nanstd(
                     np.array([
-                        np.mean(s)
-                        if hasattr(s, 'shape') and len(s.shape) > 0 else s
-                        for s in faithfulness_scores
-                    ]))),
+                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
+                    ])
+                )
+            ),
             'avg_trial_std':
             float(
                 np.nanmean(
-                    np.array([
-                        np.mean(s)
-                        if hasattr(s, 'shape') and len(s.shape) > 0 else s
-                        for s in faithfulness_stds
-                    ]))),  # Average std across trials
+                    np.array([np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_stds])
+                )
+            ),  # Average std across trials
             'method_params': {
                 'n_trials': estimator_results["n_trials"],
                 'nr_runs': estimator_results["nr_runs"],
@@ -469,8 +456,8 @@ def evaluate_and_report_faithfulness(
         }
 
         # Calculate per-class statistics for this estimator
-        class_stats = calculate_faithfulness_stats_by_class(
-            {estimator_name: estimator_results}, class_labels)[estimator_name]
+        class_stats = calculate_faithfulness_stats_by_class({estimator_name: estimator_results},
+                                                            class_labels)[estimator_name]
 
         # Store results for this estimator
         results['metrics'][estimator_name] = {
@@ -481,15 +468,11 @@ def evaluate_and_report_faithfulness(
         }
 
         # Print summary with added stability information
-        print(
-            f"\n{estimator_name} faithfulness statistics (across {estimator_results['n_trials']} trials):"
-        )
+        print(f"\n{estimator_name} faithfulness statistics (across {estimator_results['n_trials']} trials):")
         print(f"  Mean: {overall_stats['mean']:.4f}")
         print(f"  Median: {overall_stats['median']:.4f}")
         print(f"  Count: {overall_stats['count']}")
-        print(
-            f"  Avg trial std: {overall_stats['avg_trial_std']:.4f} (lower is more stable)"
-        )
+        print(f"  Avg trial std: {overall_stats['avg_trial_std']:.4f} (lower is more stable)")
 
         print(f"\n{estimator_name} per-class faithfulness statistics:")
         for class_idx, stats in class_stats.items():

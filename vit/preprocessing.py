@@ -24,9 +24,9 @@ def get_default_processor(
         Composed transform pipeline
     """
     if mean is None:
-        mean = [0.56, 0.56, 0.56]
+        mean=[0.485, 0.456, 0.406]
     if std is None:
-        std = [0.21, 0.21, 0.21]
+        std = [0.229, 0.224, 0.225]
 
     pil_transform = transforms.Compose([
         transforms.Resize(256),  # Resize to img_size * 8/7
@@ -38,6 +38,21 @@ def get_default_processor(
         [transforms.ToTensor(), normalize])
 
     return transforms.Compose([pil_transform, preprocess_transform])
+
+def get_processor_for_precached_224_images(
+        mean: Optional[List[float]] = None,
+        std: Optional[List[float]] = None) -> transforms.Compose:
+    """
+    Processor for images that are ALREADY 224x224 (due to prior Resize(256) + CenterCrop(224)).
+    Only applies ToTensor and Normalize.
+    """
+    if mean is None:
+        mean=[0.485, 0.456, 0.406] # ImageNet Mean
+    if std is None:
+        std = [0.229, 0.224, 0.225] # ImageNet Std
+
+    normalize = transforms.Normalize(mean=mean, std=std)
+    return transforms.Compose([transforms.ToTensor(), normalize])
 
 
 def load_image(image_path: str, convert_to_rgb: bool = True) -> Image.Image:

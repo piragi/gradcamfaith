@@ -57,9 +57,8 @@ class FileConfig:
     def directories(self) -> List[Path]:
         """Return a list of all directories used by the pipeline."""
         return [
-            self.output_dir, self.data_dir, self.cache_dir,
-            self.attribution_dir, self.vit_inputs_dir, self.perturbed_dir,
-            self.mask_dir, self.mode_dir
+            self.output_dir, self.data_dir, self.cache_dir, self.attribution_dir, self.vit_inputs_dir,
+            self.perturbed_dir, self.mask_dir, self.mode_dir
         ]
 
     @property
@@ -90,28 +89,50 @@ class ClassificationConfig:
     # Explanation parameters
     gini_params: Tuple[float, float, float] = (0.65, 8.0, 0.5)
     adaptive_weighting: Tuple[float, float] = (1.2, 1.7)
-    adaptive_weighting_per_head: float = 2.5
+    head_boost_value: float = 200.0
     # Dict for head-specific boosting per class per layer
     # {class: {layer: head}}
-    head_boost_factor_per_head_per_class: Dict[int, Dict[int, int]] = field(
+    head_boost_factor_per_head_per_class: Dict[int, Dict[int, List[int]]] = field(
         default_factory=lambda: {
             0: {
-                9: 6,
-                10: 6,
-                11: 3,
+                8: [1],
             },
-            1: {
-                9: 0,
-                11: 6,
-                8: 9
+            2: {},
+            3: {},
+            4: {},
+            5: {},
+        }
+    )
+    token_boost_value: float = 100.0
+    token_boost_factors: Dict[int, Dict[int, Dict[int, List[int]]]] = field(
+        default_factory=lambda: {
+            0: {
+                8: {
+                    1: [8, 64, 7, 99]
+                }
             },
             2: {
-                8: 9,
-                9: 2
+                8: {
+                    5: [26, 41, 24, 11, 25]
+                }
+            },
+            3: {},
+            4: {},
+            5: {
+                10: {
+                    1: [14, 1, 0, 70, 71]
+                }
             }
-        })
+        }
+    )
+    class_boost_multipliers = {
+        0: 0.6,  # Moderate (high correlation but still distinct)
+        2: 1.0,  # Keep working approach  
+        # 3: 0.4,  # Low (conflicting strategies)
+        # 4: 0.0,  # Moderate
+        5: 1.2  # High (false multi-strategy, actually coherent)
+    }
     attribution_method: str = "transmm"
-
     analysis = False
     data_collection = False
 
@@ -143,8 +164,7 @@ class PipelineConfig:
     """Master configuration for the medical image analysis pipeline."""
     # Component configurations
     file: FileConfig = field(default_factory=FileConfig)
-    classify: ClassificationConfig = field(
-        default_factory=ClassificationConfig)
+    classify: ClassificationConfig = field(default_factory=ClassificationConfig)
     perturb: PerturbationConfig = field(default_factory=PerturbationConfig)
 
     @property

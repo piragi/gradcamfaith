@@ -6,8 +6,7 @@ import numpy as np
 from scipy import stats
 
 
-def compare_faithfulness_metrics(weighted_results_path: str,
-                                 unweighted_results_path: str,
+def compare_faithfulness_metrics(weighted_results_path: str, unweighted_results_path: str,
                                  output_path: str) -> Dict[str, Any]:
     """
     Compare faithfulness metrics between weighted and unweighted schemes.
@@ -32,20 +31,13 @@ def compare_faithfulness_metrics(weighted_results_path: str,
     unweighted_metrics = unweighted_results.get('metrics', {})
 
     # Find common estimators
-    common_estimators = set(weighted_metrics.keys()).intersection(
-        set(unweighted_metrics.keys()))
+    common_estimators = set(weighted_metrics.keys()).intersection(set(unweighted_metrics.keys()))
 
     if not common_estimators:
-        raise ValueError(
-            "No common estimators found between weighted and unweighted results"
-        )
+        raise ValueError("No common estimators found between weighted and unweighted results")
 
     # Prepare comparison results
-    comparison_results = {
-        "overall_comparison": {},
-        "per_estimator_comparison": {},
-        "statistical_tests": {}
-    }
+    comparison_results = {"overall_comparison": {}, "per_estimator_comparison": {}, "statistical_tests": {}}
 
     # Perform comparison for each estimator
     for estimator_name in common_estimators:
@@ -56,31 +48,30 @@ def compare_faithfulness_metrics(weighted_results_path: str,
 
         # Compare overall metrics
         overall_comparison = compare_metric_sections(
-            weighted_estimator.get('overall', {}),
-            unweighted_estimator.get('overall', {}),
-            section_name='overall')
+            weighted_estimator.get('overall', {}), unweighted_estimator.get('overall', {}), section_name='overall'
+        )
 
         # Compare per-class metrics
         weighted_by_class = weighted_estimator.get('by_class', {})
         unweighted_by_class = unweighted_estimator.get('by_class', {})
 
         # Find common classes
-        common_classes = set(weighted_by_class.keys()).intersection(
-            set(unweighted_by_class.keys()))
+        common_classes = set(weighted_by_class.keys()).intersection(set(unweighted_by_class.keys()))
 
         class_comparisons = {}
         for class_id in common_classes:
             class_comparison = compare_metric_sections(
                 weighted_by_class.get(class_id, {}),
                 unweighted_by_class.get(class_id, {}),
-                section_name=f'class_{class_id}')
+                section_name=f'class_{class_id}'
+            )
             class_comparisons[class_id] = class_comparison
 
         # Compare per-sample scores (for statistical significance)
         statistical_test = compare_sample_scores_by_class(
-            weighted_estimator.get('mean_scores', []),
-            unweighted_estimator.get('mean_scores', []),
-            weighted_results.get('class_labels', None))
+            weighted_estimator.get('mean_scores', []), unweighted_estimator.get('mean_scores', []),
+            weighted_results.get('class_labels', None)
+        )
 
         # Store results for this estimator
         comparison_results["per_estimator_comparison"][estimator_name] = {
@@ -88,21 +79,19 @@ def compare_faithfulness_metrics(weighted_results_path: str,
             "by_class": class_comparisons
         }
 
-        comparison_results["statistical_tests"][
-            estimator_name] = statistical_test
+        comparison_results["statistical_tests"][estimator_name] = statistical_test
 
     # Create overall summary
     comparison_results["overall_comparison"] = {
         estimator_name: {
             "improvement_mean":
-            comparison_results["per_estimator_comparison"][estimator_name]
-            ["overall"].get("mean", {}).get("improvement_percent"),
+            comparison_results["per_estimator_comparison"][estimator_name]["overall"].get("mean", {}
+                                                                                          ).get("improvement_percent"),
             "improvement_median":
-            comparison_results["per_estimator_comparison"][estimator_name]
-            ["overall"].get("median", {}).get("improvement_percent"),
+            comparison_results["per_estimator_comparison"][estimator_name]["overall"].get("median", {}
+                                                                                          ).get("improvement_percent"),
             "p_value":
-            comparison_results["statistical_tests"][estimator_name].get(
-                "p_value")
+            comparison_results["statistical_tests"][estimator_name].get("p_value")
         }
         for estimator_name in common_estimators
     }
@@ -116,8 +105,7 @@ def compare_faithfulness_metrics(weighted_results_path: str,
     return comparison_results
 
 
-def compare_metric_sections(weighted_section: Dict[str, Any],
-                            unweighted_section: Dict[str, Any],
+def compare_metric_sections(weighted_section: Dict[str, Any], unweighted_section: Dict[str, Any],
                             section_name: str) -> Dict[str, Any]:
     """
     Compare two metric sections (overall or by-class).
@@ -165,9 +153,10 @@ def compare_metric_sections(weighted_section: Dict[str, Any],
 
 
 def compare_sample_scores(
-        weighted_scores: List[float],
-        unweighted_scores: List[float],
-        class_labels: Optional[List[int]] = None) -> Dict[str, Any]:
+    weighted_scores: List[float],
+    unweighted_scores: List[float],
+    class_labels: Optional[List[int]] = None
+) -> Dict[str, Any]:
     """
     Perform statistical tests on sample scores.
     
@@ -228,13 +217,11 @@ def compare_sample_scores(
         "is_significant": float(p_value) < 0.05,
         "t_statistic": float(t_stat),
         "improved_samples_count": int(improved_samples),
-        "improved_samples_percent":
-        float(improved_samples / len(w_scores) * 100)
+        "improved_samples_percent": float(improved_samples / len(w_scores) * 100)
     }
 
 
-def compare_sample_scores_by_class(weighted_scores, unweighted_scores,
-                                   class_labels):
+def compare_sample_scores_by_class(weighted_scores, unweighted_scores, class_labels):
     """Run separate statistical tests for each class."""
     # Make sure everything is a numpy array
     weighted_scores = np.array(weighted_scores)
@@ -242,9 +229,7 @@ def compare_sample_scores_by_class(weighted_scores, unweighted_scores,
     class_labels = np.array(class_labels)
 
     # Run overall test first
-    results = {
-        "overall": compare_sample_scores(weighted_scores, unweighted_scores)
-    }
+    results = {"overall": compare_sample_scores(weighted_scores, unweighted_scores)}
 
     # Get unique classes
     unique_classes = np.unique(class_labels)
@@ -266,8 +251,7 @@ def compare_sample_scores_by_class(weighted_scores, unweighted_scores,
             cls_weighted = [weighted_scores[i] for i in indices]
             cls_unweighted = [unweighted_scores[i] for i in indices]
 
-            results[f"class_{cls}"] = compare_sample_scores(
-                cls_weighted, cls_unweighted)
+            results[f"class_{cls}"] = compare_sample_scores(cls_weighted, cls_unweighted)
 
     return results
 
@@ -281,8 +265,7 @@ def print_comparison_summary(comparison_results: Dict[str, Any]):
     """
     print("\n=== Faithfulness Metrics Comparison Summary ===\n")
 
-    for estimator_name, tests in comparison_results["statistical_tests"].items(
-    ):
+    for estimator_name, tests in comparison_results["statistical_tests"].items():
         print(f"Estimator: {estimator_name}")
 
         # Print overall results
@@ -290,68 +273,48 @@ def print_comparison_summary(comparison_results: Dict[str, Any]):
         print(
             f"  Samples: {overall_stats.get('valid_sample_count', 0)} (out of {overall_stats.get('sample_count', 0)})"
         )
-        print(
-            f"  Mean difference: {overall_stats.get('mean_difference', 0):.4f}"
-        )
+        print(f"  Mean difference: {overall_stats.get('mean_difference', 0):.4f}")
         print(
             f"  Improved samples: {overall_stats.get('improved_samples_count', 0)} ({overall_stats.get('improved_samples_percent', 0):.1f}%)"
         )
 
         if overall_stats.get('is_significant', False):
-            print(
-                f"  Significant improvement (p={overall_stats.get('p_value', 1):.6f})"
-            )
+            print(f"  Significant improvement (p={overall_stats.get('p_value', 1):.6f})")
         else:
-            print(
-                f"  No significant difference (p={overall_stats.get('p_value', 1):.6f})"
-            )
+            print(f"  No significant difference (p={overall_stats.get('p_value', 1):.6f})")
 
         # Get overall metrics
-        overall = comparison_results["per_estimator_comparison"][
-            estimator_name]["overall"]
+        overall = comparison_results["per_estimator_comparison"][estimator_name]["overall"]
         if "mean" in overall:
             w_mean = overall["mean"]["weighted"]
             uw_mean = overall["mean"]["unweighted"]
             diff_percent = overall["mean"]["improvement_percent"]
-            print(
-                f"  Mean: {w_mean:.4f} vs {uw_mean:.4f} ({diff_percent:+.1f}%)"
-            )
+            print(f"  Mean: {w_mean:.4f} vs {uw_mean:.4f} ({diff_percent:+.1f}%)")
 
         if "median" in overall:
             w_median = overall["median"]["weighted"]
             uw_median = overall["median"]["unweighted"]
             diff_percent = overall["median"]["improvement_percent"]
-            print(
-                f"  Median: {w_median:.4f} vs {uw_median:.4f} ({diff_percent:+.1f}%)"
-            )
+            print(f"  Median: {w_median:.4f} vs {uw_median:.4f} ({diff_percent:+.1f}%)")
 
         # Print class-specific statistical results
         for key, stats in tests.items():
             if key != "overall" and key.startswith("class_"):
                 class_id = key.replace("class_", "")
                 print(f"\n  Class {class_id} Statistical Test:")
-                print(
-                    f"    Samples: {stats.get('valid_sample_count', 0)} (out of {stats.get('sample_count', 0)})"
-                )
-                print(
-                    f"    Mean difference: {stats.get('mean_difference', 0):.4f}"
-                )
+                print(f"    Samples: {stats.get('valid_sample_count', 0)} (out of {stats.get('sample_count', 0)})")
+                print(f"    Mean difference: {stats.get('mean_difference', 0):.4f}")
 
                 if stats.get('is_significant', False):
-                    print(
-                        f"    Significant improvement (p={stats.get('p_value', 1):.6f})"
-                    )
+                    print(f"    Significant improvement (p={stats.get('p_value', 1):.6f})")
                 else:
-                    print(
-                        f"    No significant difference (p={stats.get('p_value', 1):.6f})"
-                    )
+                    print(f"    No significant difference (p={stats.get('p_value', 1):.6f})")
 
         print("")
 
     print("=== Per-Class Comparison Summary ===\n")
 
-    for estimator_name, estimator_data in comparison_results[
-            "per_estimator_comparison"].items():
+    for estimator_name, estimator_data in comparison_results["per_estimator_comparison"].items():
         if "by_class" in estimator_data:
             print(f"Estimator: {estimator_name}")
 
@@ -362,23 +325,19 @@ def print_comparison_summary(comparison_results: Dict[str, Any]):
                     w_mean = class_data["mean"]["weighted"]
                     uw_mean = class_data["mean"]["unweighted"]
                     diff_percent = class_data["mean"]["improvement_percent"]
-                    print(
-                        f"    Mean: {w_mean:.4f} vs {uw_mean:.4f} ({diff_percent:+.1f}%)"
-                    )
+                    print(f"    Mean: {w_mean:.4f} vs {uw_mean:.4f} ({diff_percent:+.1f}%)")
 
                 if "median" in class_data:
                     w_median = class_data["median"]["weighted"]
                     uw_median = class_data["median"]["unweighted"]
                     diff_percent = class_data["median"]["improvement_percent"]
-                    print(
-                        f"    Median: {w_median:.4f} vs {uw_median:.4f} ({diff_percent:+.1f}%)"
-                    )
+                    print(f"    Median: {w_median:.4f} vs {uw_median:.4f} ({diff_percent:+.1f}%)")
 
             print("")
 
 
 comparison = compare_faithfulness_metrics(
-    "./results/test_weighted/faithfulness_stats_2025-05-27_16-15.json",
-    "./results/test/faithfulness_stats_2025-05-27_14-37.json",
-    "results/train_weighted/faithfulness_comparison.json")
+    "./results/val_weighted/faithfulness_stats_2025-06-08_20-09.json",
+    "./results/val/faithfulness_stats_2025-06-05_15-59.json", "results/val_weighted/faithfulness_comparison.json"
+)
 print_comparison_summary(comparison)

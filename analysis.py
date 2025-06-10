@@ -10,14 +10,13 @@ from scipy.ndimage import gaussian_filter
 from sklearn.metrics import mutual_info_score
 from tqdm import tqdm
 
-from data_types import (AnalysisContext, ClassificationResult,
-                        PerturbationPatchInfo)
-from vit.model import VisionTransformer
+from data_types import (AnalysisContext, ClassificationResult, PerturbationPatchInfo)
+from vit.model import CLASSES, CLS2IDX, IDX2CLS, VisionTransformer
 
 
 def generate_perturbation_comparison_dataframe(
-        context: AnalysisContext,
-        generate_visualizations: bool = True) -> pd.DataFrame:
+    context: AnalysisContext, generate_visualizations: bool = True
+) -> pd.DataFrame:
     """
     Generates the comparison DataFrame needed for SaCo scores, 
     mimicking the initial part of the old `compare_attributions`.
@@ -37,8 +36,7 @@ def generate_perturbation_comparison_dataframe(
     }
 
     print("Generating perturbation comparison data for SaCo...")
-    for p_record in tqdm(context.all_perturbed_records,
-                         desc="Processing Perturbations"):
+    for p_record in tqdm(context.all_perturbed_records, desc="Processing Perturbations"):
         original_image_path = p_record.original_image_path
         perturbed_image_path = p_record.perturbed_image_path
 
@@ -49,22 +47,17 @@ def generate_perturbation_comparison_dataframe(
             continue
 
         original_class_res = original_results_map[original_image_path]
-        perturbed_class_res = context.perturbed_classification_results_map.get(
-            perturbed_image_path)
+        perturbed_class_res = context.perturbed_classification_results_map.get(perturbed_image_path)
 
         if perturbed_class_res is None:
             continue
 
         original_attr_np = None
-        if original_class_res.attribution_paths and original_class_res.attribution_paths.attribution_path.exists(
-        ):
+        if original_class_res.attribution_paths and original_class_res.attribution_paths.attribution_path.exists():
             try:
-                original_attr_np = np.load(
-                    original_class_res.attribution_paths.attribution_path)
+                original_attr_np = np.load(original_class_res.attribution_paths.attribution_path)
             except Exception as e:
-                print(
-                    f"Error loading original attribution for {original_class_res.image_path.name}: {e}"
-                )
+                print(f"Error loading original attribution for {original_class_res.image_path.name}: {e}")
                 continue  # Skip if essential data is missing
         else:
             continue
@@ -75,8 +68,7 @@ def generate_perturbation_comparison_dataframe(
             if perturbed_class_res.attribution_paths and perturbed_class_res.attribution_paths.attribution_path.exists(
             ):
                 try:
-                    perturbed_attr_np = np.load(
-                        perturbed_class_res.attribution_paths.attribution_path)
+                    perturbed_attr_np = np.load(perturbed_class_res.attribution_paths.attribution_path)
                 except Exception as e:
                     print(
                         f"Error loading perturbed positive attribution for {perturbed_class_res.image_path.name}: {e}"
@@ -90,10 +82,8 @@ def generate_perturbation_comparison_dataframe(
 
         # Calculate mean attribution in the patch on the original image
         mean_original_patch_attr = calculate_patch_mean_attribution(
-            original_attr_np,
-            x_coord,
-            y_coord,
-            patch_size=context.config.perturb.patch_size)
+            original_attr_np, x_coord, y_coord, patch_size=context.config.perturb.patch_size
+        )
 
         row_data = {
             "original_image":
@@ -109,27 +99,21 @@ def generate_perturbation_comparison_dataframe(
             "original_patch_mean_attribution":
             mean_original_patch_attr,  # Critical for SaCo - old: "mean_attribution"
             "original_predicted_class":
-            original_class_res.prediction.
-            predicted_class_label,  # Old: "original_class"
+            original_class_res.prediction.predicted_class_label,  # Old: "original_class"
             "original_predicted_idx":
             original_class_res.prediction.predicted_class_idx,
             "original_confidence":
-            original_class_res.prediction.
-            confidence,  # Old: "original_confidence"
+            original_class_res.prediction.confidence,  # Old: "original_confidence"
             "perturbed_predicted_class":
-            perturbed_class_res.prediction.
-            predicted_class_label,  # Old: "perturbed_class"
+            perturbed_class_res.prediction.predicted_class_label,  # Old: "perturbed_class"
             "perturbed_predicted_idx":
             perturbed_class_res.prediction.predicted_class_idx,
             "perturbed_confidence":
-            perturbed_class_res.prediction.
-            confidence,  # Old: "perturbed_confidence"
+            perturbed_class_res.prediction.confidence,  # Old: "perturbed_confidence"
             "class_changed":
-            original_class_res.prediction.predicted_class_idx
-            != perturbed_class_res.prediction.predicted_class_idx,
+            original_class_res.prediction.predicted_class_idx != perturbed_class_res.prediction.predicted_class_idx,
             "confidence_delta":
-            perturbed_class_res.prediction.confidence -
-            original_class_res.prediction.confidence,
+            perturbed_class_res.prediction.confidence - original_class_res.prediction.confidence,
             "confidence_delta_abs":
             abs(perturbed_class_res.prediction.confidence -
                 original_class_res.prediction.confidence),  # Critical for SaCo
@@ -150,8 +134,7 @@ def generate_perturbation_comparison_dataframe(
     comparison_df = pd.DataFrame(comparison_data_list)
 
     if 'original_patch_mean_attribution' in comparison_df.columns:
-        comparison_df = comparison_df.rename(
-            columns={'original_patch_mean_attribution': 'mean_attribution'})
+        comparison_df = comparison_df.rename(columns={'original_patch_mean_attribution': 'mean_attribution'})
 
     # Save this intermediate DataFrame
     output_csv_path = analysis_results_dir / f"perturbation_comparison_for_saco{context.config.file.output_suffix}.csv"
@@ -175,14 +158,11 @@ def run_saco_analysis(
 
     saco_scores, pair_data = calculate_saco_with_details_from_df(
         perturbation_comparison_df,  # Pass the DataFrame directly
-        method_filter_str=
-        perturb_method_filter  # For any internal filtering if still needed
+        method_filter_str=perturb_method_filter  # For any internal filtering if still needed
     )
 
     avg_saco = np.mean(list(saco_scores.values())) if saco_scores else 0
-    print(
-        f"Average SaCo score for method '{perturb_method_filter}': {avg_saco:.4f} (over {len(saco_scores)} images)"
-    )
+    print(f"Average SaCo score for method '{perturb_method_filter}': {avg_saco:.4f} (over {len(saco_scores)} images)")
 
     patch_analysis_df = analyze_patch_metrics(pair_data)  # This should be fine
 
@@ -217,16 +197,15 @@ def calculate_saco_with_details_from_df(  # NEW: Takes DF instead of CSV path
 
     for image_name, image_data_group in data_df.groupby('original_image'):
         # Original code sorts by 'mean_attribution'
-        image_data_sorted = image_data_group.sort_values(
-            'mean_attribution', ascending=False).reset_index(drop=True)
+        image_data_sorted = image_data_group.sort_values('mean_attribution', ascending=False).reset_index(drop=True)
 
         attributions_np = image_data_sorted['mean_attribution'].values
-        confidence_impacts_np = image_data_sorted[
-            'confidence_delta_abs'].values
+        confidence_impacts_np = image_data_sorted['confidence_delta_abs'].values
         patch_ids_np = image_data_sorted['patch_id'].values
 
         saco_score, image_pair_df = calculate_image_saco_with_details(
-            attributions_np, confidence_impacts_np, patch_ids_np)
+            attributions_np, confidence_impacts_np, patch_ids_np
+        )
 
         results[image_name] = saco_score
         pair_data_map[image_name] = image_pair_df
@@ -268,10 +247,7 @@ def extract_patch_info_from_filename(filename: str) -> Dict[str, int]:
     return {"patch_id": patch_id, "x": x, "y": y}
 
 
-def calculate_patch_mean_attribution(attribution: np.ndarray,
-                                     x: int,
-                                     y: int,
-                                     patch_size: int = 16) -> Optional[float]:
+def calculate_patch_mean_attribution(attribution: np.ndarray, x: int, y: int, patch_size: int = 16) -> Optional[float]:
     """
     Calculate the mean attribution value within a patch.
     
@@ -298,10 +274,8 @@ def calculate_patch_mean_attribution(attribution: np.ndarray,
 
 
 # SaCo Calculation Functions
-def calculate_saco_with_details(
-        data_path: Path,
-        method: str = "mean"
-) -> Tuple[Dict[str, float], Dict[str, pd.DataFrame]]:
+def calculate_saco_with_details(data_path: Path,
+                                method: str = "mean") -> Tuple[Dict[str, float], Dict[str, pd.DataFrame]]:
     """
     Calculate SaCo (Saliency Correlation) scores from comparison data.
     
@@ -317,21 +291,18 @@ def calculate_saco_with_details(
     data_df = pd.read_csv(data_path)
 
     if method:
-        data_df = data_df[data_df['perturbed_image'].str.contains(
-            f"_{method}.png")]
+        data_df = data_df[data_df['perturbed_image'].str.contains(f"_{method}.png")]
 
     results = {}
     pair_data = {}
 
     for image_name, image_data in data_df.groupby('original_image'):
-        image_data = image_data.sort_values(
-            'mean_attribution', ascending=False).reset_index(drop=True)
+        image_data = image_data.sort_values('mean_attribution', ascending=False).reset_index(drop=True)
         attributions = image_data['mean_attribution'].values
         confidence_impacts = image_data['confidence_delta_abs'].values
         patch_ids = image_data['patch_id'].values
 
-        saco_score, image_pair_data = calculate_image_saco_with_details(
-            attributions, confidence_impacts, patch_ids)
+        saco_score, image_pair_data = calculate_image_saco_with_details(attributions, confidence_impacts, patch_ids)
 
         results[image_name] = saco_score
         pair_data[image_name] = image_pair_data
@@ -341,9 +312,8 @@ def calculate_saco_with_details(
     return results, pair_data
 
 
-def calculate_image_saco_with_details(
-        attributions: np.ndarray, confidence_impacts: np.ndarray,
-        patch_ids: np.ndarray) -> Tuple[float, pd.DataFrame]:
+def calculate_image_saco_with_details(attributions: np.ndarray, confidence_impacts: np.ndarray,
+                                      patch_ids: np.ndarray) -> Tuple[float, pd.DataFrame]:
     """
     Calculate SaCo for a single image and return detailed pair-wise comparison data.
     
@@ -374,12 +344,7 @@ def calculate_image_saco_with_details(
             total_weight += abs(weight)
 
             # Store pair data
-            pair_info = {
-                'patch_i': patch_i,
-                'patch_j': patch_j,
-                'is_faithful': is_faithful,
-                'weight': weight
-            }
+            pair_info = {'patch_i': patch_i, 'patch_j': patch_j, 'is_faithful': is_faithful, 'weight': weight}
             pairs_data.append(pair_info)
 
     # Avoid division by zero
@@ -412,8 +377,7 @@ def analyze_patch_metrics(pair_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
             pairs_with_j = image_pairs[image_pairs['patch_j'] == patch_id]
 
             # Calculate metrics for this patch
-            patch_metrics = calculate_patch_specific_metrics(
-                patch_id, pairs_with_i, pairs_with_j, image_name)
+            patch_metrics = calculate_patch_specific_metrics(patch_id, pairs_with_i, pairs_with_j, image_name)
 
             rows.append(patch_metrics)
 
@@ -435,9 +399,9 @@ def get_unique_patches_from_pairs(pairs_df: pd.DataFrame) -> Set[int]:
     return unique_i.union(unique_j)
 
 
-def calculate_patch_specific_metrics(patch_id: int, pairs_with_i: pd.DataFrame,
-                                     pairs_with_j: pd.DataFrame,
-                                     image_name: str) -> Dict[str, Any]:
+def calculate_patch_specific_metrics(
+    patch_id: int, pairs_with_i: pd.DataFrame, pairs_with_j: pd.DataFrame, image_name: str
+) -> Dict[str, Any]:
     """
     Calculate metrics specific to a patch based on its pair-wise comparisons.
     
@@ -473,18 +437,12 @@ def calculate_patch_specific_metrics(patch_id: int, pairs_with_i: pd.DataFrame,
 
     # Create a row for this patch
     return {
-        'image_name':
-        image_name,
-        'patch_id':
-        patch_id,
-        'faithful_pairs_count':
-        total_faithful,
-        'unfaithful_pairs_count':
-        total_pairs - total_faithful,
-        'faithful_pairs_pct':
-        (total_faithful / total_pairs * 100) if total_pairs else 0,
-        'patch_saco':
-        patch_saco
+        'image_name': image_name,
+        'patch_id': patch_id,
+        'faithful_pairs_count': total_faithful,
+        'unfaithful_pairs_count': total_pairs - total_faithful,
+        'faithful_pairs_pct': (total_faithful / total_pairs * 100) if total_pairs else 0,
+        'patch_saco': patch_saco
     }
 
 
@@ -511,8 +469,7 @@ def analyze_faithfulness_vs_correctness_from_objects(  # Renamed for clarity
         saco_score = saco_scores.get(image_path_str)
 
         # Extract true class from the image_path using the helper
-        true_class_label = extract_true_class_from_filename(
-            original_res.image_path)
+        true_class_label = extract_true_class_from_filename(original_res.image_path)
 
         prediction_info = original_res.prediction
         attribution_paths_info = original_res.attribution_paths  # This is an AttributionOutputPaths object or None
@@ -534,19 +491,15 @@ def analyze_faithfulness_vs_correctness_from_objects(  # Renamed for clarity
             prediction_info.confidence,
             # These come from the AttributionOutputPaths dataclass associated with ClassificationResult
             'attribution_path':
-            str(attribution_paths_info.attribution_path)
-            if attribution_paths_info else None,
+            str(attribution_paths_info.attribution_path) if attribution_paths_info else None,
             'logits':
-            str(attribution_paths_info.logits) if attribution_paths_info
-            and attribution_paths_info.logits else None,
+            str(attribution_paths_info.logits) if attribution_paths_info and attribution_paths_info.logits else None,
             'ffn_activity_path':
             str(attribution_paths_info.ffn_activity_path)
-            if attribution_paths_info
-            and attribution_paths_info.ffn_activity_path else None,
+            if attribution_paths_info and attribution_paths_info.ffn_activity_path else None,
             'class_embedding_path':
             str(attribution_paths_info.class_embedding_path)
-            if attribution_paths_info
-            and attribution_paths_info.class_embedding_path else None,
+            if attribution_paths_info and attribution_paths_info.class_embedding_path else None,
             'probabilities':
             prediction_info.probabilities
         }
@@ -555,24 +508,20 @@ def analyze_faithfulness_vs_correctness_from_objects(  # Renamed for clarity
     return pd.DataFrame(analysis_data_list)
 
 
-def extract_true_class_from_filename(
-        filename: Union[str, Path]) -> Optional[str]:
+def extract_true_class_from_filename(filename: Union[str, Path]) -> Optional[str]:
     """
     Extract the true class from a filename based on path patterns.
     """
     filepath_str = str(filename)
 
-    if "Normal" in filepath_str:  # Be careful with generic terms if they appear elsewhere
-        return "Normal"
-    elif "covid" in filepath_str:  # Case-insensitive for "covid"
-        return "COVID-19"
-    elif "non_COVID" in filepath_str:
-        return "Non-COVID"
+    for cls in CLASSES:
+        if cls in filepath_str:
+            return cls
+
     return None
 
 
-def analyze_key_attribution_patterns(df: pd.DataFrame, model,
-                                     config) -> pd.DataFrame:
+def analyze_key_attribution_patterns(df: pd.DataFrame, model, config) -> pd.DataFrame:
     """
     Comprehensive analysis of attribution patterns with correlation calculations.
     
@@ -591,9 +540,9 @@ def analyze_key_attribution_patterns(df: pd.DataFrame, model,
     # df = add_attribution_consistency_metrics(df)
     # df = add_robustness_metrics(df)
     # df = add_ffn_activity_metrics(df)
-    if config.classify.data_collection:
-        df = add_class_embedding_metrics(df)
-        df = add_embedding_space_metrics(df, model)
+    # if config.classify.data_collection:
+    # df = add_class_embedding_metrics(df)
+    # df = add_embedding_space_metrics(df, model)
 
     # Clean data
     df_clean = df.dropna(subset=['saco_score'])
@@ -605,6 +554,8 @@ def analyze_key_attribution_patterns(df: pd.DataFrame, model,
     df_clean = df_clean[df_clean['is_correct']]
     if 'filename' in df_clean.columns:
         df_clean['class'] = df_clean['true_class']
+
+    print(df_clean.head())
 
     # Calculate correlations
     if len(df_clean) > 0:
@@ -628,8 +579,7 @@ def get_key_attribution_metrics() -> List[str]:
 
     # Define layer and class ranges based on your data
     layers = range(0, 12)  # Adjust the range as needed
-    classes = range(
-        0, 3)  # Based on your classes 0, 1, 2 mentioned in the metrics
+    classes = range(0, 3)  # Based on your classes 0, 1, 2 mentioned in the metrics
 
     # Generate column names for all embedding metrics
     embedding_columns = []
@@ -658,8 +608,8 @@ def get_key_attribution_metrics() -> List[str]:
 
     # Per-head and per-class metrics
     head_class_columns = [
-        f'layer_{l}_head_{h}_class_{c}_{stat}' for l in layers
-        for h in range(num_heads) for c in classes for stat in head_stats
+        f'layer_{l}_head_{h}_class_{c}_{stat}' for l in layers for h in range(num_heads) for c in classes
+        for stat in head_stats
     ]
 
     # embedding_columns.extend(head_class_columns)
@@ -671,13 +621,10 @@ def get_key_attribution_metrics() -> List[str]:
 
     # Add class-specific distance metrics
     for c in classes:
-        base_metrics.extend(
-            [f'mlp_mean_dist_to_class_{c}', f'attn_mean_dist_to_class_{c}'])
+        base_metrics.extend([f'mlp_mean_dist_to_class_{c}', f'attn_mean_dist_to_class_{c}'])
 
     # Generate all column names with layer prefixes
-    geometry_metrics = [
-        f'layer_{l}_{metric}' for l in layers for metric in base_metrics
-    ]
+    geometry_metrics = [f'layer_{l}_{metric}' for l in layers for metric in base_metrics]
 
     return [
         'neg_pos_ratio',
@@ -758,8 +705,7 @@ def calculate_correlation_significance(x: np.ndarray, y: np.ndarray) -> float:
     return p_value
 
 
-def calculate_overall_correlations(df: pd.DataFrame,
-                                   metrics: List[str]) -> None:
+def calculate_overall_correlations(df: pd.DataFrame, metrics: List[str]) -> None:
     """
     Calculate and print correlations between SaCo scores and all metrics.
     
@@ -775,16 +721,14 @@ def calculate_overall_correlations(df: pd.DataFrame,
     for metric in metrics:
         if metric in df.columns:
             corr = df['saco_score'].corr(df[metric])
-            p_value = calculate_correlation_significance(
-                df['saco_score'].values, df[metric].values)
+            p_value = calculate_correlation_significance(df['saco_score'].values, df[metric].values)
             correlations_overall[metric] = (corr, p_value)
             print(f"{metric}: r={corr:.3f}, p={p_value:.5f}")
 
 
-def calculate_per_class_correlations(df: pd.DataFrame,
-                                     metrics: List[str],
-                                     percentile_low: float = 0.4,
-                                     percentile_high: float = 0.6) -> None:
+def calculate_per_class_correlations(
+    df: pd.DataFrame, metrics: List[str], percentile_low: float = 0.4, percentile_high: float = 0.6
+) -> None:
     """
     Calculate and print correlations between SaCo scores and all metrics by class.
     
@@ -798,8 +742,7 @@ def calculate_per_class_correlations(df: pd.DataFrame,
         for cls in classes:
             class_df = df[df['class'] == cls]
 
-            if len(class_df
-                   ) > 5:  # Only calculate if we have enough data points
+            if len(class_df) > 5:  # Only calculate if we have enough data points
                 print("\n" + "-" * 60)
                 print(f"CORRELATIONS FOR CLASS: {cls}")
                 print("-" * 60)
@@ -808,15 +751,14 @@ def calculate_per_class_correlations(df: pd.DataFrame,
                     if metric in class_df.columns:
                         corr = class_df['saco_score'].corr(class_df[metric])
                         p_value = calculate_correlation_significance(
-                            class_df['saco_score'].values,
-                            class_df[metric].values)
+                            class_df['saco_score'].values, class_df[metric].values
+                        )
                         print(f"{metric}: r={corr:.3f}, p={p_value:.5f}")
 
             print(f"\nSummary for {cls}:")
             print(f"  Total samples: {len(class_df)}")
             print(f"  Mean SaCo score: {class_df['saco_score'].mean():.3f}")
-            print(
-                f"  Median SaCo score: {class_df['saco_score'].median():.3f}")
+            print(f"  Median SaCo score: {class_df['saco_score'].median():.3f}")
             print(f"  Std SaCo score: {class_df['saco_score'].std():.3f}")
 
 
@@ -848,10 +790,7 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
     # Generate all column names for layer-level metrics
-    new_columns = [
-        f'layer_{l}_class_{c}_{stat}' for l in layers for c in classes
-        for stat in stats
-    ]
+    new_columns = [f'layer_{l}_class_{c}_{stat}' for l in layers for c in classes for stat in stats]
 
     # Add per-head metrics for each class
     num_heads = 12  # Adjust based on your model
@@ -862,11 +801,9 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
         for h in range(num_heads):
             for c in classes:
                 # Mean attention logit per class for each head
-                head_class_columns.append(
-                    f'layer_{l}_head_{h}_class_{c}_mean_attn_logit')
+                head_class_columns.append(f'layer_{l}_head_{h}_class_{c}_mean_attn_logit')
                 # CLS token attention logit per class for each head
-                head_class_columns.append(
-                    f'layer_{l}_head_{h}_class_{c}_cls_token_attn_logit')
+                head_class_columns.append(f'layer_{l}_head_{h}_class_{c}_cls_token_attn_logit')
 
     # Combine all columns
     new_columns.extend(head_class_columns)
@@ -877,8 +814,7 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
     # Process each row
     for idx, row in df.iterrows():
         try:
-            embeddings = np.load(row['class_embedding_path'],
-                                 allow_pickle=True)
+            embeddings = np.load(row['class_embedding_path'], allow_pickle=True)
 
             # Process each layer
             for layer_idx in layers:
@@ -886,10 +822,8 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                     continue
 
                 layer_data = embeddings[layer_idx]
-                attn_logits_input = layer_data[
-                    'attention_class_representation_input']
-                attn_logits = layer_data[
-                    'attention_class_representation_output']
+                attn_logits_input = layer_data['attention_class_representation_input']
+                attn_logits = layer_data['attention_class_representation_output']
                 mlp_logits_input = layer_data['mlp_class_representation_input']
                 mlp_logits = layer_data['mlp_class_representation_output']
 
@@ -906,48 +840,30 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
                     cls_token_mlp = mlp_logits[0, cls]
                     var_mlp = np.var(mlp_logits[:, cls])
 
-                    alignment_change_attn_cls = mlp_logits[
-                        0, cls] - mlp_logits_input[0, cls]
-                    alignment_change_attn = attn_logits[:,
-                                                        cls] - attn_logits_input[:,
-                                                                                 cls]
+                    alignment_change_attn_cls = mlp_logits[0, cls] - mlp_logits_input[0, cls]
+                    alignment_change_attn = attn_logits[:, cls] - attn_logits_input[:, cls]
 
                     # Store in results dictionary for layer-level metrics
-                    results_dict[
-                        f'layer_{layer_idx}_class_{cls}_mean_attn_logit'][
-                            idx] = mean_attn
-                    results_dict[
-                        f'layer_{layer_idx}_class_{cls}_mean_attn_alignment_change'][
-                            idx] = np.mean(alignment_change_attn)
-                    results_dict[
-                        f'layer_{layer_idx}_class_{cls}_cls_attn_alignment_change'][
-                            idx] = alignment_change_attn_cls
-                    results_dict[
-                        f'layer_{layer_idx}_class_{cls}_cls_token_attn_logit'][
-                            idx] = cls_token_attn
-                    results_dict[
-                        f'layer_{layer_idx}_class_{cls}_var_attn_logit'][
-                            idx] = var_attn
+                    results_dict[f'layer_{layer_idx}_class_{cls}_mean_attn_logit'][idx] = mean_attn
+                    results_dict[f'layer_{layer_idx}_class_{cls}_mean_attn_alignment_change'][idx] = np.mean(
+                        alignment_change_attn
+                    )
+                    results_dict[f'layer_{layer_idx}_class_{cls}_cls_attn_alignment_change'][
+                        idx] = alignment_change_attn_cls
+                    results_dict[f'layer_{layer_idx}_class_{cls}_cls_token_attn_logit'][idx] = cls_token_attn
+                    results_dict[f'layer_{layer_idx}_class_{cls}_var_attn_logit'][idx] = var_attn
 
-                    results_dict[
-                        f'layer_{layer_idx}_class_{cls}_mean_mlp_logit'][
-                            idx] = mean_mlp
-                    results_dict[
-                        f'layer_{layer_idx}_class_{cls}_cls_token_mlp_logit'][
-                            idx] = cls_token_mlp
-                    results_dict[
-                        f'layer_{layer_idx}_class_{cls}_var_mlp_logit'][
-                            idx] = var_mlp
+                    results_dict[f'layer_{layer_idx}_class_{cls}_mean_mlp_logit'][idx] = mean_mlp
+                    results_dict[f'layer_{layer_idx}_class_{cls}_cls_token_mlp_logit'][idx] = cls_token_mlp
+                    results_dict[f'layer_{layer_idx}_class_{cls}_var_mlp_logit'][idx] = var_mlp
 
                 # Check if attention maps are available
-                if 'attention_map' in layer_data and len(
-                        layer_data['attention_map']) > 0 and False:
+                if 'attention_map' in layer_data and len(layer_data['attention_map']) > 0 and False:
                     attention_map = layer_data['attention_map']
 
                     # Attention map should be [heads, seq, seq]
                     num_heads = attention_map.shape[0]
-                    actual_heads = min(num_heads,
-                                       12)  # Cap at expected head count
+                    actual_heads = min(num_heads, 12)  # Cap at expected head count
 
                     for h in range(actual_heads):
                         attention_head = attention_map[h, :, :]  # [seq, seq]
@@ -959,30 +875,24 @@ def add_class_embedding_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
                             # 1. Calculate the change in class representation due to this head
                             # The attention output is a weighted sum of input values based on attention weights
-                            head_class_contributions = np.zeros(
-                                attn_logits_input.shape[0])
+                            head_class_contributions = np.zeros(attn_logits_input.shape[0])
 
                             for i in range(attn_logits_input.shape[0]):
                                 # weighted sum of input class logits based on attention weights
-                                weighted_inputs = attention_head[
-                                    i, :] * attn_logits_input[:, cls]
-                                head_class_contributions[i] = np.sum(
-                                    weighted_inputs)
+                                weighted_inputs = attention_head[i, :] * attn_logits_input[:, cls]
+                                head_class_contributions[i] = np.sum(weighted_inputs)
 
                             # 2. Store the mean attention logit per class for this head
-                            results_dict[
-                                f'layer_{layer_idx}_head_{h}_class_{cls}_mean_attn_logit'][
-                                    idx] = np.mean(head_class_contributions)
+                            results_dict[f'layer_{layer_idx}_head_{h}_class_{cls}_mean_attn_logit'][idx] = np.mean(
+                                head_class_contributions
+                            )
 
                             # 3. Store the CLS token attention logit per class for this head
-                            results_dict[
-                                f'layer_{layer_idx}_head_{h}_class_{cls}_cls_token_attn_logit'][
-                                    idx] = head_class_contributions[0]
+                            results_dict[f'layer_{layer_idx}_head_{h}_class_{cls}_cls_token_attn_logit'][
+                                idx] = head_class_contributions[0]
 
         except Exception as e:
-            print(
-                f"Error processing class embeddings for {row.get('filename', 'unknown')}: {e}"
-            )
+            print(f"Error processing class embeddings for {row.get('filename', 'unknown')}: {e}")
             # NaN values are already pre-allocated for error cases
 
     # Create a DataFrame from results_dict and join with original df
@@ -1001,24 +911,19 @@ def track_cross_class_information_flow(blk, model, target_class=0):
     output_tokens = blk.attn.output_tokens
 
     input_logits = model.get_class_embedding_space_representation(input_tokens)
-    output_logits = model.get_class_embedding_space_representation(
-        output_tokens)
+    output_logits = model.get_class_embedding_space_representation(output_tokens)
 
     # Identify source tokens (high class 1 or 2)
-    class1_sources = (input_logits[:, :, 1] > input_logits[:, :,
-                                                           1].mean()).float()
-    class2_sources = (input_logits[:, :, 2] > input_logits[:, :,
-                                                           2].mean()).float()
+    class1_sources = (input_logits[:, :, 1] > input_logits[:, :, 1].mean()).float()
+    class2_sources = (input_logits[:, :, 2] > input_logits[:, :, 2].mean()).float()
 
     # Identify tokens that GAINED COVID identifiability
     covid_gain = output_logits[:, :, 0] - input_logits[:, :, 0]
     covid_receivers = (covid_gain > 0).float()
 
     # Track attention flow from sources to receivers
-    attn_from_class1 = torch.einsum('bhij,bi->bhj', attention_map,
-                                    class1_sources).mean(1)
-    attn_from_class2 = torch.einsum('bhij,bi->bhj', attention_map,
-                                    class2_sources).mean(1)
+    attn_from_class1 = torch.einsum('bhij,bi->bhj', attention_map, class1_sources).mean(1)
+    attn_from_class2 = torch.einsum('bhij,bi->bhj', attention_map, class2_sources).mean(1)
 
     # Weight by COVID gain
     class1_contribution = attn_from_class1 * covid_gain
@@ -1059,12 +964,8 @@ def add_basic_attribution_metrics(df: pd.DataFrame) -> pd.DataFrame:
             # Print diagnostics for first few files
             if len(metrics['neg_magnitude']) < 3:
                 print(f"File: {row['filename']}")
-                print(
-                    f"Positive attr shape: {pos_attr.shape}, min: {pos_attr.min():.5f}, max: {pos_attr.max():.5f}"
-                )
-                print(
-                    f"Negative attr shape: {neg_attr.shape}, min: {neg_attr.min():.5f}, max: {neg_attr.max():.5f}"
-                )
+                print(f"Positive attr shape: {pos_attr.shape}, min: {pos_attr.min():.5f}, max: {pos_attr.max():.5f}")
+                print(f"Negative attr shape: {neg_attr.shape}, min: {neg_attr.min():.5f}, max: {neg_attr.max():.5f}")
 
             neg_sum = np.sum(neg_attr)
             pos_sum = np.sum(pos_attr)
@@ -1118,15 +1019,12 @@ def add_entropy_metrics(df: pd.DataFrame) -> pd.DataFrame:
             neg_norm = neg_attr / (np.sum(neg_attr) + 1e-10)
 
             # Calculate Shannon entropy (using only non-zero values)
-            pos_entropy = -np.sum(pos_norm[pos_norm > 0] *
-                                  np.log2(pos_norm[pos_norm > 0] + 1e-10))
-            neg_entropy = -np.sum(neg_norm[neg_norm > 0] *
-                                  np.log2(neg_norm[neg_norm > 0] + 1e-10))
+            pos_entropy = -np.sum(pos_norm[pos_norm > 0] * np.log2(pos_norm[pos_norm > 0] + 1e-10))
+            neg_entropy = -np.sum(neg_norm[neg_norm > 0] * np.log2(neg_norm[neg_norm > 0] + 1e-10))
 
             metrics['neg_entropy'].append(neg_entropy)
             metrics['pos_entropy'].append(pos_entropy)
-            metrics['entropy_ratio'].append(neg_entropy /
-                                            (pos_entropy + 1e-10))
+            metrics['entropy_ratio'].append(neg_entropy / (pos_entropy + 1e-10))
 
         except Exception as e:
             print(f"Error calculating entropy for {row['filename']}: {e}")
@@ -1169,16 +1067,11 @@ def add_concentration_metrics(df: pd.DataFrame) -> pd.DataFrame:
             # Top 10% concentration
             neg_threshold = np.percentile(neg_attr, 90)
             pos_threshold = np.percentile(pos_attr, 90)
-            metrics['neg_top10_conc'].append(
-                np.sum(neg_attr[neg_attr >= neg_threshold]) /
-                (np.sum(neg_attr) + 1e-10))
-            metrics['pos_top10_conc'].append(
-                np.sum(pos_attr[pos_attr >= pos_threshold]) /
-                (np.sum(pos_attr) + 1e-10))
+            metrics['neg_top10_conc'].append(np.sum(neg_attr[neg_attr >= neg_threshold]) / (np.sum(neg_attr) + 1e-10))
+            metrics['pos_top10_conc'].append(np.sum(pos_attr[pos_attr >= pos_threshold]) / (np.sum(pos_attr) + 1e-10))
 
         except Exception as e:
-            print(
-                f"Error calculating concentration for {row['filename']}: {e}")
+            print(f"Error calculating concentration for {row['filename']}: {e}")
             for key in metrics:
                 metrics[key].append(np.nan)
 
@@ -1204,8 +1097,7 @@ def calculate_gini(x: np.ndarray) -> float:
     n = len(x)
     cumsum = np.cumsum(sorted_x)
     # Return Gini coefficient
-    return (np.sum((2 * np.arange(1, n + 1) - n - 1) *
-                   sorted_x)) / (n * np.sum(sorted_x) + 1e-10)
+    return (np.sum((2 * np.arange(1, n + 1) - n - 1) * sorted_x)) / (n * np.sum(sorted_x) + 1e-10)
 
 
 def add_information_theory_metrics(df: pd.DataFrame) -> pd.DataFrame:
@@ -1219,10 +1111,8 @@ def add_information_theory_metrics(df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with added information theory metrics
     """
     metrics = {
-        'mutual_information':
-        [],  # Mutual information between positive and negative attributions
-        'neg_pos_contingency':
-        []  # Contingency between negative and positive attributions
+        'mutual_information': [],  # Mutual information between positive and negative attributions
+        'neg_pos_contingency': []  # Contingency between negative and positive attributions
     }
 
     for _, row in df.iterrows():
@@ -1254,14 +1144,13 @@ def add_information_theory_metrics(df: pd.DataFrame) -> pd.DataFrame:
             high_neg = neg_attr > neg_median
 
             # Calculate contingency ratio
-            contingency = (np.sum(np.logical_and(high_pos, high_neg)) + np.sum(
-                np.logical_and(~high_pos, ~high_neg))) / pos_attr.size
+            contingency = (
+                np.sum(np.logical_and(high_pos, high_neg)) + np.sum(np.logical_and(~high_pos, ~high_neg))
+            ) / pos_attr.size
             metrics['neg_pos_contingency'].append(contingency)
 
         except Exception as e:
-            print(
-                f"Error calculating information metrics for {row['filename']}: {e}"
-            )
+            print(f"Error calculating information metrics for {row['filename']}: {e}")
             for key in metrics:
                 metrics[key].append(np.nan)
 
@@ -1314,9 +1203,7 @@ def add_gradient_based_metrics(df: pd.DataFrame) -> pd.DataFrame:
             metrics['gradient_sparsity'].append(sparsity)
 
         except Exception as e:
-            print(
-                f"Error processing gradients for {row.get('filename', 'unknown')}: {e}"
-            )
+            print(f"Error processing gradients for {row.get('filename', 'unknown')}: {e}")
             for key in metrics:
                 metrics[key].append(np.nan)
 
@@ -1340,10 +1227,8 @@ def add_sparsity_metrics(df: pd.DataFrame) -> pd.DataFrame:
     metrics = {
         'pos_l0_sparsity': [],  # Percentage of near-zero positive attributions
         'neg_l0_sparsity': [],  # Percentage of near-zero negative attributions
-        'pos_effective_sparsity':
-        [],  # Effective number of non-zero positive elements
-        'neg_effective_sparsity':
-        [],  # Effective number of non-zero negative elements
+        'pos_effective_sparsity': [],  # Effective number of non-zero positive elements
+        'neg_effective_sparsity': [],  # Effective number of non-zero negative elements
         'pos_kurtosis': [],  # Measure of "peakedness" of positive distribution
         'neg_kurtosis': []  # Measure of "peakedness" of negative distribution
     }
@@ -1359,33 +1244,25 @@ def add_sparsity_metrics(df: pd.DataFrame) -> pd.DataFrame:
             # L0 sparsity (percentage of near-zero elements)
             pos_threshold = 0.01 * np.max(pos_attr)
             neg_threshold = 0.01 * np.max(neg_attr)
-            metrics['pos_l0_sparsity'].append(
-                np.mean(pos_attr < pos_threshold))
-            metrics['neg_l0_sparsity'].append(
-                np.mean(neg_attr < neg_threshold))
+            metrics['pos_l0_sparsity'].append(np.mean(pos_attr < pos_threshold))
+            metrics['neg_l0_sparsity'].append(np.mean(neg_attr < neg_threshold))
 
             # Effective sparsity for positive attributions
             pos_normalized = flat_pos / (np.sum(flat_pos) + 1e-10)
             pos_effective_nonzero = 1.0 / (np.sum(pos_normalized**2) + 1e-10)
-            metrics['pos_effective_sparsity'].append(1.0 -
-                                                     (pos_effective_nonzero /
-                                                      len(flat_pos)))
+            metrics['pos_effective_sparsity'].append(1.0 - (pos_effective_nonzero / len(flat_pos)))
 
             # Effective sparsity for negative attributions
             neg_normalized = flat_neg / (np.sum(flat_neg) + 1e-10)
             neg_effective_nonzero = 1.0 / (np.sum(neg_normalized**2) + 1e-10)
-            metrics['neg_effective_sparsity'].append(1.0 -
-                                                     (neg_effective_nonzero /
-                                                      len(flat_neg)))
+            metrics['neg_effective_sparsity'].append(1.0 - (neg_effective_nonzero / len(flat_neg)))
 
             # Kurtosis (measure of "peakedness")
             metrics['pos_kurtosis'].append(stats.kurtosis(flat_pos))
             metrics['neg_kurtosis'].append(stats.kurtosis(flat_neg))
 
         except Exception as e:
-            print(
-                f"Error calculating sparsity for {row.get('filename', 'unknown')}: {e}"
-            )
+            print(f"Error calculating sparsity for {row.get('filename', 'unknown')}: {e}")
             for key in metrics:
                 metrics[key].append(np.nan)
 
@@ -1407,10 +1284,8 @@ def add_attribution_consistency_metrics(df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with added consistency metrics
     """
     metrics = {
-        'pos_neg_coherence':
-        [],  # Correlation between positive and negative attribution patterns
-        'attribution_evenness':
-        [],  # How evenly distributed the attribution intensity is across regions
+        'pos_neg_coherence': [],  # Correlation between positive and negative attribution patterns
+        'attribution_evenness': [],  # How evenly distributed the attribution intensity is across regions
         'feature_consensus': []  # Agreement between different attention heads
     }
 
@@ -1423,8 +1298,7 @@ def add_attribution_consistency_metrics(df: pd.DataFrame) -> pd.DataFrame:
             flat_pos = pos_attr.flatten()
             flat_neg = neg_attr.flatten()
             pos_neg_corr = np.corrcoef(flat_pos, flat_neg)[0, 1]
-            metrics['pos_neg_coherence'].append(
-                abs(pos_neg_corr))  # Use absolute value to measure alignment
+            metrics['pos_neg_coherence'].append(abs(pos_neg_corr))  # Use absolute value to measure alignment
 
             # Measure attribution evenness (ratio of mean to max)
             combined_attr = pos_attr + neg_attr
@@ -1432,8 +1306,7 @@ def add_attribution_consistency_metrics(df: pd.DataFrame) -> pd.DataFrame:
             metrics['attribution_evenness'].append(evenness)
 
             # If head-specific attributions are available, measure agreement between heads
-            if 'attribution_heads_path' in row and pd.notnull(
-                    row['attribution_heads_path']):
+            if 'attribution_heads_path' in row and pd.notnull(row['attribution_heads_path']):
                 heads_attr = np.load(row['attribution_heads_path'])
                 feature_consensus = calculate_feature_consensus(heads_attr)
                 metrics['feature_consensus'].append(feature_consensus)
@@ -1441,9 +1314,7 @@ def add_attribution_consistency_metrics(df: pd.DataFrame) -> pd.DataFrame:
                 metrics['feature_consensus'].append(np.nan)
 
         except Exception as e:
-            print(
-                f"Error calculating consistency for {row.get('filename', 'unknown')}: {e}"
-            )
+            print(f"Error calculating consistency for {row.get('filename', 'unknown')}: {e}")
             for key in metrics:
                 metrics[key].append(np.nan)
 
@@ -1469,8 +1340,7 @@ def calculate_feature_consensus(heads_attr: np.ndarray) -> float:
 
     for i in range(num_heads):
         for j in range(i + 1, num_heads):
-            corr = np.corrcoef(heads_attr[i].flatten(),
-                               heads_attr[j].flatten())[0, 1]
+            corr = np.corrcoef(heads_attr[i].flatten(), heads_attr[j].flatten())[0, 1]
             correlations.append(corr)
 
     return np.mean(correlations) if correlations else np.nan
@@ -1489,8 +1359,7 @@ def add_robustness_metrics(df: pd.DataFrame) -> pd.DataFrame:
     metrics = {
         'smoothing_stability': [],  # Stability under Gaussian smoothing
         'noise_stability': [],  # Stability under small noise addition
-        'peak_persistence':
-        []  # How persistent the highest attribution regions are
+        'peak_persistence': []  # How persistent the highest attribution regions are
     }
 
     for _, row in df.iterrows():
@@ -1499,16 +1368,14 @@ def add_robustness_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
             # Smoothing stability
             smoothed = gaussian_filter(pos_attr, sigma=1.0)
-            stability = np.corrcoef(pos_attr.flatten(), smoothed.flatten())[0,
-                                                                            1]
+            stability = np.corrcoef(pos_attr.flatten(), smoothed.flatten())[0, 1]
             metrics['smoothing_stability'].append(stability)
 
             # Noise stability (adding small random noise)
             noise_level = 0.05 * np.std(pos_attr)
             noise = np.random.normal(0, noise_level, pos_attr.shape)
             noisy = pos_attr + noise
-            noise_stability = np.corrcoef(pos_attr.flatten(),
-                                          noisy.flatten())[0, 1]
+            noise_stability = np.corrcoef(pos_attr.flatten(), noisy.flatten())[0, 1]
             metrics['noise_stability'].append(noise_stability)
 
             # Peak persistence
@@ -1524,9 +1391,7 @@ def add_robustness_metrics(df: pd.DataFrame) -> pd.DataFrame:
             metrics['peak_persistence'].append(persistence)
 
         except Exception as e:
-            print(
-                f"Error calculating robustness for {row.get('filename', 'unknown')}: {e}"
-            )
+            print(f"Error calculating robustness for {row.get('filename', 'unknown')}: {e}")
             for key in metrics:
                 metrics[key].append(np.nan)
 
@@ -1555,10 +1420,8 @@ def add_ffn_activity_metrics(df: pd.DataFrame) -> pd.DataFrame:
         'ffn_early_layers_activity': [],  # Activity in first third of layers
         'ffn_middle_layers_activity': [],  # Activity in middle third of layers
         'ffn_late_layers_activity': [],  # Activity in last third of layers
-        'ffn_layer_activity_variance':
-        [],  # Variance of activity across layers
-        'ffn_token_activity_variance':
-        []  # Mean variance of activity across tokens
+        'ffn_layer_activity_variance': [],  # Variance of activity across layers
+        'ffn_token_activity_variance': []  # Mean variance of activity across tokens
     }
 
     for _, row in df.iterrows():
@@ -1575,38 +1438,27 @@ def add_ffn_activity_metrics(df: pd.DataFrame) -> pd.DataFrame:
             layer_means = [layer['mean_activity'] for layer in ffn_data]
             metrics['ffn_mean_activity'].append(np.mean(layer_means))
 
-            cls_activities = [
-                layer['cls_activity'] for layer in ffn_data
-                if 'cls_activity' in layer
-            ]
-            metrics['ffn_cls_activity'].append(
-                np.mean(cls_activities) if cls_activities else np.nan)
+            cls_activities = [layer['cls_activity'] for layer in ffn_data if 'cls_activity' in layer]
+            metrics['ffn_cls_activity'].append(np.mean(cls_activities) if cls_activities else np.nan)
 
-            metrics['ffn_last_layer_activity'].append(
-                ffn_data[-1]['mean_activity'])
+            metrics['ffn_last_layer_activity'].append(ffn_data[-1]['mean_activity'])
             metrics['ffn_max_layer_activity'].append(np.max(layer_means))
 
             # Activity by layer groups (early, middle, late)
             num_layers = len(ffn_data)
             third = max(1, num_layers // 3)
-            metrics['ffn_early_layers_activity'].append(
-                np.mean(layer_means[:third]))
-            metrics['ffn_middle_layers_activity'].append(
-                np.mean(layer_means[third:2 * third]))
-            metrics['ffn_late_layers_activity'].append(
-                np.mean(layer_means[2 * third:]))
+            metrics['ffn_early_layers_activity'].append(np.mean(layer_means[:third]))
+            metrics['ffn_middle_layers_activity'].append(np.mean(layer_means[third:2 * third]))
+            metrics['ffn_late_layers_activity'].append(np.mean(layer_means[2 * third:]))
 
             metrics['ffn_layer_activity_variance'].append(np.var(layer_means))
 
             # Mean variance across tokens
             token_variances = calculate_token_variances(ffn_data)
-            metrics['ffn_token_activity_variance'].append(
-                np.mean(token_variances) if token_variances else np.nan)
+            metrics['ffn_token_activity_variance'].append(np.mean(token_variances) if token_variances else np.nan)
 
         except Exception as e:
-            print(
-                f"Error processing FFN activity for {row.get('filename', 'unknown')}: {e}"
-            )
+            print(f"Error processing FFN activity for {row.get('filename', 'unknown')}: {e}")
             for key in metrics:
                 metrics[key].append(np.nan)
 
@@ -1630,20 +1482,17 @@ def calculate_token_variances(ffn_data: np.ndarray) -> List[float]:
     token_variances = []
 
     for i in range(len(ffn_data)):
-        if 'activity' not in ffn_data[i] or not isinstance(
-                ffn_data[i]['activity'], np.ndarray):
+        if 'activity' not in ffn_data[i] or not isinstance(ffn_data[i]['activity'], np.ndarray):
             continue
 
         token_activity = ffn_data[i]['activity']
         if token_activity.ndim > 0 and token_activity.shape[0] > 1:
-            token_variances.append(np.var(
-                token_activity[1:]))  # Exclude CLS token
+            token_variances.append(np.var(token_activity[1:]))  # Exclude CLS token
 
     return token_variances
 
 
-def add_embedding_space_metrics(df: pd.DataFrame,
-                                model: VisionTransformer) -> pd.DataFrame:
+def add_embedding_space_metrics(df: pd.DataFrame, model: VisionTransformer) -> pd.DataFrame:
     """
     Add distance-based metrics from the class embedding space for all layers.
     
@@ -1655,33 +1504,28 @@ def add_embedding_space_metrics(df: pd.DataFrame,
         DataFrame with added embedding space metrics for all layers
     """
     # Extract class prototypes from the model's classification head
-    class_prototypes = model.head.weight.detach().cpu().numpy(
-    )  # Shape: (num_classes, embed_dim)
+    class_prototypes = model.head.weight.detach().cpu().numpy()  # Shape: (num_classes, embed_dim)
 
     # First, analyze the prototype geometry
     print_prototype_geometry(class_prototypes)
 
-    class_to_idx = {'COVID-19': 0, 'Non-COVID': 1, 'Normal': 2}
+    class_to_idx = IDX2CLS
     num_classes = len(class_to_idx)
 
     layers = range(0, 12)
 
     # Define base metrics
     base_metrics = [
-        'mlp_mean_dist_to_pred_class', 'mlp_mean_decision_margin',
-        'mlp_embedding_dist_variance', 'attn_mean_dist_to_pred_class',
-        'attn_mean_decision_margin', 'attn_embedding_dist_variance'
+        'mlp_mean_dist_to_pred_class', 'mlp_mean_decision_margin', 'mlp_embedding_dist_variance',
+        'attn_mean_dist_to_pred_class', 'attn_mean_decision_margin', 'attn_embedding_dist_variance'
     ]
 
     # Add class-specific distance metrics
     for c in range(num_classes):
-        base_metrics.extend(
-            [f'mlp_mean_dist_to_class_{c}', f'attn_mean_dist_to_class_{c}'])
+        base_metrics.extend([f'mlp_mean_dist_to_class_{c}', f'attn_mean_dist_to_class_{c}'])
 
     # Generate all column names with layer prefixes
-    result_cols = [
-        f'layer_{l}_{metric}' for l in layers for metric in base_metrics
-    ]
+    result_cols = [f'layer_{l}_{metric}' for l in layers for metric in base_metrics]
 
     # Pre-allocate result columns with NaN values
     results_dict = {col: np.full(len(df), np.nan) for col in result_cols}
@@ -1689,8 +1533,7 @@ def add_embedding_space_metrics(df: pd.DataFrame,
     # Process each row
     for idx, row in df.iterrows():
         try:
-            embeddings = np.load(row['class_embedding_path'],
-                                 allow_pickle=True)
+            embeddings = np.load(row['class_embedding_path'], allow_pickle=True)
 
             # Get predicted class index
             pred_class = class_to_idx[row['predicted_class']]
@@ -1703,13 +1546,11 @@ def add_embedding_space_metrics(df: pd.DataFrame,
                 layer_data = embeddings[layer_idx]
 
                 # Get logits from both MLP and attention
-                attn_logits = layer_data[
-                    'attention_class_representation_output']
+                attn_logits = layer_data['attention_class_representation_output']
                 mlp_logits = layer_data['mlp_class_representation_output']
 
                 # Process both MLP and Attention representations
-                for rep_type, logits in [('mlp', mlp_logits),
-                                         ('attn', attn_logits)]:
+                for rep_type, logits in [('mlp', mlp_logits), ('attn', attn_logits)]:
                     # For each token, calculate distances (negative logits as proxy for distances)
                     token_distances = -logits  # Higher logit = closer
 
@@ -1718,30 +1559,22 @@ def add_embedding_space_metrics(df: pd.DataFrame,
 
                     # Decision margins for each token (distance between closest and 2nd closest class)
                     sorted_dists = np.sort(token_distances, axis=1)
-                    decision_margins = sorted_dists[:,
-                                                    1] - sorted_dists[:,
-                                                                      0]  # Gap between closest and 2nd closest
+                    decision_margins = sorted_dists[:, 1] - sorted_dists[:, 0]  # Gap between closest and 2nd closest
                     mean_decision_margin = np.mean(decision_margins)
 
                     # Distance variance (spread of tokens from prototypes)
                     dist_variance = np.var(token_distances)
 
                     # Store computed metrics in results_dict with layer prefix
-                    results_dict[
-                        f'layer_{layer_idx}_{rep_type}_mean_dist_to_pred_class'][
-                            idx] = mean_dist_to_pred
-                    results_dict[
-                        f'layer_{layer_idx}_{rep_type}_mean_decision_margin'][
-                            idx] = mean_decision_margin
-                    results_dict[
-                        f'layer_{layer_idx}_{rep_type}_embedding_dist_variance'][
-                            idx] = dist_variance
+                    results_dict[f'layer_{layer_idx}_{rep_type}_mean_dist_to_pred_class'][idx] = mean_dist_to_pred
+                    results_dict[f'layer_{layer_idx}_{rep_type}_mean_decision_margin'][idx] = mean_decision_margin
+                    results_dict[f'layer_{layer_idx}_{rep_type}_embedding_dist_variance'][idx] = dist_variance
 
                     # Store distances to each class
                     for c in range(num_classes):
-                        results_dict[
-                            f'layer_{layer_idx}_{rep_type}_mean_dist_to_class_{c}'][
-                                idx] = np.mean(token_distances[:, c])
+                        results_dict[f'layer_{layer_idx}_{rep_type}_mean_dist_to_class_{c}'][idx] = np.mean(
+                            token_distances[:, c]
+                        )
 
         except Exception as e:
             print(f"Error processing {row.get('filename', 'unknown')}: {e}")
@@ -1756,20 +1589,15 @@ def print_prototype_geometry(class_prototypes):
     """Print the geometric relationships between class prototypes."""
     from scipy.spatial.distance import pdist, squareform
 
-    prototype_distances = squareform(
-        pdist(class_prototypes, metric='euclidean'))
+    prototype_distances = squareform(pdist(class_prototypes, metric='euclidean'))
     prototype_cosine_sim = squareform(pdist(class_prototypes, metric='cosine'))
 
     print("\n" + "=" * 60)
     print("CLASS PROTOTYPE GEOMETRY:")
     print("=" * 60)
 
-    class_names = {0: 'COVID-19', 1: 'Non-COVID', 2: 'Normal'}
-    for i in range(3):
-        for j in range(i + 1, 3):
-            print(
-                f"Distance {class_names[i]} - {class_names[j]}: {prototype_distances[i,j]:.3f}"
-            )
-            print(
-                f"Cosine similarity {class_names[i]} - {class_names[j]}: {1-prototype_cosine_sim[i,j]:.3f}"
-            )
+    class_names = CLS2IDX
+    for i in range(7):
+        for j in range(i + 1, 7):
+            print(f"Distance {class_names[i]} - {class_names[j]}: {prototype_distances[i,j]:.3f}")
+            print(f"Cosine similarity {class_names[i]} - {class_names[j]}: {1-prototype_cosine_sim[i,j]:.3f}")

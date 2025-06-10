@@ -12,55 +12,75 @@ from translrp.ViT_new import VisionTransformer
 from translrp.ViT_new import vit_base_patch16_224 as vit_mm
 
 # Constants
-CLS2IDX = {0: 'COVID-19', 1: 'Non-COVID', 2: 'Normal'}
+CLASSES = ["cecum", "ileum", "retroflex-rectum", "pylorus", "retroflex-stomach", "z-line"]
+IDX2CLS = {i: cls for i, cls in enumerate(CLASSES)}
+CLS2IDX = {cls: i for i, cls in enumerate(CLASSES)}
 
 
-def load_vit_model(num_classes: int = 3,
-                   model_path: str = './model/model_best.pth.tar',
-                   device: Optional[torch.device] = None) -> VisionTransformer:
+def load_vit_model(
+    num_classes: int = 6, model_path: str = "", device: Optional[torch.device] = None
+) -> VisionTransformer:
     """
     Load a Vision Transformer model with specified configuration.
-    
-    Args:
-        model_type: Type of model architecture ('translrp' or 'base')
-        num_classes: Number of output classes
-        model_path: Path to model weights
-        device: Device to load the model on (defaults to CUDA if available)
-        
-    Returns:
-        Loaded and configured model
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Create the base model (same as training)
     model = vit_mm().to(device)
-
-    # Replace the classification head for the specified number of classes
     model.head = Linear(model.head.in_features, num_classes).to(device)
 
-    # Load pretrained weights if available
+    # Load weights if available
     if os.path.exists(model_path):
         print(f"Loading weights from {model_path}")
-        checkpoint = torch.load(model_path, map_location=device)
 
-        if 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
+        try:
+            # Try to load the checkpoint
+            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+            print(f"Checkpoint keys: {list(checkpoint.keys()) if isinstance(checkpoint, dict) else 'Not a dict'}")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            print("Falling back to ImageNet pretrained model...")
+            model = vit_mm(pretrained=True, num_classes=num_classes)
+            model.eval()
+            return model
+
+        # Extract model state dict based on checkpoint structure
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            # New checkpoint format
+            state_dict = checkpoint['model_state_dict']
+            print(f"✅ Using model_state_dict from checkpoint")
+            print(f"Epoch: {checkpoint.get('epoch', 'unknown')}")
+            print(f"Validation F1: {checkpoint.get('val_f1', 'unknown')}")
+            print(f"Classes: {checkpoint.get('class_names', 'unknown')}")
         else:
+            print("⚠️ No 'model_state_dict' found, assuming entire checkpoint is state dict")
             state_dict = checkpoint
 
-        model.load_state_dict(state_dict)
+        try:
+            model.load_state_dict(state_dict)
+            print("✅ Model weights loaded successfully")
+        except RuntimeError as e:
+            print(f"❌ Error loading state dict: {e}")
+            print("Falling back to ImageNet pretrained model...")
+            model = vit_mm(pretrained=True, num_classes=num_classes)
+            model.eval()
+            return model
     else:
-        print(f"Warning: Model weights not found at {model_path}")
+        print("No trained model found, using ImageNet pretrained")
+        model = vit_mm(pretrained=True, num_classes=num_classes)
 
     model.eval()
     return model
 
 
-def get_prediction(model: nn.Module,
-                   input_tensor: torch.Tensor,
-                   class_map: Optional[Dict[int, str]] = None,
-                   device: Optional[torch.device] = None,
-                   eval: bool = True) -> Dict[str, Any]:
+def get_prediction(
+    model: nn.Module,
+    input_tensor: torch.Tensor,
+    class_map: Optional[Dict[int, str]] = None,
+    device: Optional[torch.device] = None,
+    eval: bool = True
+) -> Dict[str, Any]:
     """
     Get prediction from model for an input tensor.
     
@@ -77,7 +97,7 @@ def get_prediction(model: nn.Module,
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if class_map is None:
-        class_map = CLS2IDX
+        class_map = IDX2CLS
 
     # Ensure model is in eval mode
     if eval: model.eval()
@@ -112,8 +132,7 @@ def get_prediction(model: nn.Module,
     }
 
 
-def register_model_hooks(model: VisionTransformer,
-                         register_hooks: bool = True) -> VisionTransformer:
+def register_model_hooks(model: VisionTransformer, register_hooks: bool = True) -> VisionTransformer:
     """
     Prepare a model for attribution by registering necessary hooks.
     
@@ -165,29 +184,19 @@ def get_model_info(model: VisionTransformer) -> Dict[str, Any]:
     """
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters()
-                           if p.requires_grad)
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # Get layer information
     layers_info = []
     for name, module in model.named_modules():
         if len(list(module.children())) == 0:  # Leaf module
             params = sum(p.numel() for p in module.parameters())
-            layers_info.append({
-                "name": name,
-                "type": module.__class__.__name__,
-                "parameters": params
-            })
+            layers_info.append({"name": name, "type": module.__class__.__name__, "parameters": params})
 
     return {
-        "total_parameters":
-        total_params,
-        "trainable_parameters":
-        trainable_params,
-        "has_attention":
-        hasattr(model, "blocks") and hasattr(model.blocks[0], "attn"),
-        "input_size":
-        model.patch_embed.img_size if hasattr(model, "patch_embed") else None,
-        "num_classes":
-        model.head.out_features if hasattr(model, "head") else None
+        "total_parameters": total_params,
+        "trainable_parameters": trainable_params,
+        "has_attention": hasattr(model, "blocks") and hasattr(model.blocks[0], "attn"),
+        "input_size": model.patch_embed.img_size if hasattr(model, "patch_embed") else None,
+        "num_classes": model.head.out_features if hasattr(model, "head") else None
     }
