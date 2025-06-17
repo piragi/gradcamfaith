@@ -21,7 +21,7 @@ if __name__ == "__main__":
     pipeline_config.file.use_cached_perturbed = True
     pipeline_config.file.current_mode = "val"
     pipeline_config.file.weighted = True
-    pipeline_config.classify.analysis = False
+    pipeline_config.classify.analysis = True
     pipeline_config.classify.data_collection = False  #not pipeline_config.file.weighted
 
     # pipeline_config.classify.adaptive_weighting_per_head = 8.5

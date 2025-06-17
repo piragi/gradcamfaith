@@ -26,6 +26,7 @@ from data_types import (
 )
 from faithfulness import evaluate_and_report_faithfulness
 from head_analysis import run_head_analysis
+from prisma_transmm import (find_class_specific_features, generate_attribution_prisma, load_models)
 from translrp.ViT_new import VisionTransformer
 
 
@@ -226,7 +227,9 @@ def classify_explain_single_image(
     config: PipelineConfig,
     image_path: Path,
     vit_model: model.VisionTransformer,  # Hooks should be registered on this model instance
-    device: torch.device
+    device: torch.device,
+    sae,
+    class_specific_features
 ) -> ClassificationResult:
     """
     Classifies a single image AND generates explanations.
@@ -249,13 +252,13 @@ def classify_explain_single_image(
     input_tensor = input_tensor.to(device)
 
     # 2. Call attribution.generate_attribution
-    raw_attribution_result_dict = attribution.generate_attribution(
+    raw_attribution_result_dict = generate_attribution_prisma(
         model=vit_model,
         input_tensor=input_tensor,
         config=config,
-        target_class=None,
         device=device,
-        img_size=config.classify.target_size[0]
+        sae=sae,
+        steering_options=class_specific_features
     )
 
     # 3. Instantiate ClassificationPrediction from the "predictions" field
@@ -331,7 +334,7 @@ def classify_explain_single_image(
 
 def classify_and_explain_dataset(
     config: PipelineConfig, vit_model: model.VisionTransformer, device: torch.device,
-    image_paths_to_process: List[Path], output_results_csv_path: Path
+    image_paths_to_process: List[Path], output_results_csv_path: Path, sae, class_specific_features
 ) -> List[ClassificationResult]:
     collected_results: List[ClassificationResult] = []
     for image_path in tqdm(
@@ -339,7 +342,7 @@ def classify_and_explain_dataset(
     ):
         try:
             # This now uses the revised single image function
-            result = classify_explain_single_image(config, image_path, vit_model, device)
+            result = classify_explain_single_image(config, image_path, vit_model, device, sae, class_specific_features)
             collected_results.append(result)
         except Exception as e:
             print(f"Error C&E {image_path.name}: {e}")
@@ -693,14 +696,17 @@ def run_pipeline(config: PipelineConfig,
     original_image_paths = preprocess_dataset(config, source_dir_for_preprocessing)
     print(f"Found {len(original_image_paths)} original images for processing.")
 
-    vit_model = model.load_vit_model(model_path="./model/vit_b_hyperkvasir_anatomical_for_translrp.pth", device=device)
+    # vit_model = model.load_vit_model(model_path="./model/vit_b_hyperkvasir_anatomical_for_translrp.pth", device=device)
+    sae, vit_model = load_models()
+    # class_specific_features = find_class_specific_features(vit_model, sae)
+    class_specific_features = None
     print("ViT model loaded, hooks registered, and set to eval mode.")
 
     originals_csv_path = config.file.output_dir / f"classification_results_originals_explained{config.file.output_suffix}.csv"
     print(f"Running Classify & Explain for original images")
 
     original_results_explained = classify_and_explain_dataset(
-        config, vit_model, device, original_image_paths, originals_csv_path
+        config, vit_model, device, original_image_paths, originals_csv_path, sae, class_specific_features
     )
 
     if config.classify.analysis:
