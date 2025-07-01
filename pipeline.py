@@ -1,4 +1,5 @@
 # pipeline.py
+import json
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -26,8 +27,8 @@ from data_types import (
 )
 from faithfulness import evaluate_and_report_faithfulness
 from head_analysis import run_head_analysis
-from prisma_transmm import (find_class_specific_features, generate_attribution_prisma, load_models)
 from translrp.ViT_new import VisionTransformer
+from transmm_sfaf import (generate_attribution_prisma, load_models, load_or_build_sf_af_dictionary)
 
 
 def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
@@ -258,8 +259,22 @@ def classify_explain_single_image(
         config=config,
         device=device,
         sae=sae,
-        steering_options=class_specific_features
+        sf_af_dict=class_specific_features,
+        enable_steering=config.file.weighted
     )
+
+    # Extract gradient analysis info if present
+    gradient_info = raw_attribution_result_dict.get("gradient_analysis", {})
+
+    # Log gradient info for quick inspection
+    if gradient_info and 'boosted_feature_idx' in gradient_info:
+        print(f"\n--- Gradient Analysis for {image_path.name} ---")
+        print(f"  Boosted Feature: {gradient_info['boosted_feature_idx']}")
+        print(f"  Gradient Magnitude: {gradient_info['boosted_grad_magnitude']:.6f}")
+        print(f"  Activation Strength: {gradient_info['boosted_activation_strength']:.6f}")
+        print(f"  Grad/Act Ratio: {gradient_info['boosted_grad_to_act_ratio']:.6f}")
+        print(f"  Gradient Percentile: {gradient_info['boosted_grad_percentile']:.1f}%")
+        print(f"  Gradient Sparsity: {gradient_info['gradient_sparsity']:.3f}")
 
     # 3. Instantiate ClassificationPrediction from the "predictions" field
     prediction_data = raw_attribution_result_dict["predictions"]
@@ -329,31 +344,64 @@ def classify_explain_single_image(
     # 8. Cache the combined result
     io_utils.save_to_cache(cache_path, final_result)
 
-    return final_result
+    return final_result, gradient_info
 
 
 def classify_and_explain_dataset(
     config: PipelineConfig, vit_model: model.VisionTransformer, device: torch.device,
     image_paths_to_process: List[Path], output_results_csv_path: Path, sae, class_specific_features
-) -> List[ClassificationResult]:
+) -> Tuple[List[ClassificationResult], List[Dict[str, Any]]]:  # Return gradient infos too
     collected_results: List[ClassificationResult] = []
+    gradient_infos: List[Dict[str, Any]] = []
+
     for image_path in tqdm(
         image_paths_to_process, desc=f"Classifying & Explaining (suffix: '{config.file.output_suffix}')"
     ):
         try:
-            # This now uses the revised single image function
-            result = classify_explain_single_image(config, image_path, vit_model, device, sae, class_specific_features)
+            result, gradient_info = classify_explain_single_image(
+                config, image_path, vit_model, device, sae, class_specific_features
+            )
             collected_results.append(result)
+            gradient_infos.append(gradient_info)
         except Exception as e:
             print(f"Error C&E {image_path.name}: {e}")
             import traceback
             traceback.print_exc()
             continue
+
     if collected_results:
         io_utils.save_classification_results_to_csv(collected_results, output_results_csv_path)
     else:
         print("No images successfully C&E.")
-    return collected_results
+
+    # Analyze gradient patterns across all images
+    if gradient_infos:
+        gradient_summary = collect_gradient_analysis(gradient_infos)
+        if gradient_summary:
+            print("\n=== GRADIENT ANALYSIS SUMMARY ===")
+            print(f"Analyzed {gradient_summary['num_samples']} images with SAE boosting")
+            print(f"Average Gradient Magnitude: {gradient_summary['avg_boosted_grad_magnitude']:.6f}")
+            print(f"Average Grad/Act Ratio: {gradient_summary['avg_grad_to_act_ratio']:.6f}")
+            print(f"Average Gradient Percentile: {gradient_summary['avg_grad_percentile']:.1f}%")
+            print(f"Average Gradient Sparsity: {gradient_summary['avg_gradient_sparsity']:.3f}")
+
+            # Save detailed gradient info to JSON for further analysis
+            gradient_json_path = config.file.output_dir / f"gradient_analysis{config.file.output_suffix}.json"
+            with open(gradient_json_path, 'w') as f:
+                json.dump({
+                    'summary':
+                    gradient_summary,
+                    'per_image': [{
+                        'image': str(path.name),
+                        **info
+                    } for path, info in zip(image_paths_to_process, gradient_infos) if info]
+                },
+                          f,
+                          indent=2,
+                          default=str)
+            print(f"\nDetailed gradient analysis saved to: {gradient_json_path}")
+
+    return collected_results, gradient_infos
 
 
 def classify_dataset_only(
@@ -616,10 +664,9 @@ def run_saco_from_pipeline_outputs(
     perturbed_image_paths_to_classify = [
         rec.perturbed_image_path for rec in perturbed_image_records if rec.perturbed_image_path.exists()
     ]
-    config.file.output_suffix = config.file.output_suffix + "_perturbed"
 
-    perturbed_csv_path = config.file.output_dir / f"classification_results_perturbed_classified_only{config.file.output_suffix}.csv"
-    print(f"Running Classify ONLY for perturbed images (suffix: '{config.file.output_suffix}')")
+    perturbed_csv_path = config.file.output_dir / f"classification_results_perturbed_classified_only{config.file.output_suffix}_perturbed.csv"
+    print(f"Running Classify ONLY for perturbed images (suffix: '{config.file.output_suffix}_perturbed')")
 
     perturbed_pipeline_results = classify_dataset_only(
         config, vit_model, device, perturbed_image_paths_to_classify, perturbed_csv_path
@@ -677,6 +724,35 @@ def run_saco_from_pipeline_outputs(
                 print(f"Saved {name} to {save_path}")
 
 
+# Add this function to collect gradient info across images
+def collect_gradient_analysis(gradient_info_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate gradient analysis across multiple images to identify patterns."""
+    if not gradient_info_list:
+        return {}
+
+    # Filter out empty gradient info
+    valid_infos = [info for info in gradient_info_list if info and 'boosted_feature_idx' in info]
+    if not valid_infos:
+        return {}
+
+    # Compute aggregated statistics
+    aggregated = {
+        'num_samples': len(valid_infos),
+        'avg_boosted_grad_magnitude': np.mean([info['boosted_grad_magnitude'] for info in valid_infos]),
+        'avg_boosted_activation_strength': np.mean([info['boosted_activation_strength'] for info in valid_infos]),
+        'avg_grad_to_act_ratio': np.mean([info['boosted_grad_to_act_ratio'] for info in valid_infos]),
+        'avg_grad_percentile': np.mean([info['boosted_grad_percentile'] for info in valid_infos]),
+        'avg_gradient_sparsity': np.mean([info['gradient_sparsity'] for info in valid_infos]),
+        'feature_distribution': defaultdict(int)
+    }
+
+    # Count which features were boosted
+    for info in valid_infos:
+        aggregated['feature_distribution'][info['boosted_feature_idx']] += 1
+
+    return aggregated
+
+
 def run_pipeline(config: PipelineConfig,
                  source_dir_for_preprocessing: Path,
                  device: Optional[torch.device] = None) -> List[ClassificationResult]:
@@ -699,15 +775,26 @@ def run_pipeline(config: PipelineConfig,
     # vit_model = model.load_vit_model(model_path="./model/vit_b_hyperkvasir_anatomical_for_translrp.pth", device=device)
     sae, vit_model = load_models()
     # class_specific_features = find_class_specific_features(vit_model, sae)
-    class_specific_features = None
+    class_specific_features = load_or_build_sf_af_dictionary(
+        vit_model, sae, n_samples=50000, layer_idx=6, dict_path=f"./results/train/sfaf_dir_l6.pt", rebuild=False
+    )
     print("ViT model loaded, hooks registered, and set to eval mode.")
 
     originals_csv_path = config.file.output_dir / f"classification_results_originals_explained{config.file.output_suffix}.csv"
     print(f"Running Classify & Explain for original images")
 
-    original_results_explained = classify_and_explain_dataset(
+    original_results_explained, gradient_infos = classify_and_explain_dataset(
         config, vit_model, device, original_image_paths, originals_csv_path, sae, class_specific_features
     )
+
+    # Quick hypothesis test: Check if low gradient ratios correlate with attribution improvement
+    if gradient_infos:
+        low_ratio_threshold = 0.1  # Adjust based on your data
+        low_ratio_features = [
+            info for info in gradient_infos if info and info.get('boosted_grad_to_act_ratio', 1.0) < low_ratio_threshold
+        ]
+        print(f"\n{len(low_ratio_features)} images had low grad/act ratio (<{low_ratio_threshold})")
+        print("These might be cases where gradient-based attribution struggles without boosting")
 
     if config.classify.analysis:
         print("Evaluate Faithfulness Pipeline")

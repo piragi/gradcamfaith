@@ -50,10 +50,7 @@ def save_to_cache(cache_path: Path, result: ClassificationResult) -> None:
         print(f"Error saving to cache {cache_path}: {e}")
 
 
-def build_cache_path(cache_dir: Path,
-                     image_path: Path,
-                     suffix: str,
-                     prefix: str = "") -> Path:
+def build_cache_path(cache_dir: Path, image_path: Path, suffix: str, prefix: str = "") -> Path:
     """Build a cache path for an image.
     
     Args:
@@ -68,8 +65,7 @@ def build_cache_path(cache_dir: Path,
     return cache_dir / f"{prefix}{image_path.stem}{suffix}.json"
 
 
-def save_classification_results_to_csv(results: List[ClassificationResult],
-                                       output_path: Path):
+def save_classification_results_to_csv(results: List[ClassificationResult], output_path: Path):
     if not results:
         print("No results to save to CSV.")
         return
@@ -84,14 +80,10 @@ def save_classification_results_to_csv(results: List[ClassificationResult],
         }
         if res.attribution_paths:
             row.update({
-                'attribution_path':
-                str(res.attribution_paths.attribution_path),
-                'logits':
-                str(res.attribution_paths.logits),
-                'ffn_activity_path':
-                str(res.attribution_paths.ffn_activity_path),
-                'class_embedding_path':
-                str(res.attribution_paths.class_embedding_path),
+                'attribution_path': str(res.attribution_paths.attribution_path),
+                'logits': str(res.attribution_paths.logits),
+                'ffn_activity_path': str(res.attribution_paths.ffn_activity_path),
+                'class_embedding_path': str(res.attribution_paths.class_embedding_path),
             })
         else:
             row.update({

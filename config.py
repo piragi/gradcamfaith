@@ -136,6 +136,11 @@ class ClassificationConfig:
     analysis = False
     data_collection = False
 
+    percentile_threshold = 80
+    attention_threshold = 30
+    top_k_features = 20
+    base_strength = 1.5
+
     # Device configuration
     device: Optional[str] = None  # None will use CUDA if available
 
