@@ -26,7 +26,6 @@ from data_types import (
     ClassificationResult, FFNActivityItem, HeadContributionItem, PerturbationPatchInfo, PerturbedImageRecord
 )
 from faithfulness import evaluate_and_report_faithfulness
-from head_analysis import run_head_analysis
 from translrp.ViT_new import VisionTransformer
 from transmm_sfaf import (generate_attribution_prisma, load_models, load_or_build_sf_af_dictionary)
 
@@ -230,7 +229,8 @@ def classify_explain_single_image(
     vit_model: model.VisionTransformer,  # Hooks should be registered on this model instance
     device: torch.device,
     sae,
-    class_specific_features
+    class_specific_features,
+    class_analysis
 ) -> ClassificationResult:
     """
     Classifies a single image AND generates explanations.
@@ -260,7 +260,8 @@ def classify_explain_single_image(
         device=device,
         sae=sae,
         sf_af_dict=class_specific_features,
-        enable_steering=config.file.weighted
+        enable_steering=config.file.weighted,
+        class_analysis=class_analysis,
     )
 
     # Extract gradient analysis info if present
@@ -349,7 +350,7 @@ def classify_explain_single_image(
 
 def classify_and_explain_dataset(
     config: PipelineConfig, vit_model: model.VisionTransformer, device: torch.device,
-    image_paths_to_process: List[Path], output_results_csv_path: Path, sae, class_specific_features
+    image_paths_to_process: List[Path], output_results_csv_path: Path, sae, class_specific_features, class_analysis
 ) -> Tuple[List[ClassificationResult], List[Dict[str, Any]]]:  # Return gradient infos too
     collected_results: List[ClassificationResult] = []
     gradient_infos: List[Dict[str, Any]] = []
@@ -359,7 +360,7 @@ def classify_and_explain_dataset(
     ):
         try:
             result, gradient_info = classify_explain_single_image(
-                config, image_path, vit_model, device, sae, class_specific_features
+                config, image_path, vit_model, device, sae, class_specific_features, class_analysis
             )
             collected_results.append(result)
             gradient_infos.append(gradient_info)
@@ -776,15 +777,22 @@ def run_pipeline(config: PipelineConfig,
     sae, vit_model = load_models()
     # class_specific_features = find_class_specific_features(vit_model, sae)
     class_specific_features = load_or_build_sf_af_dictionary(
-        vit_model, sae, n_samples=50000, layer_idx=6, dict_path=f"./results/train/sfaf_dir_l6.pt", rebuild=False
+        vit_model,
+        sae,
+        n_samples=50000,
+        layer_idx=6,
+        dict_path=f"./sae_dictionaries/sfaf_stealth_l6_alignment_min10.pt",
+        rebuild=False
     )
+    class_analysis = None
     print("ViT model loaded, hooks registered, and set to eval mode.")
 
     originals_csv_path = config.file.output_dir / f"classification_results_originals_explained{config.file.output_suffix}.csv"
     print(f"Running Classify & Explain for original images")
 
     original_results_explained, gradient_infos = classify_and_explain_dataset(
-        config, vit_model, device, original_image_paths, originals_csv_path, sae, class_specific_features
+        config, vit_model, device, original_image_paths, originals_csv_path, sae, class_specific_features,
+        class_analysis
     )
 
     # Quick hypothesis test: Check if low gradient ratios correlate with attribution improvement

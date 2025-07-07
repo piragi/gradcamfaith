@@ -29,19 +29,19 @@ if __name__ == "__main__":
     # How selective for S_f? (Top 20%, 10%, 5%)
     # Rationale: Your analysis showed S_f varies a lot. We need to test how much signal we need.
     # 80 is a good baseline, 95 is for extreme purity.
-    percentile_thresholds = [80, 90]
+    percentile_thresholds = [80]
 
     # How "stealthy"? (Bottom 30%, 50%)
     # Rationale: Test the definition of the "blind spot". Is it only the most ignored features or a wider set?
-    attention_thresholds = [30, 50]
+    attention_thresholds = [50]
 
     # How many features to use? (CRITICAL PARAMETER)
     # Rationale: This is your noise vs. signal control. A small 'k' is high-purity. A large 'k' assumes many features work together.
-    top_k_features_list = [25, 50, 75]
+    top_k_features_list = [75]
 
     # How strong to make the effect?
     # Rationale: Test gentle, moderate, and aggressive boosting. Too much can hurt faithfulness.
-    base_strengths = [3.5, 5.0]
+    base_strengths = [1.5]
 
     for pct in percentile_thresholds:
         for attn in attention_thresholds:

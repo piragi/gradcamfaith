@@ -107,58 +107,127 @@ class VisionSAEFeatureSelector:
             patch_mean = spatial_patterns.mean(dim=0)
             self.feature_stats['cls_patch_diff'] = (cls_pattern - patch_mean).abs()
 
-    def compute_steerability_scores(self, dataloader, n_samples=100, strengths=[10, 50, 150]):
+    def compute_steerability_scores(
+        self, dataloader, n_samples=1000, strengths=[10, 50, 150], batch_size=16, feature_batch_size=64
+    ):
         """
-        Compute steerability scores for vision model features
+        Compute steerability scores for vision model features using batched processing
+        
+        Args:
+            dataloader: DataLoader for test images
+            n_samples: Total number of samples to test on
+            strengths: List of steering strengths to test
+            batch_size: Batch size for processing images
+            feature_batch_size: Number of features to test simultaneously
         """
         n_features = self.sae.cfg.d_sae
         steerability_scores = torch.zeros(n_features).to(self.device)
 
-        # Collect test samples
-        test_images = []
-        test_labels = []
-        for imgs, labels in dataloader:
-            test_images.append(imgs)
-            test_labels.append(labels)
-            if sum(len(b) for b in test_images) >= n_samples:
-                break
+        # Skip dead features early
+        if self.feature_stats['activation_frequency'] is not None:
+            active_features = torch.where(self.feature_stats['activation_frequency'] >= 0.001)[0]
+            self.logger.info(f"Testing {len(active_features)}/{n_features} active features")
+        else:
+            active_features = torch.arange(n_features)
 
-        test_images = torch.cat(test_images)[:n_samples].to(self.device)
-        test_labels = torch.cat(test_labels)[:n_samples].to(self.device)
+        # Process features in batches
+        for feat_start in range(0, len(active_features), feature_batch_size):
+            feat_end = min(feat_start + feature_batch_size, len(active_features))
+            feature_batch = active_features[feat_start:feat_end]
 
-        # Test each feature
-        for feature_idx in range(n_features):
-            if self.feature_stats['activation_frequency'][feature_idx] < 0.001:
-                continue  # Skip dead features
+            self.logger.info(f"Processing features {feat_start}-{feat_end-1}/{len(active_features)}")
 
-            feature_effects = []
+            # Accumulate effects for this feature batch
+            feature_effects = torch.zeros(len(feature_batch), len(strengths)).to(self.device)
+            samples_processed = 0
 
-            for strength in strengths:
+            # Process images in batches
+            for imgs, labels in dataloader:
+                if samples_processed >= n_samples:
+                    break
+
+                # Limit batch size to remaining samples
+                current_batch_size = min(imgs.shape[0], n_samples - samples_processed)
+                imgs = imgs[:current_batch_size].to(self.device)
+
                 with torch.no_grad():
-                    # Get baseline predictions
-                    baseline_logits = self.model(test_images)
+                    # Get baseline predictions once
+                    baseline_logits = self.model(imgs)
                     baseline_probs = F.softmax(baseline_logits, dim=-1)
 
-                    # Define steering hook
-                    def steering_hook(resid, hook):
-                        # Only steer the CLS token for classification
-                        sae_encoded = self.sae.encode(resid)[1]
-                        sae_encoded[:, 0, feature_idx] = strength
-                        return self.sae.decode(sae_encoded)
+                    # Test each strength
+                    for strength_idx, strength in enumerate(strengths):
+                        # Test all features in this batch simultaneously
+                        batch_effects = self._test_feature_batch_steering(imgs, baseline_probs, feature_batch, strength)
+                        feature_effects[:, strength_idx] += batch_effects * current_batch_size
 
-                    # Run with steering
-                    with self.model.hooks(fwd_hooks=[(self.sae.cfg.hook_point, steering_hook)]):
-                        steered_logits = self.model(test_images)
-                        steered_probs = F.softmax(steered_logits, dim=-1)
+                samples_processed += current_batch_size
 
-                    # Measure effect concentration
-                    prob_changes = (steered_probs - baseline_probs)**2
-                    feature_effects.append(prob_changes.mean().item())
+                # Clean up batch
+                del imgs, baseline_logits, baseline_probs
+                if samples_processed % (batch_size * 10) == 0:  # Periodic cleanup
+                    torch.cuda.empty_cache()
 
-            # Steerability is the maximum effect across strengths
-            steerability_scores[feature_idx] = max(feature_effects)
+            # Normalize by number of samples and take max across strengths
+            if samples_processed > 0:
+                feature_effects = feature_effects / samples_processed
+                max_effects = feature_effects.max(dim=1)[0]  # Max across strengths
+                steerability_scores[feature_batch] = max_effects
+
+            # Clean up feature batch results
+            del feature_effects
 
         self.feature_stats['steerability_scores'] = steerability_scores
+        self.logger.info("Steerability computation complete")
+
+    def _test_feature_batch_steering(self, imgs, baseline_probs, feature_indices, strength):
+        """
+        Test steering effect for a batch of features simultaneously
+        
+        Args:
+            imgs: Input images [batch_size, ...]
+            baseline_probs: Baseline probabilities [batch_size, n_classes]
+            feature_indices: Features to test [n_features_to_test]
+            strength: Steering strength (scalar)
+            
+        Returns:
+            effects: Effect size for each feature [n_features_to_test]
+        """
+        batch_size = imgs.shape[0]
+        n_test_features = len(feature_indices)
+
+        # We'll test features one by one to avoid memory explosion
+        # (testing all simultaneously would require n_features copies of the batch)
+        effects = torch.zeros(n_test_features).to(self.device)
+
+        for i, feature_idx in enumerate(feature_indices):
+            # Define steering hook for this specific feature
+            def steering_hook(resid, hook):
+                with torch.no_grad():
+                    # Get SAE encoding
+                    sae_encoded = self.sae.encode(resid)[1]  # [batch, seq_len, d_sae]
+
+                    # Steer only the CLS token (index 0) for classification
+                    sae_encoded[:, 0, feature_idx] = strength
+
+                    # Decode back
+                    result = self.sae.decode(sae_encoded)
+                    del sae_encoded  # Clean up intermediate tensor
+                    return result
+
+            # Run with steering hook
+            with self.model.hooks(fwd_hooks=[(self.sae.cfg.hook_point, steering_hook)]):
+                steered_logits = self.model(imgs)
+                steered_probs = F.softmax(steered_logits, dim=-1)
+
+            # Measure effect (mean squared change in probabilities)
+            prob_changes = (steered_probs - baseline_probs)**2
+            effects[i] = prob_changes.mean()
+
+            # Clean up
+            del steered_logits, steered_probs
+
+        return effects
 
     def compute_class_effects(self, dataloader, n_samples=1000):
         """
@@ -404,7 +473,7 @@ if __name__ == "__main__":
             3: 2
         }.get(t, t)  # Your label mapping
     )
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
 
     # Create feature selector
     selector = VisionSAEFeatureSelector(sae, model, n_classes=6)
@@ -444,4 +513,3 @@ if __name__ == "__main__":
         print(f"  Top feature {top_feat} stats:")
         print(f"    Activation frequency: {selector.feature_stats['activation_frequency'][top_feat]:.3f}")
         print(f"    Steerability: {selector.feature_stats['steerability_scores'][top_feat]:.3f}")
-

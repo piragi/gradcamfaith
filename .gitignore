@@ -13,5 +13,6 @@ hyper-kvasir/*
 model/
 models/
 results_transmmplus/
-*.ipynb
-
+hyper-kvasir_imagefolder/*
+wandb/
+*.pt

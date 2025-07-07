@@ -24,8 +24,13 @@ def load_models():
     """Load SAE and fine-tuned model"""
     # Load SAE
     # layer 6
-    # sae_path = "./models/sweep/sae_k128_exp8_lr0.0002/1756558b-vit_medical_sae_k_sweep/n_images_49276.pt"
-    sae_path = "./models/sweep/sae_k128_exp8_lr0.0002/e1074fed-vit_medical_sae_k_sweep/n_images_49276.pt"
+    sae_path = "./models/sweep/sae_k128_exp8_lr0.0002/1756558b-vit_medical_sae_k_sweep/n_images_49276.pt"
+    # layer 9
+    # sae_path = "./models/sweep/sae_k128_exp8_lr0.0002/e1074fed-vit_medical_sae_k_sweep/n_images_49276.pt"
+    # layer 10
+    # sae_path = "./models/sweep/vanilla_l1_5e-06_exp8_lr1e-05/28ebc3ab-vit_medical_sae_vanilla_sweep/n_images_49276.pt"
+    # layer 11
+    # sae_path = "./models/sweep/vanilla_l1_1e-05_exp8_lr1e-05/518dec78-vit_medical_sae_vanilla_sweep/n_images_49276.pt"
     sae = SparseAutoencoder.load_from_pretrained(sae_path)
     sae.cuda().eval()
 
@@ -48,6 +53,185 @@ def load_models():
     model.cuda().eval()
 
     return sae, model
+
+
+def analyze_single_image_correlation(
+    sae_codes: torch.Tensor,  # From your existing code
+    attribution_map: np.ndarray,  # The final attribution result
+    predicted_class: int,
+    sf_af_dict: Dict[str, torch.Tensor],
+    feature_id: Optional[int] = None  # If you want to analyze a specific feature
+) -> Dict[str, Any]:
+    """
+    Simplified version for analyzing correlation in a single image.
+    Can be called right after attribution generation.
+    """
+    if feature_id is not None:
+        # Analyze specific feature
+        codes_spatial = sae_codes[0, 1:, feature_id]  # Spatial tokens for this feature
+        active_patches = (codes_spatial > 0.1).cpu().numpy()
+
+        if active_patches.sum() < 2:
+            return {'correlation': 0, 'active': False}
+
+        # Resize attribution to patch space
+        n_patches = len(codes_spatial)
+        n_patches_per_side = int(np.sqrt(n_patches))
+
+        attr_tensor = torch.tensor(attribution_map).unsqueeze(0).unsqueeze(0)
+        attr_patches = F.adaptive_avg_pool2d(attr_tensor, (n_patches_per_side, n_patches_per_side))
+        attr_patches = attr_patches.squeeze().flatten().numpy()
+
+        # Compute correlation
+        corr, p_val = stats.pearsonr(active_patches.astype(float), attr_patches)
+
+        return {
+            'feature_id': feature_id,
+            'correlation': corr,
+            'p_value': p_val,
+            'active': True,
+            'n_active_patches': active_patches.sum(),
+            's_f': sf_af_dict['S_f'][feature_id, predicted_class].item(),
+            'a_f': sf_af_dict['A_f'][feature_id, predicted_class].item()
+        }
+    else:
+        # Analyze all features - use the full function
+        return compute_feature_attribution_correlation(sae_codes, attribution_map)
+
+
+def build_distributional_sa_dictionary(
+    model: HookedSAEViT,
+    sae: SparseAutoencoder,
+    dataloader: torch.utils.data.DataLoader,
+    n_samples: int = 10000,
+    layer_idx: int = 6,
+    save_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Builds a "more reflected" dictionary by storing the full distribution of
+    S_f (steerability) and A_f (attention) values for each feature,
+    instead of just their mean. This captures context-dependency and avoids
+    the "averaging out" problem.
+
+    Returns a dictionary containing lists of lists for S_f and A_f values.
+    """
+    device = next(model.parameters()).device
+    n_features = sae.cfg.d_sae
+    n_classes = model.head.out_features
+
+    # --- NEW: Initialize data structures for storing distributions ---
+    # We use a nested list structure: [feature][class] -> [list of values]
+    # This is more memory-efficient than a giant tensor for sparse data.
+    S_f_distributions = [[[] for _ in range(n_classes)] for _ in range(n_features)]
+    A_f_distributions = [[[] for _ in range(n_classes)] for _ in range(n_features)]
+    feature_class_counts = torch.zeros(n_features, n_classes, device=device)
+
+    # --- Hook setup (remains the same) ---
+    attn_hook_name = f"blocks.{layer_idx}.attn.hook_pattern"
+    resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
+
+    samples_processed = 0
+    print(f"Building Distributional S_f/A_f dictionary for layer {layer_idx}...")
+
+    for imgs, labels in tqdm(dataloader, desc="Processing batches"):
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+        batch_size = imgs.shape[0]
+
+        # --- Forward pass & Gradient calculation (remains the same) ---
+        resid_storage, attn_storage = {}, {}
+
+        def save_resid_hook(tensor, hook):
+            tensor.requires_grad_(True)
+            resid_storage['resid'] = tensor
+
+        def save_attn_hook(tensor, hook):
+            tensor.requires_grad_(True)
+            attn_storage['attn'] = tensor
+
+        fwd_hooks = [(resid_hook_name, save_resid_hook), (attn_hook_name, save_attn_hook)]
+        model.zero_grad()
+        with model.hooks(fwd_hooks=fwd_hooks):
+            logits = model(imgs)
+        resid, attn = resid_storage['resid'], attn_storage['attn']
+
+        with torch.no_grad():
+            _, codes = sae.encode(resid)
+
+        one_hot_labels = F.one_hot(labels, num_classes=n_classes).float()
+        target_values = (logits * one_hot_labels).sum()
+        resid_grad, attn_grad = torch.autograd.grad(outputs=target_values, inputs=[resid, attn])
+
+        # --- S_f and A_f calculation per image (remains the same) ---
+        with torch.no_grad():
+            grad_weighted_attn = (attn * attn_grad.abs()).sum(dim=1)
+            cls_to_patch_attn = grad_weighted_attn[:, 0, 1:]
+            active_codes_mask = codes[:, 1:, :] > 0.0
+            A_f_per_img = torch.einsum('bt,btf->bf', cls_to_patch_attn, active_codes_mask.float())
+
+            dir_deriv = torch.einsum('bd,fd->bf', resid_grad[:, 0, :], sae.W_dec)
+            codes_no_cls = codes[:, 1:, :]
+            S_f_per_img = (codes_no_cls * dir_deriv.unsqueeze(1)).sum(1)
+
+        # --- NEW: Distributional Aggregation ---
+        # This part is completely different. We loop through the batch and append.
+        active_features_per_img = (codes[:, 1:, :] > 0.0).any(1)  # Shape: (B, F)
+
+        # Move to CPU for efficient list appending
+        S_batch_cpu = S_f_per_img.cpu()
+        A_batch_cpu = A_f_per_img.cpu()
+        active_features_cpu = active_features_per_img.cpu()
+        labels_cpu = labels.cpu()
+
+        for i in range(batch_size):  # Loop over each image in the batch
+            img_label = labels_cpu[i].item()
+            # Find which features were active for this image
+            active_indices = active_features_cpu[i].nonzero(as_tuple=True)[0]
+
+            if len(active_indices) == 0:
+                continue
+
+            # Get the S_f and A_f values for this image's active features
+            s_values_for_active_feats = S_batch_cpu[i, active_indices]
+            a_values_for_active_feats = A_batch_cpu[i, active_indices]
+
+            # Append these values to our global distribution lists
+            for j, feat_idx in enumerate(active_indices):
+                S_f_distributions[feat_idx][img_label].append(s_values_for_active_feats[j].item())
+                A_f_distributions[feat_idx][img_label].append(a_values_for_active_feats[j].item())
+
+            # Update counts (can still be done on GPU for speed)
+            feat_idx_gpu = active_indices.to(device)
+            class_idx_gpu = labels[i].expand(len(feat_idx_gpu))
+            feature_class_counts.index_put_((feat_idx_gpu, class_idx_gpu),
+                                            torch.ones_like(feat_idx_gpu, dtype=torch.float),
+                                            accumulate=True)
+
+        samples_processed += batch_size
+        if n_samples is not None and samples_processed >= n_samples:
+            break
+
+    # --- Final Dictionary Assembly ---
+    # No normalization needed, we have the raw distributions.
+    dictionary = {
+        'S_f_distributions': S_f_distributions,
+        'A_f_distributions': A_f_distributions,
+        'feature_counts': feature_class_counts.cpu(),
+        'layer_idx': layer_idx,
+        'n_samples': samples_processed,
+        'n_features': n_features,
+        'n_classes': n_classes
+    }
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        # Use pickle for saving complex Python objects like lists of lists
+        import pickle
+        with open(save_path, 'wb') as f:
+            pickle.dump(dictionary, f)
+        print(f"Saved distributional dictionary to {save_path}")
+
+    return dictionary
 
 
 def build_steerability_attention_dictionary(
@@ -219,7 +403,7 @@ def load_or_build_sf_af_dictionary(
     """Load existing dictionary or build a new one"""
     if not rebuild and Path(dict_path).exists():
         print(f"Loading existing S_f/A_f dictionary from {dict_path}")
-        return torch.load(dict_path)
+        return torch.load(dict_path, weights_only=False)
 
     # Build new dictionary
     label_map = {2: 3, 3: 2}
@@ -266,6 +450,7 @@ def transmm_prisma(
     enable_steering: bool = True,
     steering_layer: int = 6,
     steering_strength: float = 1.5,
+    class_analysis=None
 ) -> Tuple[Dict[str, Any], np.ndarray, Dict[str, Any]]:
     """
     TransMM with S_f/A_f based patch boosting.
@@ -348,13 +533,63 @@ def transmm_prisma(
 
     if enable_steering and sae and sf_af_dict and "codes" in sae_codes:
 
-        boost_mask, selected_feat_ids = build_patch_boost_mask_adaptive_sign(
-            sae_codes['codes'],
-            sf_af_dict,
-            predicted_class_idx,
-            config=config,
+        # boost_mask, selected_feat_ids = build_adaptive_boost_mask(
+        # sae_codes=sae_codes["codes"],
+        # stealth_dict=sf_af_dict,  # Load this once at the start
+        # predicted_class=predicted_class_idx,
+        # base_strength=1.5,  # Tune this
+        # top_k=2000,  # Tune this
+        # device=device,
+        # )
+        # boost_mask, selected_feat_ids = build_patch_boost_mask_from_stealth(
+        # sae_codes["codes"],
+        # sf_af_dict,
+        # boost_strength=1.1,  # or expose this through your config
+        # device=device,
+        # )
+        #
+        # boost_mask, boosted_ids, avoided_ids = build_class_specific_boost_mask(
+        # sae_codes["codes"],
+        # sf_af_dict,
+        # class_analysis,
+        # target_class=predicted_class_idx,  # e.g., for "polyp" class
+        # top_k=30,
+        # boost_strength=2.0
+        # )
+
+        print(f'Predicted class: {IDX2CLS[predicted_class_idx]}')
+
+        boost_mask, selected_feat_ids = build_aligned_boost_mask(
+            sae_codes=sae_codes["codes"],
+            alignment_dict=sf_af_dict,
+            predicted_class=predicted_class_idx,
             device=device,
+            # These hyperparameters should ideally come from your config object
+            top_k=5,  # e.g., 5
+            base_strength=2.,  # e.g., 1.8
+            min_pfac_for_consideration=0.15  # e.g., 0.1
         )
+
+        if selected_feat_ids:
+            print(f"Boosting based on {len(selected_feat_ids)} features: {selected_feat_ids}")
+
+        # boost_mask, selected_feat_ids = build_adaptive_boost_mask_class(
+        # sae_codes=sae_codes["codes"],
+        # stealth_dict=sf_af_dict,
+        # predicted_class=predicted_class_idx,
+        # base_strength=5,  # Tune this
+        # top_k=1,  # Tune this
+        # ranking_metric='s_f',  # Or 'logit_impact'
+        # device=device,
+        # )
+
+        # boost_mask, selected_feat_ids = build_patch_boost_mask_adaptive_sign(
+        # sae_codes['codes'],
+        # sf_af_dict,
+        # predicted_class_idx,
+        # config=config,
+        # device=device,
+        # )
         # boost_mask, selected_feat_ids = build_patch_boost_mask_adaptive(
         # sae_codes['codes'],
         # sf_af_dict,
@@ -462,6 +697,366 @@ def transmm_prisma(
     return (prediction_result_dict, attribution_pos_np, gradient_info)
 
 
+def build_aligned_boost_mask_vectorized(
+    sae_codes: torch.Tensor,
+    alignment_dict: Dict[str, Any],
+    predicted_class: int,
+    device: torch.device,
+    top_k: int = 5,
+    base_strength: float = 1.8,
+    min_activation: float = 0.05,
+    min_pfac_for_consideration: float = 0.1,
+    min_occurrences_for_class: int = 3,
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Vectorized version of boost mask building for improved performance.
+    """
+    codes_patches = sae_codes[0, 1:]
+    n_patches, n_features = codes_patches.shape
+
+    feature_stats = alignment_dict.get('feature_stats')
+    if not feature_stats:
+        return torch.ones(n_patches, device=device), []
+
+    # Pre-compute active features
+    active_in_image_mask = (codes_patches > min_activation).any(dim=0)
+    active_indices = active_in_image_mask.nonzero(as_tuple=True)[0].cpu().numpy()
+
+    if len(active_indices) == 0:
+        return torch.ones(n_patches, device=device), []
+
+    # Pre-extract all relevant data into arrays for vectorized processing
+    n_active = len(active_indices)
+    pfac_scores = np.zeros(n_active)
+    valid_mask = np.zeros(n_active, dtype=bool)
+    feature_ids = []
+
+    # Batch process all active features
+    for i, feat_id in enumerate(active_indices):
+        if feat_id not in feature_stats:
+            continue
+
+        stats = feature_stats[feat_id]
+        raw_metrics = stats.get('raw_metrics', {})
+        if not raw_metrics:
+            continue
+
+        # Vectorized extraction of class-specific metrics
+        pfac_all = np.array(raw_metrics.get('pfac_corrs', []))
+        classes_all = np.array(raw_metrics.get('classes', []))
+
+        # Boolean mask for target class
+        class_mask = classes_all == predicted_class
+        n_class_occurrences = class_mask.sum()
+
+        if n_class_occurrences >= min_occurrences_for_class:
+            avg_pfac = pfac_all[class_mask].mean()
+            if not np.isnan(avg_pfac) and avg_pfac >= min_pfac_for_consideration:
+                pfac_scores[i] = avg_pfac
+                valid_mask[i] = True
+                feature_ids.append(feat_id)
+
+    if not any(valid_mask):
+        return torch.ones(n_patches, device=device), []
+
+    # Get top-k features using vectorized operations
+    valid_scores = pfac_scores[valid_mask]
+    valid_indices_filtered = np.array(feature_ids)
+
+    # Use argpartition for efficient top-k selection (faster than full sort)
+    if len(valid_scores) > top_k:
+        top_k_indices = np.argpartition(valid_scores, -top_k)[-top_k:]
+        # Sort just the top-k
+        top_k_indices = top_k_indices[np.argsort(valid_scores[top_k_indices])[::-1]]
+    else:
+        top_k_indices = np.argsort(valid_scores)[::-1]
+
+    selected_feature_ids = valid_indices_filtered[top_k_indices].tolist()
+
+    # Vectorized boost mask creation
+    boost_mask = torch.ones(n_patches, device=device)
+
+    # Create a tensor of selected feature indices for vectorized access
+    selected_features_tensor = torch.tensor(selected_feature_ids, device=device)
+
+    # Get all activation masks at once
+    activation_masks = codes_patches[:, selected_features_tensor] > min_activation  # (n_patches, top_k)
+
+    # Apply boost to any patch that has at least one active selected feature
+    patches_to_boost = activation_masks.any(dim=1)
+    boost_mask[patches_to_boost] *= base_strength
+
+    return boost_mask, selected_feature_ids
+
+
+def build_aligned_boost_mask(
+    sae_codes: torch.Tensor,
+    alignment_dict: Dict[str, Any],
+    predicted_class: int,
+    device: torch.device,
+    top_k: int = 5,
+    base_strength: float = 1.8,
+    min_activation: float = 0.05,
+    min_pfac_for_consideration: float = 0.1,
+    # Let's keep this gate, it's important!
+    min_occurrences_for_class: int = 1,
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Builds a boost mask by selecting features that are highly aligned with
+    baseline attribution maps for the predicted class. (Corrected version)
+    """
+    codes_patches = sae_codes[0, 1:]
+    n_patches, n_features = codes_patches.shape
+
+    feature_stats = alignment_dict.get('feature_stats')
+    if not feature_stats:
+        return torch.ones(n_patches, device=device), []
+
+    active_in_image_mask = (codes_patches > min_activation).any(dim=0)
+    class_specific_candidates = []
+
+    for feat_id_tensor in active_in_image_mask.nonzero(as_tuple=True)[0]:
+        feat_id = feat_id_tensor.item()
+        if feat_id not in feature_stats:
+            continue
+
+        stats = feature_stats[feat_id]
+        raw_metrics = stats.get('raw_metrics', {})
+        if not raw_metrics:
+            continue
+
+        pfac_for_class = [
+            pfac for pfac, cls in zip(raw_metrics.get('pfac_corrs', []), raw_metrics.get('classes', []))
+            if cls == predicted_class
+        ]
+
+        if len(pfac_for_class) < min_occurrences_for_class:
+            continue
+
+        avg_pfac = np.mean(pfac_for_class)
+
+        if np.isnan(avg_pfac) or avg_pfac < min_pfac_for_consideration:
+            continue
+
+        class_specific_candidates.append({'id': feat_id, 'score': avg_pfac, 'gini': stats.get('mean_gini_score', 0)})
+
+    if not class_specific_candidates:
+        return torch.ones(n_patches, device=device), []
+
+    # Sort candidates by their alignment score, highest first
+    # Add a guard against NaN values in sorting, which can cause errors
+    class_specific_candidates.sort(key=lambda x: x.get('score', -1), reverse=True)
+
+    top_features = class_specific_candidates[:top_k]
+    # This print statement is for debugging, you can remove it in the final version
+    selected_feature_ids = [f['id'] for f in top_features]
+
+    boost_mask = torch.ones(n_patches, device=device)
+    for feat_info in top_features:
+        feat_id = feat_info['id']
+        active_patches_mask = (codes_patches[:, feat_id] > min_activation)
+        boost_mask[active_patches_mask] *= base_strength
+
+    return boost_mask, selected_feature_ids
+
+
+def build_adaptive_boost_mask_class(
+    sae_codes: torch.Tensor,
+    stealth_dict: Dict[str, Any],
+    predicted_class: int,
+    base_strength: float = 1.8,
+    top_k: int = 10,
+    min_activation: float = 0.05,
+    ranking_metric: str = 's_f',  # 's_f' or 'logit_impact'
+    device: torch.device = torch.device("cpu"),
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Builds a highly adaptive, class-sensitive boost/suppression mask.
+
+    This function identifies the most relevant stealth features for a specific
+    image and class prediction, then creates a mask to intelligently
+    modify the attention mechanism.
+
+    Args:
+        sae_codes: SAE activations for the current image. Shape: (1, T, F).
+        stealth_dict: The dictionary from build_stealth_feature_dictionary.
+        predicted_class: The model's predicted class index for this image.
+        base_strength: The maximum boost/suppression factor (e.g., 1.8 means boost
+                       up to 1.8x, suppress down to 1/1.8x).
+        top_k: The number of top stealth features to consider for this image.
+        min_activation: The threshold to consider an SAE feature "active" in a patch.
+        ranking_metric: Which metric from the dictionary to use for ranking features.
+                        's_f' is generally preferred.
+        device: The device to perform computations on.
+
+    Returns:
+        A tuple of (boost_mask, selected_feature_ids).
+        - boost_mask: A (num_patches,) tensor of multiplicative factors.
+        - selected_feature_ids: A list of the integer IDs of the features used.
+    """
+    # --- 1. Unpack Data and Identify Contextually Active Stealth Features ---
+    codes_patches = sae_codes[0, 1:]
+    n_patches, _ = codes_patches.shape
+
+    all_stealth_ids = stealth_dict.get('feature_ids')
+    if all_stealth_ids is None or all_stealth_ids.numel() == 0:
+        return torch.ones(n_patches, device=device), []
+
+    all_stealth_ids = all_stealth_ids.to(device)
+    active_in_image_mask = (codes_patches[:, all_stealth_ids] > min_activation).any(dim=0)
+    if not active_in_image_mask.any():
+        return torch.ones(n_patches, device=device), []
+
+    contextual_stealth_ids = all_stealth_ids[active_in_image_mask]
+
+    # --- 2. Rank Active Features by Class-Specific Impact ---
+    raw_feature_data = stealth_dict.get('raw_data', {})
+    class_specific_impacts = []
+
+    # <<< CHANGED START: Map ranking_metric string to the actual key in the dictionary.
+    metric_key_map = {'s_f': 'all_s_f', 'logit_impact': 'all_impacts'}
+    # Ensure the provided ranking_metric is valid
+    if ranking_metric not in metric_key_map:
+        raise ValueError(f"Invalid ranking_metric: '{ranking_metric}'. Must be 's_f' or 'logit_impact'.")
+    metric_list_name = metric_key_map[ranking_metric]
+
+    for fid in contextual_stealth_ids.tolist():
+        feature_data = raw_feature_data.get(fid, {})
+
+        metric_values = feature_data.get(metric_list_name, [])
+        feature_classes = feature_data.get('all_classes', [])
+
+        # The list comprehension now zips the correct metric values with the classes.
+        metric_values_for_class = [
+            metric_val  # `metric_val` is now a float from the correct list
+            for metric_val, cls in zip(metric_values, feature_classes) if cls == predicted_class
+        ]
+
+        if metric_values_for_class:
+            avg_impact = np.mean(metric_values_for_class)
+            class_specific_impacts.append({'id': fid, 'impact': avg_impact})
+
+    if not class_specific_impacts:
+        return torch.ones(n_patches, device=device), []
+
+    class_specific_impacts.sort(key=lambda x: abs(x['impact']), reverse=True)  # print(class_specific_impacts)
+
+    # --- 3. Top-K Filtering ---
+    top_k_features = [f for f in class_specific_impacts][:top_k]
+    if predicted_class == 5:
+        top_k_features = [f for f in class_specific_impacts if f['id'] == 839]
+
+    if not top_k_features:
+        return torch.ones(n_patches, device=device), []
+
+    selected_feature_ids = [f['id'] for f in top_k_features]
+    print(selected_feature_ids)
+    selected_impacts = torch.tensor([f['impact'] for f in top_k_features], device=device)
+
+    # --- 4. Build the Adaptive Boost/Suppression Mask ---
+    boost_mask = torch.ones(n_patches, device=device)
+
+    max_abs_impact = selected_impacts.abs().max()
+    if max_abs_impact > 0:
+        strength_weights = selected_impacts.abs() / max_abs_impact
+    else:
+        strength_weights = torch.ones_like(selected_impacts)
+
+    for i, feat_stats in enumerate(top_k_features):
+        feat_id = feat_stats['id']
+        impact_value = feat_stats['impact']
+        strength_weight = strength_weights[i].item()
+
+        active_patches_mask = codes_patches[:, feat_id] > min_activation
+        if not active_patches_mask.any():
+            continue
+
+        if impact_value > 0:
+            adaptive_boost = 1.0 + (base_strength - 1.0) * strength_weight
+            print(f"feat_id: {feat_id}, boost: {adaptive_boost}")
+            boost_mask[active_patches_mask] *= adaptive_boost
+        else:
+            adaptive_suppression = 1.0 - (1.0 - 1.0 / base_strength) * strength_weight
+            print(f"feat_id: {feat_id}, suppression: {adaptive_suppression}")
+            boost_mask[active_patches_mask] *= adaptive_suppression
+
+    boost_mask = boost_mask.clamp(min=(1.0 / base_strength), max=base_strength)
+
+    return boost_mask, selected_feature_ids
+
+
+def build_class_specific_boost_mask(
+    sae_codes: torch.Tensor,  # (1, T, F)
+    stealth_dict: Dict[str, Any],
+    class_analysis: Dict[str, Any],  # output of analyze_class_specific_stealth_behavior
+    target_class: int,
+    boost_strength: float = 1.05,
+    activation_threshold: float = 0.10,
+    top_k: int = 500,
+    device: torch.device = torch.device("cpu"),
+) -> Tuple[torch.Tensor, List[int], List[int]]:
+    """
+    Builds a class-specific boost mask that only boosts features beneficial 
+    for the target class and avoids features harmful to that class.
+    
+    Args:
+        sae_codes: SAE feature activations (1, T, F)
+        stealth_dict: Dictionary from build_stealth_feature_dictionary
+        class_analysis: Dictionary from analyze_class_specific_stealth_behavior
+        target_class: Class ID to optimize for
+        boost_strength: Multiplicative boost factor
+        activation_threshold: Minimum activation threshold
+        top_k: Maximum number of features to consider
+        device: Device for tensor operations
+        
+    Returns:
+        boost_mask: (T-1,) tensor with boost factors
+        boosted_feat_ids: List of feature IDs that were boosted
+        avoided_feat_ids: List of feature IDs that were avoided
+    """
+    print(sae_codes)
+    codes_patches = sae_codes[0, 1:]  # (196, F)
+    n_patches, _ = codes_patches.shape
+
+    if target_class not in class_analysis['class_stats']:
+        # Fallback to universal boosting
+        return build_patch_boost_mask_from_stealth(
+            sae_codes, stealth_dict, boost_strength, activation_threshold, top_k, device
+        ) + ([], )  # Add empty avoided list
+
+    class_stats = class_analysis['class_stats'][target_class]
+    feature_details = class_stats['feature_details']
+
+    # Get beneficial and harmful features for this class
+    beneficial_features = []
+    harmful_features = []
+
+    for feat_id, details in feature_details.items():
+        if details['beneficial'] and details['count'] >= 2:  # Must appear multiple times
+            beneficial_features.append((feat_id, details['mean_impact']))
+        elif details['harmful']:
+            harmful_features.append(feat_id)
+
+    # Sort beneficial features by impact and take top-k
+    beneficial_features.sort(key=lambda x: x[1], reverse=True)
+    selected_beneficial = [fid for fid, _ in beneficial_features[:top_k]]
+
+    # Build boost mask
+    boost_mask = torch.ones(n_patches, device=device)
+    boosted_feat_ids = []
+
+    for fid in selected_beneficial:
+        # Check if feature is active in any patches
+        active_patches = codes_patches[:, fid] > activation_threshold
+        if not active_patches.any():
+            continue
+
+        boost_mask[active_patches.cpu()] *= boost_strength
+        boosted_feat_ids.append(fid)
+
+    return boost_mask, boosted_feat_ids, harmful_features
+
+
 def calculate_adaptive_strength_sign(s_value: float, s_percentile_rank: float, base_strength: float) -> float:
     """
     Calculates an adaptive strength factor.
@@ -513,7 +1108,7 @@ def build_patch_boost_mask_adaptive_sign(
     # --- 1. Get Feature Properties for Predicted Class ---
     S_f = sf_af_dict['S_f'][:, predicted_class].to(device)
     A_f = sf_af_dict['A_f'][:, predicted_class].to(device)
-    S_f_abs = S_f.abs()
+    S_f_abs = S_f
 
     # --- 2. Select Candidate Stealth Features ---
     # Find all features active in the current image to avoid calculating for all 65k
@@ -942,6 +1537,121 @@ def build_patch_boost_mask_simple(
     return boost_mask, stealth_features.tolist()
 
 
+from typing import Any, Dict, List, Tuple
+
+import torch
+
+
+def build_adaptive_boost_mask(
+    sae_codes: torch.Tensor,
+    stealth_dict: Dict[str, Any],
+    predicted_class: int,
+    base_strength: float = 1.5,
+    top_k: int = 10,
+    min_activation: float = 0.1,
+    device: torch.device = torch.device("cpu"),
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Builds a highly adaptive boost/suppression mask using a pre-computed
+    stealth feature dictionary.
+
+    This combines four strategies:
+    1.  **Context-Aware Filtering:** Only considers features active in the current image.
+    2.  **Top-K Selection:** Focuses on the most impactful (high |S_f|) features.
+    3.  **Sign-Awareness:** Boosts for constructive (S_f > 0) and suppresses for destructive (S_f < 0) features.
+    4.  **Adaptive Strength:** The effect size scales with the feature's |S_f| magnitude.
+
+    Args:
+        sae_codes: SAE activations for the current image. Shape: (1, T, F).
+        stealth_dict: The dictionary from your build_stealth_feature_dictionary function.
+        predicted_class: The model's predicted class index for this image.
+        base_strength: The maximum boost/suppression factor (e.g., 1.5 means boost up to 1.5x, suppress down to 1/1.5x).
+        top_k: The number of top stealth features to consider for this image.
+        min_activation: The threshold to consider an SAE feature "active" in a patch.
+        device: The device to perform computations on.
+
+    Returns:
+        A tuple of (boost_mask, selected_feature_ids).
+    """
+    # --- 1. Unpack data and identify active features in this image ---
+    codes_patches = sae_codes[0, 1:]  # (196, F) - Patches only
+    n_patches, _ = codes_patches.shape
+
+    # Get all potential stealth features from the dictionary
+    all_stealth_ids = stealth_dict.get('feature_ids')
+    if all_stealth_ids is None or all_stealth_ids.numel() == 0:
+        return torch.ones(n_patches, device=device), []
+
+    all_stealth_ids = all_stealth_ids.to(device)
+
+    # Find which of these are actually active in this specific image
+    active_mask = (codes_patches[:, all_stealth_ids] > min_activation).any(dim=0)
+    if not active_mask.any():
+        return torch.ones(n_patches, device=device), []
+
+    contextual_stealth_ids = all_stealth_ids[active_mask]
+
+    # --- 2. Get S_f values and select Top-K most impactful features ---
+    # We need to find the S_f values for these specific features.
+    # Your dictionary stores detailed stats we can use.
+    detailed_stats = stealth_dict['detailed_stats']
+
+    s_f_values = []
+    valid_ids = []
+    for fid in contextual_stealth_ids.tolist():
+        # Using mean_s_f as the representative S_f for this feature
+        s_f_values.append(detailed_stats[fid]['mean_s_f'])
+        valid_ids.append(fid)
+
+    if not valid_ids:
+        return torch.ones(n_patches, device=device), []
+
+    s_f_tensor = torch.tensor(s_f_values, device=device)
+    valid_ids_tensor = torch.tensor(valid_ids, device=device, dtype=torch.long)
+
+    # Select top-k based on magnitude |S_f|
+    s_f_magnitudes = s_f_tensor.abs()
+    num_to_select = min(top_k, len(s_f_magnitudes))
+
+    _, top_indices = torch.topk(s_f_magnitudes, k=num_to_select)
+
+    selected_feature_ids = valid_ids_tensor[top_indices]
+    selected_s_f_values = s_f_tensor[top_indices]
+
+    # --- 3. Build the adaptive boost/suppression mask ---
+    boost_mask = torch.ones(n_patches, device=device)
+
+    # For adaptive strength, we can normalize magnitudes to [0, 1]
+    max_magnitude = s_f_magnitudes[top_indices].max()
+    if max_magnitude > 0:
+        strength_weights = s_f_magnitudes[top_indices] / max_magnitude
+    else:
+        strength_weights = torch.ones_like(s_f_magnitudes[top_indices])
+
+    for i, feat_idx in enumerate(selected_feature_ids):
+        s_value = selected_s_f_values[i].item()
+        strength_weight = strength_weights[i].item()
+
+        # Find patches where this feature is active
+        active_patches_mask = codes_patches[:, feat_idx] > min_activation
+        if not active_patches_mask.any():
+            continue
+
+        if s_value > 0:  # Constructive -> BOOST
+            # Scale boost from 1.0 to base_strength
+            adaptive_boost = 1.0 + (base_strength - 1.0) * strength_weight
+            boost_mask[active_patches_mask] *= adaptive_boost
+        else:  # Destructive -> SUPPRESS
+            # Scale suppression from 1.0 to 1/base_strength
+            adaptive_suppression = 1.0 + (base_strength - 1.0) * strength_weight
+            boost_mask[active_patches_mask] *= adaptive_suppression
+
+    # Clamp to prevent extreme values from multiple overlapping features
+    boost_mask = boost_mask.clamp(min=(1.0 / base_strength), max=base_strength)
+
+    return boost_mask, selected_feature_ids.tolist()
+
+
 def generate_attribution_prisma(
     model: HookedSAEViT,
     input_tensor: torch.Tensor,
@@ -950,6 +1660,7 @@ def generate_attribution_prisma(
     sae: Optional[SparseAutoencoder] = None,
     sf_af_dict: Optional[Dict[str, torch.Tensor]] = None,
     enable_steering: bool = True,
+    class_analysis=None
 ) -> Dict[str, Any]:
     """
     Generate attribution with S_f/A_f based steering.
@@ -969,7 +1680,8 @@ def generate_attribution_prisma(
         config=config,
         sae=sae,
         sf_af_dict=sf_af_dict,
-        enable_steering=enable_steering
+        enable_steering=enable_steering,
+        class_analysis=class_analysis
     )
 
     # Structure output
