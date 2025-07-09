@@ -27,7 +27,7 @@ from data_types import (
 )
 from faithfulness import evaluate_and_report_faithfulness
 from translrp.ViT_new import VisionTransformer
-from transmm_sfaf import (generate_attribution_prisma, load_models, load_or_build_sf_af_dictionary)
+from transmm_sfaf import (generate_attribution_prisma, load_models, load_steering_resources)
 
 
 def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
@@ -230,6 +230,7 @@ def classify_explain_single_image(
     device: torch.device,
     sae,
     class_specific_features,
+    steering_resources: Optional[Dict[int, Dict[str, Any]]],  # ADDED
     class_analysis
 ) -> ClassificationResult:
     """
@@ -260,6 +261,7 @@ def classify_explain_single_image(
         device=device,
         sae=sae,
         sf_af_dict=class_specific_features,
+        steering_resources=steering_resources,
         enable_steering=config.file.weighted,
         class_analysis=class_analysis,
     )
@@ -349,8 +351,15 @@ def classify_explain_single_image(
 
 
 def classify_and_explain_dataset(
-    config: PipelineConfig, vit_model: model.VisionTransformer, device: torch.device,
-    image_paths_to_process: List[Path], output_results_csv_path: Path, sae, class_specific_features, class_analysis
+    config: PipelineConfig,
+    vit_model: model.VisionTransformer,
+    device: torch.device,
+    image_paths_to_process: List[Path],
+    output_results_csv_path: Path,
+    steering_resources: Optional[Dict[int, Dict[str, Any]]],  # ADDED
+    sae,
+    class_specific_features,
+    class_analysis
 ) -> Tuple[List[ClassificationResult], List[Dict[str, Any]]]:  # Return gradient infos too
     collected_results: List[ClassificationResult] = []
     gradient_infos: List[Dict[str, Any]] = []
@@ -360,7 +369,7 @@ def classify_and_explain_dataset(
     ):
         try:
             result, gradient_info = classify_explain_single_image(
-                config, image_path, vit_model, device, sae, class_specific_features, class_analysis
+                config, image_path, vit_model, device, sae, class_specific_features, steering_resources, class_analysis
             )
             collected_results.append(result)
             gradient_infos.append(gradient_info)
@@ -776,14 +785,11 @@ def run_pipeline(config: PipelineConfig,
     # vit_model = model.load_vit_model(model_path="./model/vit_b_hyperkvasir_anatomical_for_translrp.pth", device=device)
     sae, vit_model = load_models()
     # class_specific_features = find_class_specific_features(vit_model, sae)
-    class_specific_features = load_or_build_sf_af_dictionary(
-        vit_model,
-        sae,
-        n_samples=50000,
-        layer_idx=6,
-        dict_path=f"./sae_dictionaries/sfaf_stealth_l6_alignment_min10.pt",
-        rebuild=False
-    )
+    # 2. Load all steering resources (SAEs and Dictionaries) ONCE
+    # You can control which layers to use from your config file
+    steering_layers_from_config = getattr(config.classify, 'steering_layers', [6, 7, 8, 9, 10])
+    steering_resources = load_steering_resources(steering_layers_from_config)
+    print("All steering resources loaded.")
     class_analysis = None
     print("ViT model loaded, hooks registered, and set to eval mode.")
 
@@ -791,7 +797,7 @@ def run_pipeline(config: PipelineConfig,
     print(f"Running Classify & Explain for original images")
 
     original_results_explained, gradient_infos = classify_and_explain_dataset(
-        config, vit_model, device, original_image_paths, originals_csv_path, sae, class_specific_features,
+        config, vit_model, device, original_image_paths, originals_csv_path, steering_resources, sae, None,
         class_analysis
     )
 

@@ -48,49 +48,47 @@ print(f"Training dataset size: {len(train_dataset)} images")
 
 base_config = VisionModelSAERunnerConfig(
     model_name=model_name,
-    hook_point_layer=11,
+    # hook_point_layer=9,
     layer_subtype='hook_resid_post',
     cls_token_only=False,
     context_size=197,
-    expansion_factor=16,
-    lr=1e-5,
-    l1_coefficient=1e-5,
+    expansion_factor=32,
+    activation_fn_str="topk",
+    activation_fn_kwargs={'k': 1024},
+    lr=0.00002,
+    # l1_coefficient=2e-4,
     train_batch_size=4096,
     num_epochs=3,
     lr_scheduler_name="cosineannealingwarmup",
-    lr_warm_up_steps=200,
+    lr_warm_up_steps=100,
     n_batches_in_buffer=64,
     initialization_method="encoder_transpose_decoder",
     dataset_name="hyper-kvasir",
-    log_to_wandb=True,
-    wandb_project='vit_medical_sae_vanilla_sweep',
+    log_to_wandb=False,
+    wandb_project='vit_medical_sae_k_sweep',
     n_checkpoints=1,
     use_ghost_grads=True,
     dead_feature_threshold=1e-9,
     feature_sampling_window=1000,
     dead_feature_window=20,
-    activation_fn_str="relu",
 )
 
-sweep_parameters = {
-    'l1_coefficient': [1e-5]  # Sweep around the paper's successful 1e-5 value
-}
+sweep_parameters = {'hook_point_layer': [6, 7, 8, 9, 10], 'k_values': [2048]}
 
-for l1_val in sweep_parameters['l1_coefficient']:
+for layer_idx in sweep_parameters['hook_point_layer']:
     run_config = copy.deepcopy(base_config)
 
-    # Set the L1 coefficient for this specific run
-    run_config.l1_coefficient = l1_val
+    run_config.hook_point_layer = layer_idx
 
-    run_name = f"vanilla_l1_{l1_val}_exp{run_config.expansion_factor}_lr{run_config.lr}"
-    run_config.wandb_run_name = run_name
+    run_name = f"sae_k{run_config.activation_fn_kwargs['k']}_exp{run_config.expansion_factor}_lr{run_config.lr}"
+    # run_config.wandb_run_name = run_name
 
     checkpoint_dir = f'./models/sweep/{run_name}'
     os.makedirs(checkpoint_dir, exist_ok=True)
     run_config.checkpoint_path = checkpoint_dir
 
     print(f"STARTING SWEEP RUN: {run_name}")
-    print(f"Configuration: l1_coefficient={l1_val}")
+    print(f"Configuration: k={run_config.activation_fn_kwargs['k']}, expansion={run_config.expansion_factor}")
 
     trainer = VisionSAETrainer(run_config, hooked_model, train_dataset, val_dataset)
 
@@ -104,4 +102,4 @@ for l1_val in sweep_parameters['l1_coefficient']:
         continue
     finally:
         print("Finishing wandb run")
-        wandb.finish()
+        # wandb.finish()

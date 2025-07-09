@@ -1,13 +1,16 @@
 import json
+import logging
 import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path  # Already in your other code, just a reminder
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import quantus
 import torch
+import torch.nn.functional as F
 
 import vit.model as model
 import vit.preprocessing as preprocessing
@@ -74,8 +77,9 @@ def faithfulness_monotonicity_correlation():
 
 def faithfulness_pixel_flipping():
     return quantus.PixelFlipping(
-        features_in_step=224,
+        features_in_step=256,
         perturb_baseline="black",
+        normalise=False,
         perturb_func=quantus.perturb_func.baseline_replacement_by_indices,
     )
 
@@ -84,7 +88,7 @@ def faithfulness_road():
     return quantus.ROAD(
         noise=0.01,
         perturb_func=quantus.perturb_func.noisy_linear_imputation,
-        percentages=list(range(1, 50, 10)),
+        percentages=list(range(10, 80, 10)),
         display_progressbar=False,
     )
 
@@ -100,6 +104,33 @@ def faithfulness_sufficiency():
     )
 
 
+def patch_level_perturbation(arr, indices, patch_size=16, baseline_value=0.0):
+    """
+    Custom quantus perturbation function for patch-based models.
+    It receives PIXEL indices from quantus and maps them to PATCHES to perturb.
+    """
+    perturbed_arr = arr.copy()
+    batch_size, _, height, width = arr.shape
+    grid_w = width // patch_size
+
+    # We need to find which unique patches these pixel indices fall into.
+    patch_indices_to_flip = np.unique(indices // (patch_size * patch_size))
+
+    for i in range(batch_size):
+        for patch_index in patch_indices_to_flip:
+            if patch_index is None or np.isnan(patch_index): continue
+
+            row = int(patch_index) // grid_w
+            col = int(patch_index) % grid_w
+
+            start_row, end_row = row * patch_size, (row + 1) * patch_size
+            start_col, end_col = col * patch_size, (col + 1) * patch_size
+
+            perturbed_arr[i, :, start_row:end_row, start_col:end_col] = baseline_value
+
+    return perturbed_arr
+
+
 def calc_faithfulness(
     vit_model: model.VisionTransformer,
     x_batch: np.ndarray,
@@ -108,7 +139,8 @@ def calc_faithfulness(
     device: torch.device,
     n_trials: int = 5,
     nr_runs: int = 200,
-    subset_size: int = 98
+    subset_size: int = 98,
+    patch_size: int = 16,
 ) -> Dict[str, Any]:
     """
     Calculate faithfulness scores with statistical robustness through multiple trials.
@@ -143,9 +175,23 @@ def calc_faithfulness(
             name="Sufficiency",
             n_trials=1,  # Deterministic metric - so one trial enough
             estimator_fn=faithfulness_sufficiency
+        ),
+        FaithfulnessEstimatorConfig(
+            name="PixelFlipping",
+            n_trials=1,  # Deterministic metric - so one trial enough
+            estimator_fn=faithfulness_pixel_flipping,
+        ),
+        FaithfulnessEstimatorConfig(
+            name="ROAD",
+            n_trials=1,  # Deterministic metric - so one trial enough
+            estimator_fn=faithfulness_road,
         )
     ]
     results_by_estimator = {}
+
+    root_logger = logging.getLogger()
+    original_level = root_logger.level
+    root_logger.setLevel(logging.WARNING)
 
     for estimator_config in estimator_configs:
         print(f"Running estimator: {estimator_config.name}")
@@ -221,6 +267,8 @@ def calc_faithfulness(
 
             results_by_estimator[estimator_config.name] = estimator_results
 
+    root_logger.setLevel(original_level)
+
     return results_by_estimator
 
 
@@ -229,45 +277,68 @@ def evaluate_faithfulness_for_results(
     classification_results: List[ClassificationResult]
 ) -> Tuple[Dict[str, Any], np.ndarray]:
     """
-    Evaluate faithfulness scores for classification results with attributions.
-    
-    Args:
-        config: Pipeline configuration
-        vit_model: The ViT model
-        device: Device to run calculations on
-        classification_results: List of classification results with attribution paths
-        
-    Returns:
-        Tuple of (faithfulness statistics dict, class labels array)
+    Evaluate faithfulness scores...
     """
     x_batch_list = []
     y_batch_list = []
-    a_batch_list = []
+
+    # This list will hold our "fake" high-resolution attributions
+    a_batch_upsampled_list = []
+
+    patch_size = 16
 
     for result in classification_results:
-        # Load the image and preprocess
+        # Load high-res image and labels (no change here)
         img_path = result.image_path
         _, input_tensor = preprocessing.preprocess_image(str(img_path), img_size=config.classify.target_size[0])
         x_batch_list.append(input_tensor.cpu().numpy())
-
-        # Get the class prediction
         class_idx = result.prediction.predicted_class_idx
         y_batch_list.append(class_idx)
 
-        # Load the attribution
-        attribution_path = result.attribution_paths.attribution_path
-        attribution = np.load(attribution_path)
-        a_batch_list.append(attribution)
+        # --- THE SIMPLE, ELEGANT FIX IS HERE ---
+        try:
+            attribution_path = result.attribution_paths.attribution_path
+            # This is the original low-res patch map from Chefer's method,
+            # but it was saved after upsampling. So we load the upsampled one.
+            # OR, if you have the low-res one, load that. Let's assume you have the high-res one.
+            attr_map_high_res = np.load(attribution_path)  # Loads (224, 224) map
 
-    # Convert lists to numpy arrays
+            # If the loaded map is single-channel, we might need to add a channel dim
+            # and repeat it to match the input image's 3 channels.
+            # The quantus check is `x_batch.shape != a_batch.shape`
+            # x_batch shape: (N, 3, 224, 224)
+            # a_batch shape: (N, 224, 224) initially
+
+            # Reshape to (1, 224, 224) to add a channel dimension
+            attr_map_with_channel = np.expand_dims(attr_map_high_res, axis=0)
+
+            # Repeat across the channel axis 3 times to match the image
+            # Resulting shape: (3, 224, 224)
+            attr_map_3_channel = np.repeat(attr_map_with_channel, 3, axis=0)
+
+            a_batch_upsampled_list.append(attr_map_3_channel)
+
+        except Exception as e:
+            # Handle cases where attribution loading fails
+            print(f"Warning: Could not process attribution for {Path(img_path).name}. Skipping. Error: {e}")
+            x_batch_list.pop()
+            y_batch_list.pop()
+            continue
+
+    # Convert lists to final numpy arrays
     x_batch = np.stack(x_batch_list)
     y_batch = np.array(y_batch_list)
-    a_batch = np.stack(a_batch_list)
+    # This is our correctly shaped attribution batch
+    a_batch_upsampled = np.stack(a_batch_upsampled_list)
 
-    # Calculate faithfulness with the robust method
-    # Use a reasonable subset size for ViT (half of the 196 patches)
+    # Now, call the original calc_faithfulness function.
+    # We pass the upsampled attributions that have the same shape as the images.
     faithfulness_results = calc_faithfulness(
-        vit_model, x_batch, y_batch, a_batch, device, n_trials=3, nr_runs=20, subset_size=224
+        vit_model=vit_model,
+        x_batch=x_batch,
+        y_batch=y_batch,
+        a_batch_expl=a_batch_upsampled,  # Pass the "fake" high-res map
+        device=device,
     )
 
     return faithfulness_results, y_batch

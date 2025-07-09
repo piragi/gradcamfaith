@@ -73,222 +73,122 @@ def build_attribution_aligned_feature_dictionary(
     layer_idx: int = 9,
     patch_size: int = 16,
     min_occurrences: int = 5,
+    threshold: float = 0.10,
     save_path: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Builds a dictionary of features based on their alignment with baseline attribution maps,
-    using vectorized operations for efficiency.
 
-    Args:
-        model: Hooked SAE Vision Transformer.
-        sae: Sparse Autoencoder.
-        dataloader: A DataLoader that yields (image, label, path).
-        attribution_dir: Directory where pre-computed high-res attribution .npy files are stored.
-        n_samples: Maximum number of samples to process.
-        layer_idx: Transformer layer to analyze.
-        patch_size: The size of a single patch (e.g., 16 for ViT-B/16).
-        min_occurrences: Minimum times a feature must appear to be considered reliable.
-        save_path: Optional path to save the final dictionary.
-
-    Returns:
-        A dictionary containing features and their alignment/localization metrics.
-    """
     device = next(model.parameters()).device
     feature_occurrences = defaultdict(list)
     samples_processed = 0
 
     resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
     pbar = tqdm(dataloader, total=min(n_samples, len(dataloader)), desc="Analyzing feature alignment")
-    reliable_features = {}
 
     for imgs, labels, paths in pbar:
         if samples_processed >= n_samples:
             break
 
-        # Process one image at a time
-        image, label, path = imgs[0:1].to(device), labels[0].item(), paths[0]
+        img, label, path = imgs[0:1].to(device), labels[0].item(), paths[0]
 
-        # --- 1. Get SAE feature activations ---
+        # SAE codes
         with torch.no_grad():
-            _, cache = model.run_with_cache(image, names_filter=[resid_hook_name])
+            _, cache = model.run_with_cache(img, names_filter=[resid_hook_name])
             resid = cache[resid_hook_name]
             _, codes = sae.encode(resid)
+        feature_activations = codes[0, 1:]  # (n_patches, n_features)
 
-        # Patch tokens only: (196, n_features)
-        feature_activations = codes[0, 1:]
-
-        # --- 2. Load and DOWNSAMPLE the corresponding attribution map ---
+        # Attribution map
         try:
-            # More robustly find the attribution file
-            img_filename_stem = Path(path).stem
-            parts = img_filename_stem.split('_')
+            stem = Path(path).stem
+            parts = stem.split('_')
             prefix = 'train'
-            uuid = parts[0]
-            aug_part = parts[1]
-
-            # Construct a glob pattern
-            attr_pattern = str(Path(attribution_dir) / f"{prefix}_{uuid}_*_{aug_part}_attribution.npy")
-            attr_files = glob.glob(attr_pattern)
-
+            uuid, aug = parts[0], parts[1]
+            pattern = str(Path(attribution_dir) / f"{prefix}_{uuid}_*_{aug}_attribution.npy")
+            attr_files = glob.glob(pattern)
             if not attr_files:
-                logging.warning(f"Attribution not found for pattern {attr_pattern}, skipping.")
+                logging.warning(f"No attribution for pattern {pattern}")
+                continue
+            attr_map = np.load(attr_files[0])
+            if attr_map.ndim != 2:
+                logging.warning(f"Unexpected map shape {attr_map.shape} for {stem}")
                 continue
 
-            attr_path = attr_files[0]
-            if len(attr_files) > 1:
-                logging.warning(f"Multiple attributions for {img_filename_stem}, using first: {attr_path}")
+            attr_tensor = F.avg_pool2d(
+                torch.as_tensor(attr_map).float().unsqueeze_(0).unsqueeze_(0).to(device),
+                kernel_size=patch_size,
+                stride=patch_size
+            ).flatten()  # (n_patches,)
 
-            # Load and correctly downsample the map
-            attr_map_high_res = np.load(attr_path)
-
-            # Ensure it's a 2D map before processing
-            if attr_map_high_res.ndim != 2:
-                logging.warning(
-                    f"Unexpected attribution map shape {attr_map_high_res.shape} for {attr_path}, skipping."
-                )
-                continue
-
-            # Reshape for pooling: (N, C, H, W) -> (1, 1, 224, 224)
-            attr_tensor_high_res = torch.from_numpy(attr_map_high_res).unsqueeze(0).unsqueeze(0).float().to(device)
-
-            # Use average pooling to downsample to patch resolution
-            attr_tensor_patch_level_2d = F.avg_pool2d(attr_tensor_high_res, kernel_size=patch_size, stride=patch_size)
-
-            # Flatten to a vector for correlation: (1, 1, 14, 14) -> (196,)
-            attr_vec = attr_tensor_patch_level_2d.flatten()
-
-            if attr_vec.shape[0] != feature_activations.shape[0]:
-                logging.warning(
-                    f"Attribution map shape mismatch after downsampling for {img_filename_stem} "
-                    f"({attr_vec.shape[0]}) vs patch count "
-                    f"({feature_activations.shape[0]}). Check patch_size. Skipping."
-                )
-                continue
-
-            # Normalize for stable dot products and correlation
-            attr_vec = (attr_vec - attr_vec.mean()) / (attr_vec.std() + 1e-8)
-
+            attr_tensor = (attr_tensor - attr_tensor.mean()) / (attr_tensor.std() + 1e-8)
         except Exception as e:
-            logging.warning(f"Error loading or processing attribution for {img_filename_stem}: {e}, skipping.")
+            logging.warning(f"Attribution load error for {stem}: {e}")
             continue
 
-        # --- 3. VECTORIZED computation of alignment metrics for active features ---
-        active_feature_indices = (feature_activations.abs().sum(dim=0) > 1e-6).nonzero(as_tuple=True)[0]
-
-        if len(active_feature_indices) == 0:
+        # Compute PFAC only
+        active_idx = (feature_activations.abs().sum(0) > 1e-6).nonzero(as_tuple=True)[0]
+        if active_idx.numel() == 0:
             continue
 
-        # Get all active features at once
-        active_features = feature_activations[:, active_feature_indices]  # (196, n_active)
-
-        # 1. Vectorized correlations
-        # Normalize features
-        feat_means = active_features.mean(dim=0, keepdim=True)
-        feat_stds = active_features.std(dim=0, keepdim=True)
-        # Handle features with zero std
-        valid_std_mask = feat_stds.squeeze() > 1e-6
-
-        if valid_std_mask.sum() == 0:
+        feats = feature_activations[:, active_idx]  # (n_patches, n_active)
+        mu, sigma = feats.mean(0, keepdim=True), feats.std(0, keepdim=True)
+        valid = (sigma.squeeze() > 1e-6).nonzero(as_tuple=True)[0]
+        if valid.numel() == 0:
             continue
 
-        # Filter to only valid features
-        valid_indices = active_feature_indices[valid_std_mask]
-        valid_features = active_features[:, valid_std_mask]
-        valid_feat_means = feat_means[:, valid_std_mask]
-        valid_feat_stds = feat_stds[:, valid_std_mask]
+        idx_valid = active_idx[valid]
+        feats_norm = (feats[:, valid] - mu[:, valid]) / (sigma[:, valid] + 1e-8)
+        n_patches = attr_tensor.numel()
 
-        # Normalize
-        active_features_norm = (valid_features - valid_feat_means) / (valid_feat_stds + 1e-8)
-
-        # Compute correlations using matrix multiplication
-        n_patches = len(attr_vec)
-        correlations = torch.matmul(attr_vec.unsqueeze(0), active_features_norm).squeeze() / (n_patches - 1)
-
-        # 2. Vectorized AWA scores
-        awa_scores = torch.matmul(attr_vec.unsqueeze(0), valid_features).squeeze()
-
-        # 3. Vectorized Gini coefficients
-        gini_scores = batch_gini(valid_features)
-
-        # 4. Vectorized Dice scores
-        dice_scores = batch_dice(valid_features, attr_vec)
-
-        # Store results
-        for i, feat_idx in enumerate(valid_indices):
-            feature_occurrences[feat_idx.item()].append({
-                'pfac_corr': correlations[i].item(),
-                'awa_score': awa_scores[i].item(),
-                'gini_score': gini_scores[i].item(),
-                'dice_score': dice_scores[i].item(),
-                'class': label
-            })
+        pfac_vec = (attr_tensor @ feats_norm) / (n_patches - 1)  # (n_valid,)
+        for i, fid in enumerate(idx_valid):
+            feature_occurrences[fid.item()].append({'pfac_corr': pfac_vec[i].item(), 'class': label})
 
         samples_processed += 1
-        pbar.set_postfix({"Processed": samples_processed, "Active Features": len(valid_indices)})
+        pbar.set_postfix({"Processed": samples_processed})
 
-    # --- 4. Aggregate results and build final dictionary ---
-    for feat_id, occurrences in feature_occurrences.items():
-        if len(occurrences) < min_occurrences:
+    # Aggregate results
+    reliable_features: Dict[int, Any] = {}
+    for fid, occ in feature_occurrences.items():
+        if len(occ) < min_occurrences:
             continue
 
-        pfac_corrs = [o['pfac_corr'] for o in occurrences]
-        awa_scores = [o['awa_score'] for o in occurrences]
-        gini_scores = [o['gini_score'] for o in occurrences]
-        dice_scores = [o['dice_score'] for o in occurrences]
-        classes = [o['class'] for o in occurrences]
+        pfacs = [o['pfac_corr'] for o in occ]
+        classes = [o['class'] for o in occ]
 
-        mean_pfac = np.mean(pfac_corrs)
-        cv_pfac = np.std(pfac_corrs) / (abs(mean_pfac) + 1e-6)
-        consistency_score = mean_pfac * (1 - cv_pfac) * np.log1p(len(occurrences))
+        mean_pfac = float(np.mean(pfacs))
+        class_count_map = Counter(classes)
+        class_mean_pfac = {}
+        for cls, cnt in class_count_map.items():
+            vals = [p for p, c in zip(pfacs, classes) if c == cls]
+            class_mean_pfac[cls] = float(np.mean(vals))
 
-        reliable_features[feat_id] = {
+        reliable_features[fid] = {
             'mean_pfac_corr': mean_pfac,
-            'std_pfac_corr': np.std(pfac_corrs),
-            'cv_pfac_corr': cv_pfac,
-            'mean_awa_score': np.mean(awa_scores),
-            'std_awa_score': np.std(awa_scores),
-            'mean_gini_score': np.mean(gini_scores),
-            'mean_dice_score': np.mean(dice_scores),
-            'consistency_score': consistency_score,
-            'occurrences': len(occurrences),
-            'classes_activated': list(set(classes)),
-            'raw_metrics': {
-                'pfac_corrs': pfac_corrs,
-                'awa_scores': awa_scores,
-                'gini_scores': gini_scores,
-                'dice_scores': dice_scores,
-                'classes': classes
-            }
+            'occurrences': len(occ),
+            'class_count_map': dict(class_count_map),
+            'class_mean_pfac': class_mean_pfac,
+            'raw_pfacs': pfacs
         }
 
-    # --- 5. Finalize and Save Dictionary ---
-    if reliable_features:
-        sorted_features = sorted(reliable_features.items(), key=lambda item: item[1]['consistency_score'], reverse=True)
-        final_dict = {
-            'feature_stats': dict(sorted_features),
-            'metadata': {
-                'layer_idx': layer_idx,
-                'patch_size': patch_size,
-                'n_samples_processed': samples_processed,
-                'min_occurrences': min_occurrences,
-                'attribution_dir': attribution_dir
-            },
-            'metric_definitions': {
-                'pfac_corr': "Pearson Correlation between feature activations and downsampled attribution map.",
-                'awa_score': "Attribution-Weighted Activation (dot product).",
-                'gini_score': "Spatial concentration of feature activations.",
-                'dice_score': "Spatial overlap (Dice) of thresholded maps.",
-                'consistency_score': "Overall score rewarding high, stable alignment and frequency."
-            }
+    final_dict = {
+        'feature_stats': reliable_features,
+        'metadata': {
+            'layer_idx': layer_idx,
+            'patch_size': patch_size,
+            'n_samples_processed': samples_processed,
+            'min_occurrences': min_occurrences,
+            'attribution_dir': attribution_dir,
+            'threshold': threshold
+        },
+        'metric_definitions': {
+            'pfac_corr': "Pearson correlation between feature activations and attribution map"
         }
-    else:
-        final_dict = {'feature_stats': {}, 'metadata': {}}
-        logging.warning("No reliable features found meeting the criteria.")
+    }
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(final_dict, save_path)
-        logging.info(f"Attribution alignment dictionary saved to {save_path}")
+        logging.info(f"Dictionary saved to {save_path}")
 
     return final_dict
 
