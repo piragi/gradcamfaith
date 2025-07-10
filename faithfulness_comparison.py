@@ -337,7 +337,7 @@ def print_comparison_summary(comparison_results: Dict[str, Any]):
 
 
 comparison = compare_faithfulness_metrics(
-    "./results/val_weighted/faithfulness_stats_2025-07-08_13-43.json",
-    "./results/val/faithfulness_stats_2025-07-08_14-15.json", "results/val_weighted/faithfulness_comparison.json"
+    "./results/val_weighted/faithfulness_stats_2025-07-10_15-45.json",
+    "./results/val/faithfulness_stats_2025-07-10_15-14.json", "results/val_weighted/faithfulness_comparison.json"
 )
 print_comparison_summary(comparison)

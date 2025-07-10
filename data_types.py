@@ -68,6 +68,7 @@ class ClassEmbeddingRepresentationItem:
 @dataclass
 class AttributionDataBundle:
     positive_attribution: np.ndarray
+    raw_attribution: np.ndarray
     logits: Optional[np.ndarray]  # Can be None
     ffn_activities: List[FFNActivityItem]
     class_embedding_representations: List[ClassEmbeddingRepresentationItem]
@@ -96,6 +97,7 @@ class AttributionDataBundle:
 @dataclass
 class AttributionOutputPaths:
     attribution_path: Path
+    raw_attribution_path: Path
     logits: Path  # Path to file which might contain an empty array
     ffn_activity_path: Path
     class_embedding_path: Path

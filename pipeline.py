@@ -114,6 +114,7 @@ def save_attribution_bundle_to_files(
     io_utils.ensure_directories([file_config.attribution_dir])
 
     attribution_path = file_config.attribution_dir / f"{image_stem}_attribution.npy"
+    raw_attribution_path = file_config.attribution_dir / f"{image_stem}_raw_attribution.npy"
     logits_path = Path("")
     ffn_activity_path = Path("")
     class_embedding_path = Path("")
@@ -121,6 +122,7 @@ def save_attribution_bundle_to_files(
 
     # Save positive attribution
     np.save(attribution_path, attribution_bundle.positive_attribution)
+    np.save(raw_attribution_path, attribution_bundle.raw_attribution)
 
     # Save logits (save empty array if None)
     if attribution_bundle.logits is not None:
@@ -175,6 +177,7 @@ def save_attribution_bundle_to_files(
 
     return AttributionOutputPaths(
         attribution_path=attribution_path,
+        raw_attribution_path=raw_attribution_path,
         logits=logits_path,
         ffn_activity_path=ffn_activity_path,
         class_embedding_path=class_embedding_path,
@@ -267,17 +270,7 @@ def classify_explain_single_image(
     )
 
     # Extract gradient analysis info if present
-    gradient_info = raw_attribution_result_dict.get("gradient_analysis", {})
-
-    # Log gradient info for quick inspection
-    if gradient_info and 'boosted_feature_idx' in gradient_info:
-        print(f"\n--- Gradient Analysis for {image_path.name} ---")
-        print(f"  Boosted Feature: {gradient_info['boosted_feature_idx']}")
-        print(f"  Gradient Magnitude: {gradient_info['boosted_grad_magnitude']:.6f}")
-        print(f"  Activation Strength: {gradient_info['boosted_activation_strength']:.6f}")
-        print(f"  Grad/Act Ratio: {gradient_info['boosted_grad_to_act_ratio']:.6f}")
-        print(f"  Gradient Percentile: {gradient_info['boosted_grad_percentile']:.1f}%")
-        print(f"  Gradient Sparsity: {gradient_info['gradient_sparsity']:.3f}")
+    raw_attr = raw_attribution_result_dict.get("raw_attribution", {})
 
     # 3. Instantiate ClassificationPrediction from the "predictions" field
     prediction_data = raw_attribution_result_dict["predictions"]
@@ -330,6 +323,7 @@ def classify_explain_single_image(
     # 5. Instantiate AttributionDataBundle
     attribution_bundle = AttributionDataBundle(
         positive_attribution=raw_attribution_result_dict["attribution_positive"],
+        raw_attribution=raw_attr,
         logits=raw_attribution_result_dict.get("logits"),
         ffn_activities=ffn_activity_items,
         class_embedding_representations=class_embedding_items,
@@ -347,7 +341,7 @@ def classify_explain_single_image(
     # 8. Cache the combined result
     io_utils.save_to_cache(cache_path, final_result)
 
-    return final_result, gradient_info
+    return final_result, None
 
 
 def classify_and_explain_dataset(
@@ -787,7 +781,7 @@ def run_pipeline(config: PipelineConfig,
     # class_specific_features = find_class_specific_features(vit_model, sae)
     # 2. Load all steering resources (SAEs and Dictionaries) ONCE
     # You can control which layers to use from your config file
-    steering_layers_from_config = getattr(config.classify, 'steering_layers', [6, 7, 8, 9, 10])
+    steering_layers_from_config = getattr(config.classify, 'steering_layers', [7, 8, 9])
     steering_resources = load_steering_resources(steering_layers_from_config)
     print("All steering resources loaded.")
     class_analysis = None

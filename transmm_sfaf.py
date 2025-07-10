@@ -239,8 +239,8 @@ def transmm_prisma(
                     alignment_dict=resources["dict"],
                     predicted_class=predicted_class_idx,
                     device=device,
-                    top_k=5,
-                    base_strength=2.5,
+                    top_k=15,
+                    base_strength=1.2,
                     min_pfac_for_consideration=0.1,
                     min_occurrences_for_class=10
                 )
@@ -253,6 +253,7 @@ def transmm_prisma(
         R_pos = R_pos + apply_self_attention_rules(R_pos, cam_pos_avg)
 
     transformer_attribution_pos = R_pos[0, 1:].clone()
+    raw_patch_map = transformer_attribution_pos.cpu().numpy()  # shape (196,)
 
     # ============ RESHAPE AND NORMALIZE ============
 
@@ -271,12 +272,6 @@ def transmm_prisma(
     normalize_fn = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x) + 1e-8) if (np.max(x) - np.min(x)) > 1e-8 else x
     attribution_pos_np = normalize_fn(attribution_pos_np)
 
-    # Gradient info
-    gradient_info = {
-        # 'boosted_features': selected_feat_ids,
-        # 'num_boosted_features': len(selected_feat_ids),
-        'lambda_used': 0.5
-    }
     # Clean up
     del transformer_attribution_pos, input_tensor, one_hot, loss
     del gradients, activations
@@ -285,7 +280,7 @@ def transmm_prisma(
     torch.cuda.empty_cache()
     gc.collect()
 
-    return (prediction_result_dict, attribution_pos_np, gradient_info)
+    return (prediction_result_dict, attribution_pos_np, raw_patch_map)
 
 
 @torch.no_grad()
@@ -374,13 +369,9 @@ def generate_attribution_prisma(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load S_f/A_f dictionary if not provided
-    if sf_af_dict is None and sae is not None:
-        sf_af_dict = load_or_build_sf_af_dictionary(model, sae)
-
     input_tensor = input_tensor.to(device)
 
-    (pred_dict, pos_attr_np, gradient_info) = transmm_prisma(
+    (pred_dict, pos_attr_np, raw_attr) = transmm_prisma(
         model_prisma=model,
         input_tensor=input_tensor,
         steering_resources=steering_resources,
@@ -393,7 +384,7 @@ def generate_attribution_prisma(
     return {
         "predictions": pred_dict,
         "attribution_positive": pos_attr_np,
-        "gradient_analysis": gradient_info,
+        "raw_attribution": raw_attr,
         "logits": None,
         "ffn_activity": [],
         "class_embedding_representation": [],
