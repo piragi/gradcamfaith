@@ -1,6 +1,6 @@
 import glob
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -8,60 +8,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision  # Required for the dataset with paths
-from scipy.stats import pearsonr
 from tqdm import tqdm
 from vit_prisma.models.base_vit import HookedSAEViT
 from vit_prisma.sae import SparseAutoencoder
 
-from transmm_sfaf import (IDX2CLS, get_processor_for_precached_224_images, load_models)
+from transmm_sfaf import (SAE_CONFIG, get_processor_for_precached_224_images, load_models)
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-def batch_gini(features: torch.Tensor) -> torch.Tensor:
-    """
-    Calculates Gini coefficients for multiple features at once.
-    Args:
-        features: (n_patches, n_features) tensor
-    Returns:
-        (n_features,) tensor of Gini coefficients
-    """
-    # Handle edge cases
-    if features.shape[1] == 0:
-        return torch.tensor([])
-
-    # Sort each feature column
-    sorted_features, _ = torch.sort(features.abs(), dim=0)
-    n = features.shape[0]
-    cumsum = torch.cumsum(sorted_features, dim=0)
-
-    # Avoid division by zero
-    cumsum_last = cumsum[-1].clamp(min=1e-8)
-
-    return (n + 1 - 2 * cumsum.sum(dim=0) / cumsum_last) / n
-
-
-def batch_dice(features: torch.Tensor, target: torch.Tensor, threshold: float = 0.1) -> torch.Tensor:
-    """
-    Calculates Dice coefficients for multiple features against a target.
-    Args:
-        features: (n_patches, n_features) tensor
-        target: (n_patches,) tensor
-        threshold: threshold for binarization
-    Returns:
-        (n_features,) tensor of Dice coefficients
-    """
-    feat_masks = (features > threshold).float()
-    target_mask = (target > threshold).float().unsqueeze(1)
-
-    intersections = (feat_masks * target_mask).sum(dim=0)
-    unions = feat_masks.sum(dim=0) + target_mask.sum()
-
-    return (2 * intersections / (unions + 1e-8))
-
-
-# --- Main Dictionary Building Function ---
 
 
 def build_attribution_aligned_feature_dictionary(
@@ -193,7 +147,7 @@ def build_attribution_aligned_feature_dictionary(
     return final_dict
 
 
-sae, model = load_models()
+_, model = load_models()
 # Build new dictionary
 label_map = {2: 3, 3: 2}
 
@@ -214,15 +168,19 @@ class ImageFolderWithPaths(torchvision.datasets.ImageFolder):
 
 
 train_dataset = ImageFolderWithPaths("./hyper-kvasir_imagefolder/train", get_processor_for_precached_224_images())
-dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
-layer_id = 6
-stealth_dict = build_attribution_aligned_feature_dictionary(
-    model,
-    sae,
-    dataloader,
-    n_samples=50000,
-    attribution_dir="./results/train/attributions",
-    layer_idx=layer_id,
-    min_occurrences=10,  # Must appear 3+ times
-    save_path=f"./sae_dictionaries/sfaf_stealth_l{layer_id}_alignment_min10.pt"
-)
+dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True)
+layers = range(1, 11)
+for layer_idx in layers:
+    sae_path = Path(SAE_CONFIG[layer_idx]["sae_path"])
+    sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
+
+    build_attribution_aligned_feature_dictionary(
+        model,
+        sae,
+        dataloader,
+        n_samples=50000,
+        attribution_dir="./results/train/attributions",
+        layer_idx=layer_idx,
+        min_occurrences=3,  # Must appear 3+ times
+        save_path=f"./sae_dictionaries/sfaf_stealth_l{layer_idx}_alignment_min1_128k32.pt"
+    )

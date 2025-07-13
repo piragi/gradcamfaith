@@ -1,5 +1,6 @@
 # transmm_sfaf.py
 import gc
+import math
 import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -20,25 +21,49 @@ from vit.model import IDX2CLS
 from vit.preprocessing import get_processor_for_precached_224_images
 
 SAE_CONFIG = {
+    1: {
+        "sae_path": "models/sweep/sae_l1_k128_exp64_lr0.0002/48a0f474-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l2_alignment_min3_128k64.pt"
+    },
+    2: {
+        "sae_path": "models/sweep/sae_l2_k128_exp64_lr0.0002/41db76e2-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l2_alignment_min3_128k64.pt"
+    },
+    3: {
+        "sae_path": "models/sweep/sae_l3_k128_exp64_lr0.0002/6fd8fb1a-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l3_alignment_min3_128k64.pt"
+    },
+    4: {
+        "sae_path": "models/sweep/sae_l4_k128_exp64_lr0.0002/20673e0c-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l4_alignment_min3_128k64.pt"
+    },
+    5: {
+        "sae_path": "models/sweep/sae_l5_k128_exp64_lr0.0002/e7fdbb62-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l5_alignment_min3_128k64.pt"
+    },
     6: {
-        "sae_path": "./models/sweep/sae_k1024_exp32_lr2e-05/7c6cb9fc-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l6_alignment_min10_32k512.pt"
+        "sae_path": "models/sweep/sae_l6_k128_exp64_lr0.0002/becaec1e-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l6_alignment_min3_128k64.pt"
     },
     7: {
-        "sae_path": "./models/sweep/sae_k1024_exp32_lr2e-05/8d003e41-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l7_alignment_min10_32k512.pt"
+        "sae_path": "./models/sweep/sae_l7_k128_exp32_lr2e-05/d77c1ce8-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l7_alignment_min1_32k128.pt"
     },
     8: {
-        "sae_path": "./models/sweep/sae_k1024_exp32_lr2e-05/468c2e84-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l8_alignment_min10_32k512.pt"
+        "sae_path": "models/sweep/sae_l8_k128_exp64_lr0.0002/dc5d1afd-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l8_alignment_min3_128k64.pt"
     },
     9: {
-        "sae_path": "./models/sweep/sae_k1024_exp32_lr2e-05/45c2a758-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l9_alignment_min10_32k512.pt"
+        "sae_path": "models/sweep/sae_l9_k128_exp64_lr0.0002/e06c6b1d-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l9_alignment_min3_128k64.pt"
     },
     10: {
-        "sae_path": "./models/sweep/sae_k1024_exp32_lr2e-05/37bf7afa-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l10_alignment_min10_32k512.pt"
+        "sae_path": "models/sweep/sae_l10_k128_exp64_lr0.0002/4ade9e1f-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l10_alignment_min3_128k64.pt"
+    },
+    11: {
+        "sae_path": "models/sweep/sae_l11_k128_exp64_lr0.0002/a29c74a6-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l11_alignment_min3_128k64.pt"
     },
 }
 
@@ -222,6 +247,7 @@ def transmm_prisma(
     R_pos = torch.eye(num_tokens, num_tokens, device='cpu')
     all_boosted_features = {}
 
+    print(f"Predicted class. {IDX2CLS[predicted_class_idx]}")
     for i in range(model_prisma.cfg.n_layers):
         hname = f"blocks.{i}.attn.hook_pattern"
         grad = gradients[hname + "_grad"]
@@ -234,17 +260,47 @@ def transmm_prisma(
             codes_for_layer = sae_codes.get(i)
 
             if codes_for_layer is not None:
-                boost_mask, selected_feat_ids = build_boost_mask_simple(
+                boost_mask, selected_feat_ids = build_boost_mask_hybrid_tier(
                     sae_codes=codes_for_layer,
                     alignment_dict=resources["dict"],
                     predicted_class=predicted_class_idx,
                     device=device,
-                    top_k=15,
-                    base_strength=1.2,
-                    min_pfac_for_consideration=0.1,
-                    min_occurrences_for_class=10
+                    layer_idx=i,  # ADD THIS
+                    debug=True  # To see what's being selected
                 )
-
+                # boost_mask, selected_feat_ids = build_boost_mask_light(
+                # sae_codes=codes_for_layer,
+                # alignment_dict=resources["dict"],
+                # predicted_class=predicted_class_idx,  # already here
+                # device=device,
+                # min_corr=0.55,
+                # min_occ=1,  # keep minimal
+                # top_k=6,
+                # base_str=2.1
+                # )
+                # boost_mask, selected_feat_ids = build_boost_mask_hybrid(
+                # sae_codes=codes_for_layer,
+                # alignment_dict=resources["dict"],
+                # predicted_class=predicted_class_idx,
+                # device=device,
+                # # You can now easily tune the strategy here
+                # reliable_corr_thresh=0.35,
+                # reliable_occ_thresh=20,
+                # rare_corr_thresh=0.65,  # High bar for rare features!
+                # top_k=5,
+                # base_strength=2.0
+                # )
+                # boost_mask, selected_feat_ids = build_boost_mask_simple(
+                # sae_codes=codes_for_layer,
+                # alignment_dict=resources["dict"],
+                # predicted_class=predicted_class_idx,
+                # device=device,
+                # top_k=15,
+                # base_strength=1.2,
+                # min_pfac_for_consideration=0.1,
+                # min_occurrences_for_class=10
+                # )
+                #
                 if selected_feat_ids:
                     print(f"Layer {i}: Boosting based on {len(selected_feat_ids)} features: {selected_feat_ids}")
                     cam_pos_avg[0, 1:] *= boost_mask.cpu()
@@ -281,6 +337,220 @@ def transmm_prisma(
     gc.collect()
 
     return (prediction_result_dict, attribution_pos_np, raw_patch_map)
+
+
+@torch.no_grad()
+def build_boost_mask_hybrid_tier(
+    sae_codes: torch.Tensor,
+    alignment_dict: Dict[str, Any],
+    predicted_class: int,
+    device: torch.device,
+    layer_idx: int,  # NEW: Need to know which layer we're in
+    *,
+    # --- Three-tier strategy ---
+    # Super gems: Ultra-rare, ultra-high correlation
+    super_gem_corr_thresh: float = 0.99,
+    super_gem_occ_thresh: int = 5,
+    super_gem_boost: float = 3.0,
+
+    # Rare gems: Rare but highly correlated
+    rare_corr_thresh: float = 0.99,
+    rare_occ_range: Tuple[int, int] = (1, 10),
+    rare_boost: float = 2.5,
+
+    # Reliable workhorses: Common, moderately correlated
+    reliable_corr_thresh: float = 0.2,
+    reliable_occ_thresh: int = 1,
+    reliable_boost: float = 5.,
+
+    # General parameters
+    top_k: int = 3,
+    min_activation: float = 0.05,
+    correlation_weight: bool = True,  # Weight boost by correlation strength
+    debug: bool = False
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Three-tier boost mask strategy:
+    1. Super gems: Extremely rare (<5 occurrences) with very high correlation (>0.8)
+    2. Rare gems: Rare (1-10 occurrences) with high correlation (>0.65)
+    3. Reliable workhorses: Common (>20 occurrences) with moderate correlation (>0.35)
+    """
+    codes = sae_codes[0, 1:].to(device)
+    n_patches, n_feats = codes.shape
+    act_mask = (codes > min_activation)
+    feat_any = act_mask.any(dim=0)
+
+    if not feat_any.any():
+        return torch.ones(n_patches, device=device), []
+
+    # Pull pre-computed stats
+    stats = alignment_dict["feature_stats"]
+    pfac_means = torch.tensor([
+        stats[f]['class_mean_pfac'].get(predicted_class, 0.0) if f in stats else 0.0 for f in range(n_feats)
+    ],
+                              device=device)
+
+    class_counts = torch.tensor([
+        stats[f]['class_count_map'].get(predicted_class, 0) if f in stats else 0 for f in range(n_feats)
+    ],
+                                device=device)
+
+    # Layer-specific threshold adjustments
+    if layer_idx <= 3:  # Early layers: be more lenient
+        rare_corr_thresh *= 0.9
+        reliable_corr_thresh *= 0.9
+    elif layer_idx >= 8:  # Late layers: be more strict
+        rare_corr_thresh *= 1.05
+        reliable_corr_thresh *= 1.1
+
+    # --- THREE-TIER FILTERING ---
+    # Tier 1: Super gems
+    is_super_gem = (
+        feat_any & (class_counts <= super_gem_occ_thresh) & (class_counts > 0) & (pfac_means >= super_gem_corr_thresh)
+    )
+
+    # Tier 2: Rare gems
+    is_rare_gem = (
+        feat_any & (class_counts >= rare_occ_range[0]) & (class_counts <= rare_occ_range[1]) &
+        (pfac_means >= rare_corr_thresh)
+    )
+
+    # Tier 3: Reliable workhorses
+    is_reliable = (feat_any & (class_counts >= reliable_occ_thresh) & (pfac_means >= reliable_corr_thresh))
+
+    # Create tier assignments for each feature
+    feature_tiers = torch.zeros(n_feats, device=device)
+    feature_tiers[is_super_gem] = 3
+    feature_tiers[is_rare_gem & (feature_tiers == 0)] = 2  # Don't override super gems
+    feature_tiers[is_reliable & (feature_tiers == 0)] = 1
+
+    valid = feature_tiers > 0
+
+    if not valid.any():
+        return torch.ones(n_patches, device=device), []
+
+    # Score features by tier and correlation
+    valid_idx = valid.nonzero(as_tuple=True)[0]
+
+    # Create composite scores: tier priority + correlation within tier
+    tier_scores = feature_tiers[valid_idx]
+    pfac_scores = pfac_means[valid_idx]
+
+    # Composite score: heavily weight tier, then correlation
+    composite_scores = tier_scores * 10 + pfac_scores
+
+    # Select top-k by composite score
+    k_top = min(top_k, valid_idx.size(0))
+    top_scores, top_pos = torch.topk(composite_scores, k_top, sorted=True)
+    selected_features = valid_idx[top_pos]
+    selected_tiers = feature_tiers[selected_features]
+
+    if debug:
+        print(f"Layer {layer_idx} selection:")
+        for i, (feat_id, tier, corr) in enumerate(
+            zip(selected_features.tolist(), selected_tiers.tolist(), pfac_means[selected_features].tolist())
+        ):
+            tier_name = {3: "super gem", 2: "rare gem", 1: "reliable"}[int(tier)]
+            count = class_counts[feat_id].item()
+            print(f"  Feature {feat_id}: {tier_name}, corr={corr:.3f}, count={count}")
+
+    # Build boost mask with tier-specific strengths
+    boost_mask = torch.ones(n_patches, device=device)
+
+    for feat_id, tier in zip(selected_features, selected_tiers):
+        feat_act = act_mask[:, feat_id].float()
+
+        # Determine boost strength based on tier
+        if tier == 3:
+            base_boost = super_gem_boost
+        elif tier == 2:
+            base_boost = rare_boost
+        else:
+            base_boost = reliable_boost
+
+        # Optionally weight by correlation strength
+        if correlation_weight:
+            corr_factor = pfac_means[feat_id].item()
+            # Scale boost: at threshold = 1.0x, at perfect correlation = 1.5x
+            corr_multiplier = 1.0 + 0.5 * min((corr_factor - 0.3) / 0.7, 1.0)
+            effective_boost = 1 + (base_boost - 1) * corr_multiplier
+        else:
+            effective_boost = base_boost
+
+        # Apply multiplicative boost where feature is active
+        patch_boost = 1 + feat_act * (effective_boost - 1)
+        boost_mask *= patch_boost
+
+    return boost_mask, selected_features.tolist()
+
+
+@torch.no_grad()
+def build_boost_mask_hybrid(
+    sae_codes: torch.Tensor,
+    alignment_dict: Dict[str, Any],
+    predicted_class: int,
+    device: torch.device,
+    *,
+    # --- Parameters for the new HYBRID strategy ---
+    # For common, "reliable" features
+    reliable_corr_thresh: float = 0.35,
+    reliable_occ_thresh: int = 20,
+    # For rare, "gem" features
+    rare_corr_thresh: float = 0.65,  # Much higher bar for correlation
+    # General parameters
+    top_k: int = 10,
+    base_strength: float = 2.0,
+    min_activation: float = 0.05
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Builds a boost mask using a hybrid strategy that considers both
+    reliable "workhorse" features and potent but rare "gem" features.
+    """
+    codes = sae_codes[0, 1:].to(device)
+    n_patches, n_feats = codes.shape
+
+    act_mask = (codes > min_activation)
+    feat_any = act_mask.any(dim=0)
+    if not feat_any.any():
+        return torch.ones(n_patches, device=device), []
+
+    # Pull pre-computed stats from the dictionary
+    stats = alignment_dict["feature_stats"]
+    pfac_means = torch.tensor([
+        stats[f]['class_mean_pfac'].get(predicted_class, 0.0) if f in stats else 0.0 for f in range(n_feats)
+    ],
+                              device=device)
+    class_counts = torch.tensor([
+        stats[f]['class_count_map'].get(predicted_class, 0) if f in stats else 0 for f in range(n_feats)
+    ],
+                                device=device)
+
+    # --- HYBRID FILTERING LOGIC ---
+    # Condition 1: Is it a reliable workhorse? (High occurrence, medium correlation)
+    is_reliable = (class_counts >= reliable_occ_thresh) & (pfac_means >= reliable_corr_thresh)
+
+    # Condition 2: Is it a rare gem? (Low occurrence, very high correlation)
+    is_gem = (class_counts < reliable_occ_thresh) & (pfac_means >= rare_corr_thresh)
+
+    # A feature is valid if it's active AND it's either a workhorse OR a gem
+    valid = feat_any & (is_reliable | is_gem)
+
+    if not valid.any():
+        return torch.ones(n_patches, device=device), []
+
+    # Proceed with top-k selection from the valid features
+    valid_idx = valid.nonzero(as_tuple=True)[0]
+    pfac_valid = pfac_means[valid_idx]
+
+    k_top = min(top_k, pfac_valid.size(0))
+    top_vals, top_pos = torch.topk(pfac_valid, k_top, sorted=False)
+    selected_features = valid_idx[top_pos]
+
+    # Build the final boost mask
+    sel_act = act_mask[:, selected_features].float()
+    boost_mask = (1 + sel_act * (base_strength - 1)).prod(dim=1)
+
+    return boost_mask, selected_features.tolist()
 
 
 @torch.no_grad()

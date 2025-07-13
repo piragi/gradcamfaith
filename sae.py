@@ -1,4 +1,5 @@
 import copy
+import gc
 import os
 
 import torch
@@ -54,7 +55,7 @@ base_config = VisionModelSAERunnerConfig(
     context_size=197,
     expansion_factor=32,
     activation_fn_str="topk",
-    activation_fn_kwargs={'k': 1024},
+    activation_fn_kwargs={'k': 128},
     lr=0.00002,
     # l1_coefficient=2e-4,
     train_batch_size=4096,
@@ -64,7 +65,7 @@ base_config = VisionModelSAERunnerConfig(
     n_batches_in_buffer=64,
     initialization_method="encoder_transpose_decoder",
     dataset_name="hyper-kvasir",
-    log_to_wandb=False,
+    log_to_wandb=True,
     wandb_project='vit_medical_sae_k_sweep',
     n_checkpoints=1,
     use_ghost_grads=True,
@@ -73,14 +74,14 @@ base_config = VisionModelSAERunnerConfig(
     dead_feature_window=20,
 )
 
-sweep_parameters = {'hook_point_layer': [6, 7, 8, 9, 10], 'k_values': [2048]}
+sweep_parameters = {'hook_point_layer': [1, 2, 3, 4, 5, 6, 8, 9, 10]}
 
 for layer_idx in sweep_parameters['hook_point_layer']:
     run_config = copy.deepcopy(base_config)
 
     run_config.hook_point_layer = layer_idx
 
-    run_name = f"sae_k{run_config.activation_fn_kwargs['k']}_exp{run_config.expansion_factor}_lr{run_config.lr}"
+    run_name = f"sae_l{layer_idx}_k{run_config.activation_fn_kwargs['k']}_exp{run_config.expansion_factor}_lr{run_config.lr}"
     # run_config.wandb_run_name = run_name
 
     checkpoint_dir = f'./models/sweep/{run_name}'
@@ -101,5 +102,19 @@ for layer_idx in sweep_parameters['hook_point_layer']:
         print(f"Error details: {e}")
         continue
     finally:
-        print("Finishing wandb run")
-        # wandb.finish()
+        print("Finishing wandb run and cleaning up memory")
+        wandb.finish()
+
+        # Explicit cleanup to prevent memory leaks
+        if 'trained_sae' in locals():
+            del trained_sae
+        if 'trainer' in locals():
+            del trainer
+
+        # Clear GPU cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # Force garbage collection
+        gc.collect()
