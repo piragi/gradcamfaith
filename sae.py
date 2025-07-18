@@ -53,9 +53,9 @@ base_config = VisionModelSAERunnerConfig(
     layer_subtype='hook_resid_post',
     cls_token_only=False,
     context_size=197,
-    expansion_factor=32,
+    expansion_factor=64,
     activation_fn_str="topk",
-    activation_fn_kwargs={'k': 128},
+    activation_fn_kwargs={'k': 64},
     lr=0.00002,
     # l1_coefficient=2e-4,
     train_batch_size=4096,
@@ -74,9 +74,14 @@ base_config = VisionModelSAERunnerConfig(
     dead_feature_window=20,
 )
 
-sweep_parameters = {'hook_point_layer': [1, 2, 3, 4, 5, 6, 8, 9, 10]}
+sweep_parameters = {'hook_point_layer': [6, 7, 8, 9, 10]}
 
 for layer_idx in sweep_parameters['hook_point_layer']:
+    # Clear memory at start of each iteration
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
     run_config = copy.deepcopy(base_config)
 
     run_config.hook_point_layer = layer_idx
@@ -108,8 +113,11 @@ for layer_idx in sweep_parameters['hook_point_layer']:
         # Explicit cleanup to prevent memory leaks
         if 'trained_sae' in locals():
             del trained_sae
-        if 'trainer' in locals():
-            del trainer
+        del trainer
+
+        # Clear model gradients
+        for param in hooked_model.parameters():
+            param.grad = None
 
         # Clear GPU cache
         if torch.cuda.is_available():

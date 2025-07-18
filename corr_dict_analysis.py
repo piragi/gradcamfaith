@@ -46,11 +46,13 @@ class CorrelationDictAnalyzer:
     def extract_class_data(self, dict_data: Dict[str, Any]) -> Dict[str, List]:
         """Extract class-specific data from dictionary"""
         class_correlations = defaultdict(list)
+        class_steerabilities = defaultdict(list)
         class_occurrences = defaultdict(list)
         feature_class_counts = defaultdict(dict)
 
         for fid, stats in dict_data['feature_stats'].items():
             class_mean_pfac = stats['class_mean_pfac']
+            class_mean_steer = stats.get('class_mean_steerability', {})
             class_count_map = stats['class_count_map']
 
             for cls_id, corr_val in class_mean_pfac.items():
@@ -58,8 +60,13 @@ class CorrelationDictAnalyzer:
                 class_occurrences[cls_id].append(class_count_map.get(cls_id, 0))
                 feature_class_counts[fid][cls_id] = class_count_map.get(cls_id, 0)
 
+                # Add steerability if available
+                steer_val = class_mean_steer.get(cls_id, 0.0)
+                class_steerabilities[cls_id].append(steer_val)
+
         return {
             'class_correlations': dict(class_correlations),
+            'class_steerabilities': dict(class_steerabilities),
             'class_occurrences': dict(class_occurrences),
             'feature_class_counts': dict(feature_class_counts)
         }
@@ -518,6 +525,576 @@ class CorrelationDictAnalyzer:
             )
 
         return dict(sorted_features)
+
+    def analyze_steerability_distributions(self, class_data: Dict[str, Any], layer_idx: int = None) -> Dict[str, Any]:
+        """Analyze steerability distributions per class"""
+        class_steerabilities = class_data['class_steerabilities']
+        analysis_results = {}
+
+        for cls_id, steerabilities in class_steerabilities.items():
+            steer_array = np.array(steerabilities)
+
+            analysis_results[cls_id] = {
+                'mean': np.mean(steer_array),
+                'std': np.std(steer_array),
+                'median': np.median(steer_array),
+                'min': np.min(steer_array),
+                'max': np.max(steer_array),
+                'q25': np.percentile(steer_array, 25),
+                'q75': np.percentile(steer_array, 75),
+                'count': len(steer_array),
+                'skewness': stats.skew(steer_array),
+                'kurtosis': stats.kurtosis(steer_array)
+            }
+
+        # Create summary DataFrame
+        df = pd.DataFrame(analysis_results).T
+        df['class_name'] = [IDX2CLS.get(cls_id, f"Class_{cls_id}") for cls_id in df.index]
+
+        print(f"\nSteerability Distribution Analysis {'for Layer ' + str(layer_idx) if layer_idx else ''}:")
+        print("=" * 70)
+        print(df.round(4))
+
+        return analysis_results
+
+    def analyze_top_steerable_features(self, dict_data: Dict[str, Any], top_k: int = 20) -> Dict[str, Any]:
+        """Analyze features ranked by steerability"""
+        steerable_features = {}
+
+        for fid, stats in dict_data['feature_stats'].items():
+            mean_steerability = stats.get('mean_steerability', 0.0)
+            total_occurrences = stats['occurrences']
+            mean_correlation = abs(stats['mean_pfac_corr'])
+
+            steerable_features[fid] = {
+                'mean_steerability': mean_steerability,
+                'mean_correlation': mean_correlation,
+                'total_occurrences': total_occurrences,
+                'class_mean_steerability': stats.get('class_mean_steerability', {}),
+                'class_mean_pfac': stats['class_mean_pfac'],
+                'class_count_map': stats['class_count_map']
+            }
+
+        # Sort by steerability
+        sorted_steerable = sorted(steerable_features.items(), key=lambda x: x[1]['mean_steerability'], reverse=True)
+
+        print(f"\nTop {top_k} Most Steerable Features:")
+        print("=" * 120)
+        print(
+            f"{'Feature ID':<12} {'Steerability':<15} {'Correlation':<15} {'Occurrences':<12} {'Dominant Class':<20} {'Dom Steer':<12} {'Dom Corr':<12}"
+        )
+        print("-" * 120)
+
+        for fid, feature_stats in sorted_steerable[:top_k]:
+            # Find dominant class by steerability
+            class_steers = feature_stats['class_mean_steerability']
+            class_corrs = feature_stats['class_mean_pfac']
+
+            if class_steers:
+                dom_steer_class = max(class_steers.items(), key=lambda x: x[1])
+                dom_steer_corr = class_corrs.get(dom_steer_class[0], 0.0)
+                dom_class_name = IDX2CLS.get(dom_steer_class[0], f"Class_{dom_steer_class[0]}")
+            else:
+                dom_steer_class = (0, 0.0)
+                dom_steer_corr = 0.0
+                dom_class_name = "N/A"
+
+            print(
+                f"{fid:<12} {feature_stats['mean_steerability']:<15.4f} "
+                f"{feature_stats['mean_correlation']:<15.4f} {feature_stats['total_occurrences']:<12} "
+                f"{dom_class_name:<20} {dom_steer_class[1]:<12.4f} {dom_steer_corr:<12.4f}"
+            )
+
+        return dict(sorted_steerable)
+
+    def analyze_correlation_steerability_overlap(self, dict_data: Dict[str, Any], top_k: int = 50) -> Dict[str, Any]:
+        """Analyze overlap between high correlation and high steerability features"""
+        features_data = []
+
+        for fid, stats in dict_data['feature_stats'].items():
+            mean_steerability = stats.get('mean_steerability', 0.0)
+            mean_correlation = abs(stats['mean_pfac_corr'])
+            total_occurrences = stats['occurrences']
+
+            features_data.append({
+                'feature_id': fid,
+                'steerability': mean_steerability,
+                'correlation': mean_correlation,
+                'occurrences': total_occurrences,
+                'stats': stats
+            })
+
+        # Sort by different metrics
+        top_steerable = sorted(features_data, key=lambda x: x['steerability'], reverse=True)[:top_k]
+        top_correlated = sorted(features_data, key=lambda x: x['correlation'], reverse=True)[:top_k]
+
+        # Find overlap
+        steerable_ids = {f['feature_id'] for f in top_steerable}
+        correlated_ids = {f['feature_id'] for f in top_correlated}
+
+        overlap_ids = steerable_ids & correlated_ids
+        steerable_only = steerable_ids - correlated_ids
+        correlated_only = correlated_ids - steerable_ids
+
+        # Compute correlation between steerability and correlation scores
+        all_steers = [f['steerability'] for f in features_data]
+        all_corrs = [f['correlation'] for f in features_data]
+        from scipy import stats as scipy_stats
+        pearson_corr, p_value = scipy_stats.pearsonr(all_steers, all_corrs)
+        spearman_corr, spearman_p = scipy_stats.spearmanr(all_steers, all_corrs)
+
+        results = {
+            'top_steerable': top_steerable,
+            'top_correlated': top_correlated,
+            'overlap_features': [f for f in features_data if f['feature_id'] in overlap_ids],
+            'steerable_only': [f for f in features_data if f['feature_id'] in steerable_only],
+            'correlated_only': [f for f in features_data if f['feature_id'] in correlated_only],
+            'overlap_stats': {
+                'overlap_count': len(overlap_ids),
+                'steerable_only_count': len(steerable_only),
+                'correlated_only_count': len(correlated_only),
+                'overlap_percentage': len(overlap_ids) / top_k * 100,
+                'pearson_correlation': pearson_corr,
+                'pearson_p_value': p_value,
+                'spearman_correlation': spearman_corr,
+                'spearman_p_value': spearman_p
+            }
+        }
+
+        # Print analysis
+        print(f"\nCorrelation-Steerability Overlap Analysis (Top {top_k}):")
+        print("=" * 80)
+        print(f"Features in both top lists (overlap): {len(overlap_ids)} ({len(overlap_ids)/top_k*100:.1f}%)")
+        print(f"Features only in top steerable: {len(steerable_only)}")
+        print(f"Features only in top correlated: {len(correlated_only)}")
+        print(f"Pearson correlation between metrics: {pearson_corr:.4f} (p={p_value:.4f})")
+        print(f"Spearman correlation between metrics: {spearman_corr:.4f} (p={spearman_p:.4f})")
+
+        # Print top overlap features
+        overlap_features_sorted = sorted(
+            results['overlap_features'], key=lambda x: x['steerability'] + x['correlation'], reverse=True
+        )
+        print(f"\nTop 10 Overlap Features (High in Both Metrics):")
+        print(f"{'Feature':<8} {'Steerability':<12} {'Correlation':<12} {'Occurrences':<12} {'Combined':<12}")
+        print("-" * 60)
+
+        for feature in overlap_features_sorted[:10]:
+            combined_score = feature['steerability'] + feature['correlation']
+            print(
+                f"{feature['feature_id']:<8} {feature['steerability']:<12.4f} "
+                f"{feature['correlation']:<12.4f} {feature['occurrences']:<12} {combined_score:<12.4f}"
+            )
+
+        return results
+
+    def plot_steerability_analysis(self, dict_data: Dict[str, Any], class_data: Dict[str, Any], layer_idx: int = None):
+        """Create comprehensive steerability visualization"""
+        # Get steerability data
+        steerable_features = self.analyze_top_steerable_features(dict_data, top_k=10)
+        overlap_analysis = self.analyze_correlation_steerability_overlap(dict_data, top_k=50)
+
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+        fig.suptitle(
+            f'Steerability Analysis {"- Layer " + str(layer_idx) if layer_idx else ""}', fontsize=16, fontweight='bold'
+        )
+
+        # 1. Steerability vs Correlation scatter
+        ax1 = axes[0, 0]
+        all_steers = [stats.get('mean_steerability', 0.0) for stats in dict_data['feature_stats'].values()]
+        all_corrs = [abs(stats['mean_pfac_corr']) for stats in dict_data['feature_stats'].values()]
+        all_occs = [stats['occurrences'] for stats in dict_data['feature_stats'].values()]
+
+        scatter = ax1.scatter(all_corrs, all_steers, c=all_occs, cmap='viridis', alpha=0.6, s=50)
+        ax1.set_xlabel('Absolute Correlation')
+        ax1.set_ylabel('Steerability')
+        ax1.set_title('Steerability vs Correlation')
+        ax1.grid(True, alpha=0.3)
+        plt.colorbar(scatter, ax=ax1, label='Occurrences')
+
+        # 2. Top steerable features bar plot
+        ax2 = axes[0, 1]
+        top_15_steerable = list(steerable_features.items())[:15]
+        feature_ids = [fid for fid, _ in top_15_steerable]
+        steerabilities = [stats['mean_steerability'] for _, stats in top_15_steerable]
+
+        bars = ax2.bar(range(len(feature_ids)), steerabilities, color='red', alpha=0.7)
+        ax2.set_title('Top 15 Most Steerable Features')
+        ax2.set_ylabel('Mean Steerability')
+        ax2.set_xlabel('Feature Rank')
+        ax2.set_xticks(range(len(feature_ids)))
+        ax2.set_xticklabels([f'F{fid}' for fid in feature_ids], rotation=45)
+
+        # 3. Overlap analysis pie chart
+        ax3 = axes[0, 2]
+        overlap_stats = overlap_analysis['overlap_stats']
+        sizes = [
+            overlap_stats['overlap_count'], overlap_stats['steerable_only_count'],
+            overlap_stats['correlated_only_count']
+        ]
+        labels = ['Both High', 'Steerable Only', 'Correlated Only']
+        colors = ['gold', 'lightcoral', 'lightblue']
+
+        ax3.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+        ax3.set_title('Top 50 Features Overlap')
+
+        # 4. Class-wise steerability distributions
+        ax4 = axes[1, 0]
+        class_steerabilities = class_data['class_steerabilities']
+        steer_data = []
+        class_names = []
+
+        for cls_id, steers in class_steerabilities.items():
+            if steers:  # Only include classes with steerability data
+                steer_data.append(steers)
+                class_names.append(IDX2CLS.get(cls_id, f"Class_{cls_id}"))
+
+        if steer_data:
+            bp = ax4.boxplot(steer_data, labels=class_names, patch_artist=True)
+            for patch, color in zip(bp['boxes'], self.colors):
+                patch.set_facecolor(color)
+            ax4.set_title('Steerability Distribution by Class')
+            ax4.set_ylabel('Steerability')
+            ax4.tick_params(axis='x', rotation=45)
+
+        # 5. Combined ranking scatter
+        ax5 = axes[1, 1]
+        combined_scores = [s + c for s, c in zip(all_steers, all_corrs)]
+        scatter2 = ax5.scatter(combined_scores, all_occs, c=all_steers, cmap='plasma', alpha=0.6, s=50)
+        ax5.set_xlabel('Combined Score (Steerability + Correlation)')
+        ax5.set_ylabel('Occurrences')
+        ax5.set_title('Combined Score vs Occurrences')
+        ax5.grid(True, alpha=0.3)
+        plt.colorbar(scatter2, ax=ax5, label='Steerability')
+
+        # 6. Correlation coefficient comparison
+        ax6 = axes[1, 2]
+        corr_types = ['Pearson', 'Spearman']
+        corr_values = [
+            overlap_analysis['overlap_stats']['pearson_correlation'],
+            overlap_analysis['overlap_stats']['spearman_correlation']
+        ]
+        p_values = [
+            overlap_analysis['overlap_stats']['pearson_p_value'], overlap_analysis['overlap_stats']['spearman_p_value']
+        ]
+
+        bars = ax6.bar(corr_types, corr_values, color=['blue', 'green'], alpha=0.7)
+        ax6.set_title('Correlation Between Metrics')
+        ax6.set_ylabel('Correlation Coefficient')
+        ax6.set_ylim(0, 1)
+
+        # Add p-values as text
+        for bar, p_val in zip(bars, p_values):
+            height = bar.get_height()
+            ax6.text(
+                bar.get_x() + bar.get_width() / 2.,
+                height + 0.02,
+                f'p={p_val:.3f}',
+                ha='center',
+                va='bottom',
+                fontsize=10
+            )
+
+        plt.tight_layout()
+
+        if self.save_plots:
+            suffix = f"_layer{layer_idx}" if layer_idx is not None else ""
+            plt.savefig(self.output_dir / f'steerability_analysis{suffix}.png', dpi=300, bbox_inches='tight')
+
+        plt.show()
+
+    def analyze_top_features_per_class(self, dict_data: Dict[str, Any], top_k: int = 5) -> Dict[str, Any]:
+        """Analyze top K steerable and correlated features per class"""
+        print(f"\n{'='*100}")
+        print(f"TOP {top_k} FEATURES PER CLASS ANALYSIS")
+        print(f"{'='*100}")
+
+        class_features = defaultdict(list)
+
+        # Collect all feature-class pairs with both metrics
+        for fid, stats in dict_data['feature_stats'].items():
+            class_mean_pfac = stats['class_mean_pfac']
+            class_mean_steer = stats.get('class_mean_steerability', {})
+            class_count_map = stats['class_count_map']
+            total_occurrences = stats['occurrences']
+
+            for cls_id, corr_val in class_mean_pfac.items():
+                steer_val = class_mean_steer.get(cls_id, 0.0)
+                class_occurrences = class_count_map.get(cls_id, 0)
+                patch_span = stats.get('class_mean_patch_span', {}).get(cls_id, 0.0)
+                patch_span_ratio = stats.get('class_mean_patch_span_ratio', {}).get(cls_id, 0.0)
+
+                class_features[cls_id].append({
+                    'feature_id': fid,
+                    'correlation': corr_val,
+                    'abs_correlation': abs(corr_val),
+                    'steerability': steer_val,
+                    'class_occurrences': class_occurrences,
+                    'total_occurrences': total_occurrences,
+                    'patch_span': patch_span,
+                    'patch_span_ratio': patch_span_ratio
+                })
+
+        # Analyze each class
+        results = {}
+
+        for cls_id, features in class_features.items():
+            class_name = IDX2CLS.get(cls_id, f"Class_{cls_id}")
+
+            # Sort by steerability and correlation
+            top_steerable = sorted(features, key=lambda x: x['steerability'], reverse=True)[:top_k]
+            top_correlated = sorted(features, key=lambda x: x['abs_correlation'], reverse=True)[:top_k]
+
+            # Find overlap
+            steerable_ids = {f['feature_id'] for f in top_steerable}
+            correlated_ids = {f['feature_id'] for f in top_correlated}
+            overlap_ids = steerable_ids & correlated_ids
+
+            results[cls_id] = {
+                'class_name': class_name,
+                'top_steerable': top_steerable,
+                'top_correlated': top_correlated,
+                'overlap_features': overlap_ids,
+                'overlap_count': len(overlap_ids),
+                'total_features': len(features)
+            }
+
+            # Print analysis for this class
+            print(f"\n🎯 {class_name.upper()} (Class {cls_id}) - {len(features)} total features")
+            print(f"   Overlap: {len(overlap_ids)}/{top_k} features appear in both top lists")
+            print("-" * 90)
+
+            # Top steerable features
+            print(f"\n📈 TOP {top_k} STEERABLE FEATURES:")
+            print(
+                f"{'Rank':<4} {'Feature':<8} {'Steerability':<12} {'Correlation':<12} {'Class Occ':<10} {'Total Occ':<10}"
+            )
+            print("-" * 60)
+            for i, feature in enumerate(top_steerable, 1):
+                print(
+                    f"{i:<4} {feature['feature_id']:<8} {feature['steerability']:<12.4f} "
+                    f"{feature['correlation']:<12.4f} {feature['class_occurrences']:<10} {feature['total_occurrences']:<10}"
+                )
+
+            # Top correlated features
+            print(f"\n🔗 TOP {top_k} CORRELATED FEATURES:")
+            print(
+                f"{'Rank':<4} {'Feature':<8} {'Correlation':<12} {'Steerability':<12} {'Class Occ':<10} {'Total Occ':<10}"
+            )
+            print("-" * 60)
+            for i, feature in enumerate(top_correlated, 1):
+                print(
+                    f"{i:<4} {feature['feature_id']:<8} {feature['correlation']:<12.4f} "
+                    f"{feature['steerability']:<12.4f} {feature['class_occurrences']:<10} {feature['total_occurrences']:<10}"
+                )
+
+            # Highlight overlap features
+            if overlap_ids:
+                print(f"\n⭐ OVERLAP FEATURES (appear in both lists):")
+                overlap_features = [f for f in features if f['feature_id'] in overlap_ids]
+                overlap_features.sort(key=lambda x: x['steerability'] + x['abs_correlation'], reverse=True)
+                print(f"{'Feature':<8} {'Steerability':<12} {'Correlation':<12} {'Combined':<12}")
+                print("-" * 48)
+                for feature in overlap_features:
+                    combined = feature['steerability'] + feature['abs_correlation']
+                    print(
+                        f"{feature['feature_id']:<8} {feature['steerability']:<12.4f} "
+                        f"{feature['correlation']:<12.4f} {combined:<12.4f}"
+                    )
+            else:
+                print(f"\n❌ NO OVERLAP: Different features are steerable vs correlated for {class_name}")
+
+        # Add correlation analysis between steerability and correlation per class
+        print(f"\n{'='*100}")
+        print("CORRELATION ANALYSIS: STEERABILITY vs CORRELATION PER CLASS")
+        print(f"{'='*100}")
+
+        for cls_id, class_result in results.items():
+            class_name = class_result['class_name']
+            features = class_features[cls_id]
+
+            if len(features) < 3:  # Need at least 3 features for meaningful correlation
+                continue
+
+            # Extract steerability and correlation values
+            steerability_values = [f['steerability'] for f in features]
+            correlation_values = [f['abs_correlation'] for f in features]
+
+            # Calculate correlation between steerability and correlation
+            if len(steerability_values) > 1 and len(correlation_values) > 1:
+                from scipy import stats as scipy_stats
+
+                # Pearson correlation
+                pearson_corr, pearson_p = scipy_stats.pearsonr(steerability_values, correlation_values)
+
+                # Spearman correlation
+                spearman_corr, spearman_p = scipy_stats.spearmanr(steerability_values, correlation_values)
+
+                print(f"\n📊 {class_name.upper()} (Class {cls_id}):")
+                print(f"   Features analyzed: {len(features)}")
+                print(f"   Pearson correlation: {pearson_corr:.4f} (p={pearson_p:.4f})")
+                print(f"   Spearman correlation: {spearman_corr:.4f} (p={spearman_p:.4f})")
+
+                # Interpretation
+                if abs(pearson_corr) > 0.5:
+                    strength = "strong"
+                elif abs(pearson_corr) > 0.3:
+                    strength = "moderate"
+                else:
+                    strength = "weak"
+
+                direction = "positive" if pearson_corr > 0 else "negative"
+                significance = "significant" if pearson_p < 0.05 else "not significant"
+
+                print(f"   Interpretation: {strength} {direction} correlation ({significance})")
+
+                # Store correlation results in the results dict
+                results[cls_id]['steerability_correlation_analysis'] = {
+                    'pearson_corr': pearson_corr,
+                    'pearson_p': pearson_p,
+                    'spearman_corr': spearman_corr,
+                    'spearman_p': spearman_p,
+                    'n_features': len(features),
+                    'interpretation': {
+                        'strength': strength,
+                        'direction': direction,
+                        'significance': significance
+                    }
+                }
+
+        return results
+
+    def plot_per_class_features_analysis(self, per_class_results: Dict[str, Any], layer_idx: int = None):
+        """Create visualizations for per-class feature analysis"""
+        n_classes = len(per_class_results)
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+        fig.suptitle(
+            f'Per-Class Feature Analysis {"- Layer " + str(layer_idx) if layer_idx else ""}',
+            fontsize=16,
+            fontweight='bold'
+        )
+
+        class_names = [data['class_name'] for data in per_class_results.values()]
+        class_ids = list(per_class_results.keys())
+
+        # 1. Overlap percentage per class
+        ax1 = axes[0, 0]
+        overlap_percentages = []
+        top_k = len(per_class_results[class_ids[0]]['top_steerable'])  # Get top_k from first class
+
+        for cls_id in class_ids:
+            overlap_count = per_class_results[cls_id]['overlap_count']
+            overlap_pct = (overlap_count / top_k) * 100
+            overlap_percentages.append(overlap_pct)
+
+        bars = ax1.bar(range(len(class_names)), overlap_percentages, color=self.colors[:len(class_names)], alpha=0.8)
+        ax1.set_title('Feature Overlap Percentage per Class')
+        ax1.set_ylabel('Overlap Percentage (%)')
+        ax1.set_xlabel('Classes')
+        ax1.set_xticks(range(len(class_names)))
+        ax1.set_xticklabels(class_names, rotation=45, ha='right')
+        ax1.set_ylim(0, 100)
+
+        # Add percentage labels on bars
+        for bar, pct in zip(bars, overlap_percentages):
+            height = bar.get_height()
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2., height + 1, f'{pct:.0f}%', ha='center', va='bottom', fontsize=10
+            )
+
+        # 2. Top steerability values per class
+        ax2 = axes[0, 1]
+        max_steers = []
+        mean_steers = []
+
+        for cls_id in class_ids:
+            top_steerable = per_class_results[cls_id]['top_steerable']
+            steers = [f['steerability'] for f in top_steerable]
+            max_steers.append(max(steers) if steers else 0)
+            mean_steers.append(np.mean(steers) if steers else 0)
+
+        x = np.arange(len(class_names))
+        width = 0.35
+        ax2.bar(x - width / 2, max_steers, width, label='Max Steerability', alpha=0.8, color='red')
+        ax2.bar(x + width / 2, mean_steers, width, label='Mean Steerability', alpha=0.8, color='orange')
+        ax2.set_title('Steerability Range per Class')
+        ax2.set_ylabel('Steerability')
+        ax2.set_xlabel('Classes')
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(class_names, rotation=45, ha='right')
+        ax2.legend()
+
+        # 3. Top correlation values per class
+        ax3 = axes[0, 2]
+        max_corrs = []
+        mean_corrs = []
+
+        for cls_id in class_ids:
+            top_correlated = per_class_results[cls_id]['top_correlated']
+            corrs = [abs(f['correlation']) for f in top_correlated]
+            max_corrs.append(max(corrs) if corrs else 0)
+            mean_corrs.append(np.mean(corrs) if corrs else 0)
+
+        ax3.bar(x - width / 2, max_corrs, width, label='Max |Correlation|', alpha=0.8, color='blue')
+        ax3.bar(x + width / 2, mean_corrs, width, label='Mean |Correlation|', alpha=0.8, color='lightblue')
+        ax3.set_title('Correlation Range per Class')
+        ax3.set_ylabel('Absolute Correlation')
+        ax3.set_xlabel('Classes')
+        ax3.set_xticks(x)
+        ax3.set_xticklabels(class_names, rotation=45, ha='right')
+        ax3.legend()
+
+        # 4. Feature count per class
+        ax4 = axes[1, 0]
+        feature_counts = [per_class_results[cls_id]['total_features'] for cls_id in class_ids]
+        bars = ax4.bar(range(len(class_names)), feature_counts, color=self.colors[:len(class_names)], alpha=0.8)
+        ax4.set_title('Total Features per Class')
+        ax4.set_ylabel('Number of Features')
+        ax4.set_xlabel('Classes')
+        ax4.set_xticks(range(len(class_names)))
+        ax4.set_xticklabels(class_names, rotation=45, ha='right')
+
+        # 5. Scatter: Max Steerability vs Max Correlation per class
+        ax5 = axes[1, 1]
+        scatter = ax5.scatter(
+            max_corrs, max_steers, c=overlap_percentages, cmap='viridis', s=100, alpha=0.7, edgecolors='black'
+        )
+        ax5.set_xlabel('Max Absolute Correlation')
+        ax5.set_ylabel('Max Steerability')
+        ax5.set_title('Max Steerability vs Max Correlation')
+        ax5.grid(True, alpha=0.3)
+        plt.colorbar(scatter, ax=ax5, label='Overlap %')
+
+        # Add class labels to scatter points
+        for i, cls_name in enumerate(class_names):
+            ax5.annotate(
+                cls_name[:4], (max_corrs[i], max_steers[i]), xytext=(5, 5), textcoords='offset points', fontsize=9
+            )
+
+        # 6. Heatmap of overlap counts
+        ax6 = axes[1, 2]
+        overlap_counts = [per_class_results[cls_id]['overlap_count'] for cls_id in class_ids]
+        bars = ax6.bar(range(len(class_names)), overlap_counts, color='gold', alpha=0.8)
+        ax6.set_title('Feature Overlap Count per Class')
+        ax6.set_ylabel('Number of Overlapping Features')
+        ax6.set_xlabel('Classes')
+        ax6.set_xticks(range(len(class_names)))
+        ax6.set_xticklabels(class_names, rotation=45, ha='right')
+        ax6.set_ylim(0, top_k)
+
+        # Add count labels on bars
+        for bar, count in zip(bars, overlap_counts):
+            height = bar.get_height()
+            ax6.text(
+                bar.get_x() + bar.get_width() / 2., height + 0.05, f'{count}', ha='center', va='bottom', fontsize=10
+            )
+
+        plt.tight_layout()
+
+        if self.save_plots:
+            suffix = f"_layer{layer_idx}" if layer_idx is not None else ""
+            plt.savefig(self.output_dir / f'per_class_features_analysis{suffix}.png', dpi=300, bbox_inches='tight')
+
+        plt.show()
 
     def plot_special_features_analysis(self, special_features: Dict[str, Any], layer_idx: int = None):
         """Create detailed plots for special features"""
@@ -1792,6 +2369,52 @@ class CorrelationDictAnalyzer:
         plt.show()
 
 
+def run_steerability_analysis_per_layer(analyzer, layer_idx, dict_path):
+    """Run comprehensive steerability analysis for a single layer"""
+    print(f"\n{'='*80}")
+    print(f"STEERABILITY ANALYSIS FOR LAYER {layer_idx}")
+    print(f"{'='*80}")
+
+    # Load dictionary
+    dict_data = analyzer.load_correlation_dict(dict_path)
+
+    # Check if steerability data exists
+    has_steerability = any('mean_steerability' in stats for stats in dict_data['feature_stats'].values())
+    if not has_steerability:
+        print(f"No steerability data found in layer {layer_idx} dictionary!")
+        return
+
+    # Extract class data (including steerability)
+    class_data = analyzer.extract_class_data(dict_data)
+
+    # Run steerability analyses
+    print(f"\n1. Analyzing steerability distributions...")
+    steer_distributions = analyzer.analyze_steerability_distributions(class_data, layer_idx)
+
+    print(f"\n2. Analyzing top steerable features...")
+    top_steerable = analyzer.analyze_top_steerable_features(dict_data, top_k=20)
+
+    print(f"\n3. Analyzing correlation-steerability overlap...")
+    overlap_analysis = analyzer.analyze_correlation_steerability_overlap(dict_data, top_k=50)
+
+    print(f"\n4. Analyzing top features per class...")
+    per_class_analysis = analyzer.analyze_top_features_per_class(dict_data, top_k=5)
+
+    print(f"\n5. Generating steerability visualizations...")
+    analyzer.plot_steerability_analysis(dict_data, class_data, layer_idx)
+
+    print(f"\n6. Generating per-class visualizations...")
+    analyzer.plot_per_class_features_analysis(per_class_analysis, layer_idx)
+
+    print(f"\nSteerability analysis complete for layer {layer_idx}!")
+    return {
+        'steer_distributions': steer_distributions,
+        'top_steerable': top_steerable,
+        'overlap_analysis': overlap_analysis,
+        'per_class_analysis': per_class_analysis
+    }
+
+
 def run_analysis_per_layer(analyzer, layer_idx, dict_path):
     # Correlation outliers analysis - THE NEW ANALYSIS YOU REQUESTED
     print(f"Running correlation outliers analysis for layer {layer_idx}...")
@@ -1824,11 +2447,13 @@ def run_all():
 
 def main():
     """Main execution function"""
-    run_all()
-    # layer_idx = 7
-    # analyzer = CorrelationDictAnalyzer(save_plots=True)
-    # dict_path = f"./sae_dictionaries/sfaf_stealth_l7_alignment_min1_32k128.pt"
-    # run_analysis_per_layer(analyzer, layer_idx, dict_path)
+    # Test steerability analysis on a single layer
+    for layer_idx in range(2, 11):
+        analyzer = CorrelationDictAnalyzer(save_plots=True)
+        dict_path = f"./sae_dictionaries/steer_corr_l{layer_idx}_alignment_min1_128k64.pt"
+
+        # Run steerability analysis
+        run_steerability_analysis_per_layer(analyzer, layer_idx, dict_path)
 
 
 if __name__ == "__main__":

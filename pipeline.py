@@ -781,7 +781,7 @@ def run_pipeline(config: PipelineConfig,
     # class_specific_features = find_class_specific_features(vit_model, sae)
     # 2. Load all steering resources (SAEs and Dictionaries) ONCE
     # You can control which layers to use from your config file
-    steering_layers_from_config = getattr(config.classify, 'steering_layers', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    steering_layers_from_config = getattr(config.classify, 'steering_layers', [5, 6, 7, 8])
     steering_resources = load_steering_resources(steering_layers_from_config)
     print("All steering resources loaded.")
     class_analysis = None

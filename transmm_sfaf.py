@@ -23,47 +23,74 @@ from vit.preprocessing import get_processor_for_precached_224_images
 SAE_CONFIG = {
     1: {
         "sae_path": "models/sweep/sae_l1_k128_exp64_lr0.0002/48a0f474-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l2_alignment_min3_128k64.pt"
+        "dict_path": "./sae_dictionaries/sfaf_stealth_l2_alignment_min1_128k64.pt"
+        #"dict_path": "./sae_dictionaries/sfaf_stealth_l1_alignment_min3_128k64.pt"
     },
     2: {
-        "sae_path": "models/sweep/sae_l2_k128_exp64_lr0.0002/41db76e2-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l2_alignment_min3_128k64.pt"
+        # "sae_path": "models/sweep/sae_l2_k128_exp64_lr0.0002/41db76e2-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l2_k64_exp64_lr2e-05/92bcc2fc-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_l2_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l2_alignment_min3_128k64.pt"
     },
     3: {
-        "sae_path": "models/sweep/sae_l3_k128_exp64_lr0.0002/6fd8fb1a-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l3_alignment_min3_128k64.pt"
+        # "sae_path": "models/sweep/sae_l3_k128_exp64_lr0.0002/6fd8fb1a-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l3_k64_exp64_lr2e-05/99defb16-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_l3_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l3_alignment_min3_128k64.pt"
     },
     4: {
-        "sae_path": "models/sweep/sae_l4_k128_exp64_lr0.0002/20673e0c-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l4_alignment_min3_128k64.pt"
+        # "sae_path": "models/sweep/sae_l4_k128_exp64_lr0.0002/20673e0c-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l4_k64_exp64_lr2e-05/72421a1a-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_l4_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l4_alignment_min3_128k64.pt"
     },
     5: {
-        "sae_path": "models/sweep/sae_l5_k128_exp64_lr0.0002/e7fdbb62-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l5_alignment_min3_128k64.pt"
+        # "sae_path": "models/sweep/sae_l5_k128_exp64_lr0.0002/e7fdbb62-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l5_k64_exp64_lr2e-05/09853b08-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_local_l5_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/steer_corr_l5_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l5_alignment_min3_128k64.pt"
     },
     6: {
-        "sae_path": "models/sweep/sae_l6_k128_exp64_lr0.0002/becaec1e-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l6_alignment_min3_128k64.pt"
+        # "sae_path": "models/sweep/sae_l6_k128_exp64_lr0.0002/becaec1e-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l6_k64_exp64_lr2e-05/81ea5ed2-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_local_l6_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/steer_corr_l6_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l6_alignment_min3_128k64.pt"
     },
     7: {
-        "sae_path": "./models/sweep/sae_l7_k128_exp32_lr2e-05/d77c1ce8-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l7_alignment_min1_32k128.pt"
+        # "sae_path": "models/sweep/sae_l7_k64_exp64_lr0.0002/21922d4b-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l7_k64_exp64_lr2e-05/31a0aa2d-vit_medical_sae_k_sweep/n_images_49276.pt",
+        # "sae_path": "./models/sweep/sae_l7_k128_exp32_lr2e-05/d77c1ce8-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_local_l7_alignment_min1_64k64.pt"
+        # "dict_path": "./sae_dictionaries/steer_corr_local_l7_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/steer_corr_l7_alignment_min1_32k128.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l7_alignment_min1_32k128.pt"
     },
     8: {
-        "sae_path": "models/sweep/sae_l8_k128_exp64_lr0.0002/dc5d1afd-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l8_alignment_min3_128k64.pt"
+        # "sae_path": "models/sweep/sae_l8_k128_exp64_lr0.0002/dc5d1afd-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l8_k64_exp64_lr2e-05/a43b7675-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_local_l8_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/steer_corr_l8_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l8_alignment_min3_128k64.pt"
     },
     9: {
-        "sae_path": "models/sweep/sae_l9_k128_exp64_lr0.0002/e06c6b1d-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l9_alignment_min3_128k64.pt"
+        # "sae_path": "models/sweep/sae_l9_k128_exp64_lr0.0002/e06c6b1d-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l9_k64_exp64_lr2e-05/9058e0a1-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_local_l9_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/steer_corr_l9_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l9_alignment_min3_128k64.pt"
     },
     10: {
-        "sae_path": "models/sweep/sae_l10_k128_exp64_lr0.0002/4ade9e1f-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l10_alignment_min3_128k64.pt"
+        # "sae_path": "models/sweep/sae_l10_k128_exp64_lr0.0002/4ade9e1f-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l10_k64_exp64_lr2e-05/d25db388-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_l10_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l10_alignment_min3_128k64.pt"
     },
     11: {
         "sae_path": "models/sweep/sae_l11_k128_exp64_lr0.0002/a29c74a6-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l11_alignment_min3_128k64.pt"
+        "dict_path": "./sae_dictionaries/steer_corr_l11_alignment_min1_128k64.pt"
+        # "dict_path": "./sae_dictionaries/sfaf_stealth_l11_alignment_min3_128k64.pt"
     },
 }
 
@@ -260,14 +287,26 @@ def transmm_prisma(
             codes_for_layer = sae_codes.get(i)
 
             if codes_for_layer is not None:
-                boost_mask, selected_feat_ids = build_boost_mask_hybrid_tier(
+                boost_mask, selected_feat_ids = build_boost_mask_combined(
                     sae_codes=codes_for_layer,
                     alignment_dict=resources["dict"],
                     predicted_class=predicted_class_idx,
                     device=device,
-                    layer_idx=i,  # ADD THIS
-                    debug=True  # To see what's being selected
+                    top_k=25,
+                    base_strength=10.,
+                    min_score=0.6,  # The combined score is 0-1, so this is a reasonable floor
+                    min_occurrences_for_class=1,
+                    debug=True
                 )
+                # Option 2: Use correlation-based boosting (original)
+                # boost_mask, selected_feat_ids = build_boost_mask_hybrid_tier(
+                #     sae_codes=codes_for_layer,
+                #     alignment_dict=resources["dict"],
+                #     predicted_class=predicted_class_idx,
+                #     device=device,
+                #     layer_idx=i,  # ADD THIS
+                #     debug=True  # To see what's being selected
+                # )
                 # boost_mask, selected_feat_ids = build_boost_mask_light(
                 # sae_codes=codes_for_layer,
                 # alignment_dict=resources["dict"],
@@ -618,6 +657,218 @@ def build_boost_mask_simple(
     #    →   mask = ∏₍f∈selected₎ [1 + (codes[:,f]>min_activation)*(base_strength-1)]
     sel_act = act_mask[:, selected].float()  # [T, k_top]
     boost_mask = (1 + sel_act * (base_strength - 1)).prod(dim=1)  # [T]
+
+    return boost_mask, selected.tolist()
+
+
+@torch.no_grad()
+def build_boost_mask_combined(
+    sae_codes: torch.Tensor,
+    alignment_dict: Dict[str, Any],
+    predicted_class: int,
+    device: torch.device,
+    *,
+    top_k: int = 10,
+    base_strength: float = 3.0,
+    min_activation: float = 0.05,
+    min_score: float = 0.3,  # Adjust based on new score distribution
+    min_occurrences_for_class: int = 3,
+    debug: bool = False
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Builds a boost/suppress mask using the combined score. It selects top features
+    based on the score (which considers absolute steerability) and then applies a
+    boost for positive steerability or a suppression for negative steerability.
+    """
+    # ... (initial part of the function is the same) ...
+    codes = sae_codes[0, 1:].to(device)
+    n_patches, n_feats = codes.shape
+    act_mask = (codes > min_activation)
+    feat_any = act_mask.any(dim=0)
+    if not feat_any.any(): return torch.ones(n_patches, device=device), []
+
+    stats = alignment_dict.get("feature_stats", {})
+    if not stats:
+        if debug: print("Warning: 'feature_stats' not found.")
+        return torch.ones(n_patches, device=device), []
+
+    combined_scores_per_class = torch.tensor([
+        stats[f].get('class_combined_scores', {}).get(predicted_class, 0.0) if f in stats else 0.0
+        for f in range(n_feats)
+    ],
+                                             device=device)
+
+    class_counts = torch.tensor([
+        stats[f].get('class_count_map', {}).get(predicted_class, 0) if f in stats else 0 for f in range(n_feats)
+    ],
+                                device=device)
+
+    valid = feat_any \
+            & (combined_scores_per_class >= min_score) \
+            & (class_counts >= min_occurrences_for_class)
+
+    if not valid.any():
+        if debug: print(f"No valid features found for class {predicted_class} with score >= {min_score}")
+        return torch.ones(n_patches, device=device), []
+
+    valid_idx = valid.nonzero(as_tuple=True)[0]
+    scores_valid = combined_scores_per_class[valid_idx]
+
+    k_top = min(top_k, scores_valid.size(0))
+    top_vals, top_pos = torch.topk(scores_valid, k_top, sorted=False)
+    selected_features = valid_idx[top_pos]
+
+    # --- MODIFICATION START ---
+    # We now need the *actual steerability values* (with sign) to decide the action.
+    steerability_values = torch.tensor([
+        stats[f].get('class_mean_steerability', {}).get(predicted_class, 0.0) if f in stats else 0.0
+        for f in selected_features.tolist()
+    ],
+                                       device=device)
+
+    if debug:
+        print(f"Selected top {k_top} features for class {predicted_class} by combined score:")
+        for i, feat_id in enumerate(selected_features.tolist()):
+            score_val = combined_scores_per_class[feat_id].item()
+            steer_val = steerability_values[i].item()
+            action = "BOOST" if steer_val > 0 else "SUPPRESS" if steer_val < 0 else "NEUTRAL"
+            print(f"  Feature {feat_id}: score={score_val:.3f}, steer={steer_val:.3f} -> {action}")
+
+    # Build the final boost/suppress mask
+    boost_mask = torch.ones(n_patches, device=device)
+    suppress_strength = 1.0 / base_strength
+
+    for i, feat_id in enumerate(selected_features):
+        feat_act = act_mask[:, feat_id].float()  # [T]
+        steer_val = steerability_values[i].item()
+
+        if steer_val > 0:
+            # Positive steerability -> BOOST (multiply by > 1)
+            # This feature helps the class, so we amplify its contribution.
+            patch_effect = 1.0 + feat_act * (base_strength - 1.0)
+        elif steer_val < 0:
+            # Negative steerability -> SUPPRESS (multiply by < 1)
+            # This feature confuses the model, so we reduce its contribution.
+            patch_effect = 1.0 + feat_act * (base_strength - 1.0)
+            # patch_effect = 1.0 + feat_act * (suppress_strength - 1.0)
+        else:
+            # Steerability is zero, no effect.
+            patch_effect = 1.0
+
+        boost_mask *= patch_effect
+    # --- MODIFICATION END ---
+
+    return boost_mask, selected_features.tolist()
+
+
+@torch.no_grad()
+def build_boost_mask_steerability(
+    sae_codes: torch.Tensor,
+    alignment_dict: Dict[str, Any],
+    predicted_class: int,
+    device: torch.device,
+    *,
+    top_k: int = 5,
+    base_strength: float = 2.0,
+    min_activation: float = 0.05,
+    min_steerability: float = 5.,
+    min_occurrences_for_class: int = 1,
+    debug: bool = True
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Builds a boost/suppress mask using the most steerable features per class.
+    Features with positive steerability are boosted, negative steerability are suppressed.
+    
+    Steerability interpretation:
+    - Positive: Feature hurts target class -> BOOST patches to emphasize negative evidence
+    - Negative: Feature helps target class -> SUPPRESS patches to de-emphasize positive evidence
+    
+    Args:
+        sae_codes: SAE feature codes [1+T, k]
+        alignment_dict: Dictionary with feature stats including steerability
+        predicted_class: Target class for boosting/suppressing
+        device: Device to run on
+        top_k: Number of top absolute steerable features to use
+        base_strength: Multiplicative boost/suppress strength (>1.0)
+        min_activation: Minimum activation threshold
+        min_steerability: Minimum absolute steerability threshold for consideration
+        min_occurrences_for_class: Minimum class occurrences for consideration
+        debug: Print debug information
+    
+    Returns:
+        boost_mask: Tensor to multiply with attribution map (>1 = boost, <1 = suppress)
+        selected_features: List of selected feature IDs
+    """
+    # Strip CLS token → [T, k]
+    codes = sae_codes[0, 1:].to(device)  # [n_patches, n_feats]
+    n_patches, n_feats = codes.shape
+
+    # 1) Find features with any activation > min_activation
+    act_mask = (codes > min_activation)  # [T, k]
+    feat_any = act_mask.any(dim=0)  # [k]
+    if not feat_any.any():
+        return torch.ones(n_patches, device=device), []
+
+    # 2) Extract steerability and occurrence data for this class
+    stats = alignment_dict["feature_stats"]
+
+    # Build tensors of shape [k] for steerability and class counts
+    steerability_means = torch.tensor([
+        stats[f]['class_mean_steerability'].get(predicted_class, 0.0) if f in stats else 0.0 for f in range(n_feats)
+    ],
+                                      device=device)
+
+    class_counts = torch.tensor([
+        stats[f]['class_count_map'].get(predicted_class, 0) if f in stats else 0 for f in range(n_feats)
+    ],
+                                device=device)
+
+    # 3) Filter features based on absolute steerability (can be positive or negative)
+    abs_steerability = torch.abs(steerability_means)
+    valid = feat_any \
+            & (abs_steerability >= min_steerability) \
+            & (class_counts >= min_occurrences_for_class)
+
+    if not valid.any():
+        if debug:
+            print(f"No valid steerable features found for class {predicted_class}")
+        return torch.ones(n_patches, device=device), []
+
+    # 4) Select top-k by absolute steerability
+    valid_idx = valid.nonzero(as_tuple=True)[0]  # [m]
+    abs_steerability_valid = abs_steerability[valid_idx]  # [m]
+
+    k_top = min(top_k, abs_steerability_valid.size(0))
+    top_vals, top_pos = torch.topk(abs_steerability_valid, k_top, sorted=False)  # [k_top]
+    selected = valid_idx[top_pos]  # [k_top]
+
+    # Get the actual steerability values (with sign) for selected features
+    selected_steerabilities = steerability_means[selected]  # [k_top]
+
+    if debug:
+        print(f"Selected top {k_top} steerable features for class {predicted_class}:")
+        for i, feat_id in enumerate(selected.tolist()):
+            steer_val = selected_steerabilities[i].item()
+            count = class_counts[feat_id].item()
+            action = "BOOST" if steer_val > 0 else "SUPPRESS"
+            print(f"  Feature {feat_id}: steerability={steer_val:.3f}, count={count} -> {action}")
+
+    # 5) Build boost/suppress mask based on sign of steerability
+    boost_mask = torch.ones(n_patches, device=device)
+
+    for i, feat_id in enumerate(selected):
+        feat_act = act_mask[:, feat_id].float()  # [T]
+        steer_val = selected_steerabilities[i].item()
+
+        if steer_val < 0:
+            # Positive steerability: boost (multiply by base_strength)
+            patch_effect = 1 + feat_act * (base_strength - 1)
+        else:
+            # Negative steerability: suppress (divide by base_strength)
+            suppress_strength = 1.0 / base_strength
+            patch_effect = 1 + feat_act * (suppress_strength - 1)
+
+        boost_mask *= patch_effect
 
     return boost_mask, selected.tolist()
 

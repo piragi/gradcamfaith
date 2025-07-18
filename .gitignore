@@ -16,3 +16,4 @@ results_transmmplus/
 hyper-kvasir_imagefolder/*
 wandb/
 *.pt
+*.txt
