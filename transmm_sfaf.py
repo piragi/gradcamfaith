@@ -1,15 +1,11 @@
 # transmm_sfaf.py
 import gc
-import math
-import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torchvision
-from tqdm import tqdm
 from vit_prisma.models.base_vit import HookedViT  # Import the new model class
 from vit_prisma.models.base_vit import HookedSAEViT
 from vit_prisma.models.weight_conversion import convert_timm_weights
@@ -70,9 +66,10 @@ SAE_CONFIG = {
     8: {
         # "sae_path": "models/sweep/sae_l8_k128_exp64_lr0.0002/dc5d1afd-vit_medical_sae_k_sweep/n_images_49276.pt",
         "sae_path": "./models/sweep/sae_l8_k64_exp64_lr2e-05/a43b7675-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_local_l8_alignment_min1_128k64.pt"
+        "dict_path": "./sae_dictionaries/steer_corr_local_l8_alignment_min1_128k64.pt",
         # "dict_path": "./sae_dictionaries/steer_corr_l8_alignment_min1_128k64.pt"
         # "dict_path": "./sae_dictionaries/sfaf_stealth_l8_alignment_min3_128k64.pt"
+        "saco_dict_path": "./results/saco_problematic_features_l8.pt"  # NEW: SaCo results
     },
     9: {
         # "sae_path": "models/sweep/sae_l9_k128_exp64_lr0.0002/e06c6b1d-vit_medical_sae_k_sweep/n_images_49276.pt",
@@ -167,6 +164,16 @@ def load_steering_resources(layers: List[int]) -> Dict[int, Dict[str, Any]]:
             sf_af_dict = torch.load(dict_path, weights_only=False)
 
             resources[layer_idx] = {"sae": sae, "dict": sf_af_dict}
+            
+            # Load SaCo dictionary if available
+            if "saco_dict_path" in config:
+                saco_dict_path = Path(config["saco_dict_path"])
+                if saco_dict_path.exists():
+                    resources[layer_idx]["saco_dict_path"] = str(saco_dict_path)
+                    print(f"Loaded SaCo dictionary for layer {layer_idx}: {saco_dict_path}")
+                else:
+                    print(f"Warning: SaCo dict path specified but file not found: {saco_dict_path}")
+            
         except Exception as e:
             print(f"Error loading resources for layer {layer_idx}: {e}")
 
@@ -287,17 +294,64 @@ def transmm_prisma(
             codes_for_layer = sae_codes.get(i)
 
             if codes_for_layer is not None:
-                boost_mask, selected_feat_ids = build_boost_mask_combined(
-                    sae_codes=codes_for_layer,
-                    alignment_dict=resources["dict"],
-                    predicted_class=predicted_class_idx,
-                    device=device,
-                    top_k=25,
-                    base_strength=10.,
-                    min_score=0.6,  # The combined score is 0-1, so this is a reasonable floor
-                    min_occurrences_for_class=1,
-                    debug=True
-                )
+                # ===== ORIGINAL BOOST METHODS (COMMENTED OUT) =====
+                # boost_mask, selected_feat_ids = build_boost_mask_combined(
+                #     sae_codes=codes_for_layer,
+                #     alignment_dict=resources["dict"],
+                #     predicted_class=predicted_class_idx,
+                #     device=device,
+                #     top_k=25,
+                #     base_strength=10.,
+                #     min_score=0.6,  # The combined score is 0-1, so this is a reasonable floor
+                #     min_occurrences_for_class=1,
+                #     debug=True
+                # )
+                
+                # ===== NEW SACO-BASED BOOST =====
+                if "saco_dict_path" in resources:
+                    print(f"Loading SaCo results from: {resources['saco_dict_path']}")
+                    saco_results = torch.load(resources["saco_dict_path"], weights_only=False)
+                    
+                    # Option 1: Bidirectional (suppress + boost)
+                    boost_mask, selected_feat_dict = build_boost_mask_saco_bidirectional(
+                        sae_codes=codes_for_layer,
+                        saco_results=saco_results,
+                        predicted_class=predicted_class_idx,
+                        device=device,
+                        suppress_strength=0.3,
+                        boost_strength=5.,
+                        top_k_suppress=15,  # Increase to catch more features
+                        top_k_boost=10,     # Increase to catch more features
+                        class_specific_boost=True,  # NEW: Enable class-specific selection
+                        strict_class_filter=True,   # NEW: Prevent cross-class contamination
+                        debug=True
+                    )
+                    selected_feat_ids = selected_feat_dict['suppress'] + selected_feat_dict['boost']
+                    
+                    # Option 2: Conservative suppression only
+                    # boost_mask, selected_feat_ids = build_boost_mask_saco_suppress_only(
+                        # sae_codes=codes_for_layer,
+                        # saco_results=saco_results,
+                        # predicted_class=predicted_class_idx,
+                        # device=device,
+                        # suppress_strength=0.7,
+                        # top_k=15,
+                        # overlap_threshold=0.7,
+                        # debug=True
+                    # )
+                else:
+                    print(f"No SaCo dict found for layer {i}, falling back to combined boost")
+                    boost_mask, selected_feat_ids = build_boost_mask_combined(
+                        sae_codes=codes_for_layer,
+                        alignment_dict=resources["dict"],
+                        predicted_class=predicted_class_idx,
+                        device=device,
+                        top_k=25,
+                        base_strength=10.,
+                        min_score=0.6,
+                        min_occurrences_for_class=1,
+                        debug=True
+                    )
                 # Option 2: Use correlation-based boosting (original)
                 # boost_mask, selected_feat_ids = build_boost_mask_hybrid_tier(
                 #     sae_codes=codes_for_layer,
@@ -871,6 +925,281 @@ def build_boost_mask_steerability(
         boost_mask *= patch_effect
 
     return boost_mask, selected.tolist()
+
+
+# ==================== SACO-BASED BOOST FUNCTIONS ====================
+
+@torch.no_grad()
+def build_boost_mask_saco_bidirectional(
+    sae_codes: torch.Tensor,
+    saco_results: Dict[str, Any],
+    predicted_class: int,
+    device: torch.device,
+    *,
+    suppress_strength: float = 0.7,  # Suppress over-attributed (multiply by this)
+    boost_strength: float = 1.4,    # Boost under-attributed (multiply by this)
+    min_activation: float = 0.05,
+    top_k_suppress: int = 10,       # Top features to suppress per class
+    top_k_boost: int = 5,           # Top features to boost per class
+    class_specific_boost: bool = True,  # NEW: Use class-specific feature selection
+    strict_class_filter: bool = False,  # NEW: Only use features that are dominant for target class
+    debug: bool = False
+) -> Tuple[torch.Tensor, Dict[str, List[int]]]:
+    """
+    Build boost/suppress mask using SaCo analysis results.
+    
+    Strategy:
+    - SUPPRESS features that are over-attributed (negative weighted SaCo)
+    - BOOST features that are under-attributed (positive weighted SaCo)
+    """
+    codes = sae_codes[0, 1:].to(device)  # Remove CLS token, shape: [n_patches, n_features]
+    n_patches, n_feats = codes.shape
+    
+    # Initialize mask as all ones (no effect)
+    boost_mask = torch.ones(n_patches, device=device)
+    selected_features = {'suppress': [], 'boost': []}
+    
+    # Get results by patch type
+    results_by_type = saco_results.get('results_by_type', {})
+    
+    # Process over-attributed features (SUPPRESS)
+    over_attributed = results_by_type.get('over_attributed', {})
+    if over_attributed:
+        suppress_features = []
+        
+        # NEW: Class-specific feature selection
+        if class_specific_boost:
+            predicted_class_name = IDX2CLS.get(predicted_class, 'unknown')
+            
+            # Filter features that are relevant for this specific class
+            class_relevant_features = []
+            for feat_id, stats in over_attributed.items():
+                class_dist = stats.get('class_distribution', {})
+                if predicted_class_name in class_dist:
+                    # Check strict class filter: only use features where target class is dominant
+                    if strict_class_filter:
+                        dominant_class = stats.get('dominant_class', '')
+                        if dominant_class != predicted_class_name:
+                            continue  # Skip features not dominated by target class
+                    
+                    # Score by how much this feature appears in the target class
+                    class_frequency = class_dist.get(predicted_class_name, 0)
+                    total_frequency = sum(class_dist.values())
+                    class_ratio = class_frequency / max(total_frequency, 1)
+                    
+                    # Use raw SaCo score for ranking (don't dilute with class ratio)
+                    raw_saco_score = stats['mean_weighted_saco']
+                    class_relevant_features.append((feat_id, stats, raw_saco_score))
+            
+            # Sort by raw SaCo score and take top_k
+            class_relevant_features.sort(key=lambda x: x[2])  # Most negative first
+            selected_features_data = class_relevant_features[:top_k_suppress]
+            
+            if debug:
+                print(f"Found {len(class_relevant_features)} class-relevant suppress features for {predicted_class_name}")
+        else:
+            # Original method: just take top global features
+            selected_features_data = [(feat_id, stats, stats['mean_weighted_saco']) 
+                                      for feat_id, stats in list(over_attributed.items())[:top_k_suppress]]
+        
+        for feat_id, stats, _ in selected_features_data:
+            # Check if feature exists and is active in this sample
+            if feat_id >= n_feats:
+                continue
+                
+            feat_activations = codes[:, feat_id]
+            active_mask = feat_activations > min_activation
+            
+            # Skip if feature is not active in this sample
+            if not active_mask.any():
+                continue
+            
+            # Apply suppression (class relevance already checked above)
+            # Apply suppression where feature is active
+            # More negative weighted_saco = stronger suppression
+            saco_score = abs(stats['mean_weighted_saco'])
+            adaptive_suppress = suppress_strength * min(1.0, saco_score)
+            
+            # Apply multiplicative suppression
+            patch_suppression = 1.0 - (feat_activations * (1.0 - adaptive_suppress))
+            boost_mask *= patch_suppression
+            
+            suppress_features.append(feat_id)
+            
+            if debug:
+                n_active_patches = active_mask.sum().item()
+                predicted_class_name = IDX2CLS.get(predicted_class, 'unknown')
+                print(f"  Suppressing feature {feat_id}: saco={stats['mean_weighted_saco']:.3f}, "
+                      f"class={stats['dominant_class']}, strength={adaptive_suppress:.3f}, "
+                      f"active_patches={n_active_patches}")
+        
+        selected_features['suppress'] = suppress_features
+    
+    # Process under-attributed features (BOOST)
+    under_attributed = results_by_type.get('under_attributed', {})
+    if under_attributed:
+        boost_features = []
+        
+        # NEW: Class-specific feature selection for boosting
+        if class_specific_boost:
+            predicted_class_name = IDX2CLS.get(predicted_class, 'unknown')
+            
+            # Filter features that are relevant for this specific class
+            class_relevant_features = []
+            for feat_id, stats in under_attributed.items():
+                class_dist = stats.get('class_distribution', {})
+                if predicted_class_name in class_dist:
+                    # Check strict class filter: only use features where target class is dominant
+                    if strict_class_filter:
+                        dominant_class = stats.get('dominant_class', '')
+                        if dominant_class != predicted_class_name:
+                            continue  # Skip features not dominated by target class
+                    
+                    # Score by how much this feature appears in the target class
+                    class_frequency = class_dist.get(predicted_class_name, 0)
+                    total_frequency = sum(class_dist.values())
+                    class_ratio = class_frequency / max(total_frequency, 1)
+                    
+                    # Use raw SaCo score for ranking (don't dilute with class ratio)
+                    raw_saco_score = stats['mean_weighted_saco']
+                    class_relevant_features.append((feat_id, stats, raw_saco_score))
+            
+            # Sort by raw SaCo score and take top_k (most positive first for boosting)
+            class_relevant_features.sort(key=lambda x: x[2], reverse=True)
+            selected_features_data = class_relevant_features[:top_k_boost]
+            
+            if debug:
+                print(f"Found {len(class_relevant_features)} class-relevant boost features for {predicted_class_name}")
+        else:
+            # Original method: just take top global features
+            selected_features_data = [(feat_id, stats, stats['mean_weighted_saco']) 
+                                      for feat_id, stats in list(under_attributed.items())[:top_k_boost]]
+        
+        for feat_id, stats, _ in selected_features_data:
+            # Check if feature exists and is active in this sample
+            if feat_id >= n_feats:
+                continue
+                
+            feat_activations = codes[:, feat_id]
+            active_mask = feat_activations > min_activation
+            
+            # Skip if feature is not active in this sample
+            if not active_mask.any():
+                continue
+            
+            # Apply boosting (class relevance already checked above)
+            # Apply boosting where feature is active
+            # More positive weighted_saco = stronger boost
+            saco_score = stats['mean_weighted_saco']
+            adaptive_boost = 1.0 + (boost_strength - 1.0) * min(1.0, saco_score)
+            
+            # Apply multiplicative boost
+            patch_boost = 1.0 + feat_activations * (adaptive_boost - 1.0)
+            boost_mask *= patch_boost
+            
+            boost_features.append(feat_id)
+            
+            if debug:
+                n_active_patches = active_mask.sum().item()
+                print(f"  Boosting feature {feat_id}: saco={stats['mean_weighted_saco']:.3f}, "
+                      f"class={stats['dominant_class']}, strength={adaptive_boost:.3f}, "
+                      f"active_patches={n_active_patches}")
+        
+        selected_features['boost'] = boost_features
+    
+    if debug:
+        # Count total active features for context
+        total_active_features = (codes.abs() > min_activation).any(dim=0).sum().item()
+        print(f"SaCo mask applied: {len(selected_features['suppress'])} suppressed, "
+              f"{len(selected_features['boost'])} boosted features "
+              f"(from {total_active_features} total active features)")
+    
+    return boost_mask, selected_features
+
+
+@torch.no_grad()
+def build_boost_mask_saco_suppress_only(
+    sae_codes: torch.Tensor,
+    saco_results: Dict[str, Any],
+    predicted_class: int,
+    device: torch.device,
+    *,
+    suppress_strength: float = 0.6,  # Suppress over-attributed features
+    min_activation: float = 0.05,
+    top_k: int = 15,                # Top over-attributed features to suppress
+    overlap_threshold: float = 0.7,  # Only suppress features with high overlap in problematic patches
+    debug: bool = False
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Conservative version that only suppresses over-attributed features.
+    """
+    codes = sae_codes[0, 1:].to(device)
+    n_patches, n_feats = codes.shape
+    boost_mask = torch.ones(n_patches, device=device)
+    
+    # Get over-attributed features
+    over_attributed = saco_results.get('results_by_type', {}).get('over_attributed', {})
+    if not over_attributed:
+        if debug:
+            print("No over-attributed features found in SaCo results")
+        return boost_mask, []
+    
+    suppress_features = []
+    predicted_class_name = IDX2CLS.get(predicted_class, 'unknown')
+    
+    # Sort by most problematic (most negative weighted_saco)
+    sorted_features = sorted(over_attributed.items(), key=lambda x: x[1]['mean_weighted_saco'])
+    
+    for feat_id, stats in sorted_features[:top_k]:
+        # Check if feature exists and is active in this sample first
+        if feat_id >= n_feats:
+            continue
+            
+        feat_activations = codes[:, feat_id]
+        active_mask = feat_activations > min_activation
+        
+        # Skip if feature is not active in this sample
+        if not active_mask.any():
+            continue
+            
+        # Filter by overlap ratio - only suppress features highly concentrated in problematic patches
+        if stats['mean_overlap_ratio'] < overlap_threshold:
+            continue
+            
+        # Check class relevance
+        class_dist = stats.get('class_distribution', {})
+        if predicted_class_name not in class_dist and stats.get('dominant_class') != predicted_class_name:
+            continue
+            
+        # Apply suppression for this active, relevant feature
+        # Adaptive suppression based on how problematic the feature is
+        saco_score = abs(stats['mean_weighted_saco'])
+        overlap_ratio = stats['mean_overlap_ratio']
+        
+        # Stronger suppression for more problematic features with higher overlap
+        adaptive_strength = suppress_strength * min(1.0, saco_score * overlap_ratio)
+        
+        # Apply suppression
+        patch_suppression = 1.0 - feat_activations * (1.0 - adaptive_strength)
+        boost_mask *= patch_suppression
+        
+        suppress_features.append(feat_id)
+        
+        if debug:
+            n_active_patches = active_mask.sum().item()
+            print(f"  Suppressing feature {feat_id}: saco={stats['mean_weighted_saco']:.3f}, "
+                  f"overlap={stats['mean_overlap_ratio']:.3f}, class={stats['dominant_class']}, "
+                  f"active_patches={n_active_patches}")
+    
+    if debug:
+        # Count total active features for context
+        total_active_features = (codes.abs() > min_activation).any(dim=0).sum().item()
+        print(f"SaCo suppression applied to {len(suppress_features)} features "
+              f"(from {total_active_features} total active features)")
+    
+    return boost_mask, suppress_features
+
+# =====================================================================
 
 
 def generate_attribution_prisma(

@@ -17,7 +17,6 @@ import analysis
 import io_utils
 import perturbation
 import visualization
-import vit.attribution as attribution
 import vit.model as model
 import vit.preprocessing as preprocessing
 from config import FileConfig, PipelineConfig
@@ -250,7 +249,7 @@ def classify_explain_single_image(
     loaded_result = io_utils.try_load_from_cache(cache_path)
     if config.file.use_cached_original and loaded_result:
         if loaded_result.attribution_paths is not None:
-            return loaded_result
+            return loaded_result, None
 
     # 1. Preprocess image
     _, input_tensor = preprocessing.preprocess_image(str(image_path), img_size=config.classify.target_size[0])
@@ -781,7 +780,7 @@ def run_pipeline(config: PipelineConfig,
     # class_specific_features = find_class_specific_features(vit_model, sae)
     # 2. Load all steering resources (SAEs and Dictionaries) ONCE
     # You can control which layers to use from your config file
-    steering_layers_from_config = getattr(config.classify, 'steering_layers', [5, 6, 7, 8])
+    steering_layers_from_config = getattr(config.classify, 'steering_layers', [8])
     steering_resources = load_steering_resources(steering_layers_from_config)
     print("All steering resources loaded.")
     class_analysis = None
