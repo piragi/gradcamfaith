@@ -1010,6 +1010,7 @@ def calculate_saco_for_single_image(
     return results
 
 
+
 def run_saco_from_pipeline_outputs_optimized(
     config: PipelineConfig,
     original_pipeline_results: List[ClassificationResult],
@@ -1022,6 +1023,7 @@ def run_saco_from_pipeline_outputs_optimized(
     Run SaCo analysis using optimized batched processing and in-memory operations.
     """
     print("=== SACO ANALYSIS ===")
+    
     saco_analysis_results: Dict[str, pd.DataFrame] = {}
     
     # Run SaCo calculation for all images
@@ -1140,6 +1142,8 @@ def run_saco_from_pipeline_outputs(
     Returns:
         Dictionary with analysis DataFrames.
     """
+    print("=== SACO ANALYSIS (Original) ===")
+    
     print("Perturbations for SaCo")
     paths_for_perturbation = [res.image_path for res in original_pipeline_results]
 

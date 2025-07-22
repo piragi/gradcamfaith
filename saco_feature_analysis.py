@@ -10,6 +10,7 @@ forward pass per image for improved efficiency and clarity.
 """
 
 import logging
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -130,11 +131,44 @@ def _calculate_feature_metrics_for_patches(
     return feature_metrics
 
 
+def compute_confidence_adjusted_score(
+    saco_score: float, 
+    overlap_ratio: float, 
+    n_occurrences: int,
+    confidence_threshold: int = 20
+) -> float:
+    """
+    Compute confidence-adjusted quality score that balances statistical reliability 
+    with feature quality.
+    
+    Args:
+        saco_score: Mean weighted SaCo score 
+        overlap_ratio: Mean overlap ratio
+        n_occurrences: Number of occurrences
+        confidence_threshold: Sample size for full confidence (default: 20)
+    
+    Returns:
+        Confidence-adjusted quality score
+    """
+    # Base quality score (higher absolute SaCo + higher overlap = better)
+    base_quality = abs(saco_score) * overlap_ratio
+    
+    # Confidence penalty: linear ramp up to confidence_threshold
+    confidence_factor = min(n_occurrences / confidence_threshold, 1.0)
+    
+    # Additional penalty for very low sample sizes (< 5 samples)
+    if n_occurrences < 5:
+        confidence_factor *= 0.5  # Heavy penalty for unreliable features
+    
+    return base_quality * confidence_factor
+
+
 def _aggregate_results(
     raw_results: Dict[int, Dict[str, List]],
-    min_occurrences: int = 2
+    min_occurrences: int = 2,
+    confidence_threshold: int = 20
 ) -> Dict[str, Dict[int, Dict[str, Any]]]:
-    """Aggregate raw occurrence data into final statistics and sort it."""
+    """Aggregate raw occurrence data into final statistics with confidence-adjusted scoring."""
     aggregated = defaultdict(dict)
     
     for feat_id, data_by_type in raw_results.items():
@@ -148,28 +182,124 @@ def _aggregate_results(
             classes_affected = [occ['image_class'] for occ in occurrences]
             class_counts = Counter(classes_affected)
             
+            # Compute standard statistics (optimized with numpy)
+            n_occ = len(occurrences)
+            mean_overlap = float(np.mean(overlap_ratios))
+            mean_saco = float(np.mean(weighted_sacos))
+            mean_activation = float(np.mean(mean_activations))
+            
+            # NEW: Compute confidence-adjusted score
+            confidence_score = compute_confidence_adjusted_score(
+                mean_saco, mean_overlap, n_occ, confidence_threshold
+            )
+            
             stats = {
-                'n_occurrences': len(occurrences),
-                'mean_overlap_ratio': float(torch.tensor(overlap_ratios).mean()),
-                'mean_weighted_saco': float(torch.tensor(weighted_sacos).mean()),
-                'mean_activation_in_problematic': float(torch.tensor(mean_activations).mean()),
+                'n_occurrences': n_occ,
+                'mean_overlap_ratio': mean_overlap,
+                'mean_weighted_saco': mean_saco,
+                'mean_activation_in_problematic': mean_activation,
+                'confidence_adjusted_score': confidence_score,  # NEW
                 'images_affected': [occ['image'] for occ in occurrences],
                 'class_distribution': dict(class_counts),
                 'dominant_class': class_counts.most_common(1)[0][0] if class_counts else 'unknown',
             }
             aggregated[patch_type][feat_id] = stats
 
+    # Sort by confidence-adjusted score instead of raw SaCo score
     sorted_results = {}
     for patch_type, feature_stats in aggregated.items():
-        sort_ascending = (patch_type == 'over_attributed')
         sorted_features = sorted(
             feature_stats.items(),
-            key=lambda item: item[1]['mean_weighted_saco'],
-            reverse=not sort_ascending
+            key=lambda item: item[1]['confidence_adjusted_score'],
+            reverse=True  # Higher confidence score = better
         )
         sorted_results[patch_type] = dict(sorted_features)
 
     return sorted_results
+
+
+def process_image_batch(
+    batch_items: List[Tuple[str, Any]], 
+    model: HookedSAEViT, 
+    sae: SparseAutoencoder, 
+    layer_idx: int,
+    device: torch.device,
+    transform: Any,
+    activation_threshold: float,
+    min_overlap_ratio: float
+) -> Dict[int, Dict[str, List]]:
+    """Process a batch of images efficiently - simple approach with batched GPU ops."""
+    
+    # Prepare batch data
+    batch_images = []
+    batch_metadata = []
+    
+    for image_name, image_df in batch_items:
+        try:
+            if image_name.startswith('results/'):
+                image_path = Path(image_name)
+            else:
+                image_path = Path(f"results/val/preprocessed/{Path(image_name).name}")
+            
+            if not image_path.exists():
+                logging.warning(f"Image not found, skipping: {image_path}")
+                continue
+
+            image = Image.open(image_path).convert('RGB')
+            img_tensor = transform(image)
+            batch_images.append(img_tensor)
+            batch_metadata.append((image_name, image_df))
+            
+        except Exception as e:
+            logging.warning(f"Error loading {image_name}: {e}")
+            continue
+    
+    if not batch_images:
+        return {}
+    
+    # Batch forward pass (the main optimization)
+    batch_tensor = torch.stack(batch_images).to(device)  # [B, C, H, W]
+    resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
+    
+    with torch.no_grad():
+        _, cache = model.run_with_cache(batch_tensor, names_filter=[resid_hook_name])
+        resid = cache[resid_hook_name]  # [B, T+1, D]
+        _, codes = sae.encode(resid)    # [B, T+1, K]
+    
+    # Simple per-image processing (original approach)
+    batch_results = {}
+    
+    for batch_idx, (image_name, image_df) in enumerate(batch_metadata):
+        feature_activations = codes[batch_idx, 1:]  # Skip CLS token
+        image_class = extract_class_from_image_name(image_name)
+        
+        for patch_type in ['over_attributed', 'under_attributed']:
+            target_patches_df = image_df[image_df['problem_type'] == patch_type]
+            if target_patches_df.empty:
+                continue
+
+            target_patch_indices = torch.tensor(target_patches_df['patch_id'].values, dtype=torch.long).to(device)
+            target_saco_scores = torch.tensor(target_patches_df['patch_saco'].values, dtype=torch.float32).to(device)
+
+            feature_metrics = _calculate_feature_metrics_for_patches(
+                feature_activations,
+                target_patch_indices,
+                target_saco_scores,
+                activation_threshold
+            )
+
+            for feat_id, metrics in feature_metrics.items():
+                if metrics['overlap_ratio'] >= min_overlap_ratio:
+                    if feat_id not in batch_results:
+                        batch_results[feat_id] = {'over_attributed': [], 'under_attributed': []}
+                    
+                    batch_results[feat_id][patch_type].append({
+                        'image': image_name,
+                        'image_class': image_class,
+                        **metrics
+                    })
+    
+    return batch_results
 
 
 def analyze_saco_features_single_pass(
@@ -183,6 +313,7 @@ def analyze_saco_features_single_pass(
     min_overlap_ratio: float = 0.3,
     min_occurrences: int = 2,
     activation_threshold: float = 0.1,
+    batch_size: int = 4,  # NEW: batch processing
 ) -> Dict[str, Any]:
     """
     Main analysis function to identify features spanning problematic SaCo patches
@@ -208,67 +339,46 @@ def analyze_saco_features_single_pass(
     
     images_to_process = list(image_groups)[:n_images] if n_images is not None else list(image_groups)
     
-    for image_name, image_df in tqdm(images_to_process, desc="Processing training images", unit="img"):
+    # Process images in batches for better GPU utilization
+    total_batches = (len(images_to_process) + batch_size - 1) // batch_size
+    
+    for batch_idx in tqdm(range(total_batches), desc="Processing image batches", unit="batch"):
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, len(images_to_process))
+        batch_items = images_to_process[start_idx:end_idx]
+        
         try:
-            if image_name.startswith('results/'):
-                image_path = Path(image_name)
-            else:
-                image_path = Path(f"results/val/preprocessed/{Path(image_name).name}")
+            # Process batch
+            batch_results = process_image_batch(
+                batch_items, model, sae, layer_idx, device, transform,
+                activation_threshold, min_overlap_ratio
+            )
             
-            if not image_path.exists():
-                logging.warning(f"Image not found, skipping: {image_path}")
-                continue
-
-            image = Image.open(image_path).convert('RGB')
-            img_tensor = transform(image).unsqueeze(0).to(device)
-            resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
-            with torch.no_grad():
-                _, cache = model.run_with_cache(img_tensor, names_filter=[resid_hook_name])
-                resid = cache[resid_hook_name]
-                _, codes = sae.encode(resid)
-            
-            feature_activations = codes[0, 1:]
-
-            for patch_type in ['over_attributed', 'under_attributed']:
-                target_patches_df = image_df[image_df['problem_type'] == patch_type]
-                if target_patches_df.empty:
-                    continue
-
-                target_patch_indices = torch.tensor(target_patches_df['patch_id'].values, device=device, dtype=torch.long)
-                target_saco_scores = torch.tensor(target_patches_df['patch_saco'].values, device=device, dtype=torch.float32)
-
-                feature_metrics = _calculate_feature_metrics_for_patches(
-                    feature_activations,
-                    target_patch_indices,
-                    target_saco_scores,
-                    activation_threshold
-                )
-
-                image_class = extract_class_from_image_name(image_name)
-                for feat_id, metrics in feature_metrics.items():
-                    if metrics['overlap_ratio'] >= min_overlap_ratio:
-                        raw_feature_results[feat_id][patch_type].append({
-                            'image': image_name,
-                            'image_class': image_class,
-                            **metrics
-                        })
+            # Merge batch results into main results
+            for feat_id, type_data in batch_results.items():
+                for patch_type, occurrences in type_data.items():
+                    raw_feature_results[feat_id][patch_type].extend(occurrences)
+                    
         except Exception as e:
-            logging.error(f"Error processing {image_name}: {e}", exc_info=True)
+            logging.error(f"Error processing batch {batch_idx}: {e}", exc_info=True)
+            
+        # Optional: Clear GPU cache every few batches to prevent memory issues
+        if (batch_idx + 1) % 10 == 0:
+            torch.cuda.empty_cache()
 
     logging.info(f"\n--- Aggregating results from {len(images_to_process)} processed images ---")
-    final_results = _aggregate_results(raw_feature_results, min_occurrences)
+    final_results = _aggregate_results(raw_feature_results, min_occurrences, confidence_threshold=20)
 
     for patch_type, sorted_features in final_results.items():
         logging.info(f"\nTop 10 features for '{patch_type}' patches (found {len(sorted_features)} total):")
         for i, (feat_id, stats) in enumerate(list(sorted_features.items())[:20]):
              logging.info(
                 f"  {i+1}. Feature {feat_id}: "
+                f"conf_score={stats['confidence_adjusted_score']:.3f}, "
                 f"w_saco={stats['mean_weighted_saco']:.3f}, "
-                f"act={stats['mean_activation_in_problematic']:.3f}, "
                 f"overlap={stats['mean_overlap_ratio']:.2f}, "
                 f"n_occ={stats['n_occurrences']}, "
-                f"dom_class={stats['dominant_class']} "
-                f"({stats['class_distribution']})"
+                f"dom_class={stats['dominant_class']}"
             )
     
     # --- APPLY FIX HERE ---
@@ -311,12 +421,13 @@ if __name__ == "__main__":
         model=model,
         sae=sae,
         layer_idx=layer_idx,
-        negative_threshold=-0.6,     # Balanced: catch moderately over-attributed
-        positive_threshold=0.8,      # Balanced: catch strongly under-attributed  
+        negative_threshold=-0.5,     # More inclusive: catch moderate over-attribution
+        positive_threshold=0.5,      # More inclusive: catch moderate under-attribution  
         n_images=50000,
-        min_overlap_ratio=0.7,       # Balanced: 50% overlap 
-        min_occurrences=20            # Balanced: 5+ occurrences for reliability
+        min_overlap_ratio=0.7,       # More inclusive: 30% overlap is sufficient
+        min_occurrences=5,           # Minimal cutoff: confidence weighting handles reliability
+        batch_size=32,                 # Optimized batch size for vectorized processing
     )
     
-    save_path = f"results/saco_problematic_features_l{layer_idx}.pt"
+    save_path = f"results/saco_problematic_features_l{layer_idx}_moderate.pt"
     save_analysis_results(results, save_path)
