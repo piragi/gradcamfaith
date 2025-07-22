@@ -101,7 +101,8 @@ def preprocess_image(
 
     # Get default processor if none provided
     if processor is None:
-        processor = get_default_processor(img_size)
+        # processor = get_default_processor(img_size)
+        processor = get_processor_for_precached_224_images()
 
     # Apply preprocessing
     input_tensor = processor(image)
