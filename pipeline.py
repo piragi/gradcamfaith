@@ -1010,7 +1010,7 @@ def calculate_saco_for_single_image(
     return results
 
 
-def run_saco_from_pipeline_outputs(
+def run_saco_from_pipeline_outputs_optimized(
     config: PipelineConfig,
     original_pipeline_results: List[ClassificationResult],
     vit_model: VisionTransformer,
@@ -1303,7 +1303,7 @@ def run_pipeline(config: PipelineConfig,
         run_saco_from_pipeline_outputs(config, original_results_explained, vit_model, device)
     else:
         # For production (val dataset), use optimized version only
-        run_saco_from_pipeline_outputs(config, original_results_explained, vit_model, device)
+        run_saco_from_pipeline_outputs_optimized(config, original_results_explained, vit_model, device)
 
     print("Full pipeline finished.")
     return original_results_explained

@@ -44,7 +44,12 @@ def extract_class_from_image_name(image_name: str) -> str:
     """Extract anatomical class from image filename."""
     filename = Path(image_name).stem
     parts = filename.split('_')
-    return parts[-1] if len(parts) >= 3 else 'unknown'
+    # Training format: train_uuid_class_aug0 -> class is parts[2]
+    # Validation format: val_uuid_class -> class is parts[2]
+    if len(parts) >= 3:
+        return parts[2]  # Class is always the third part
+    else:
+        return 'unknown'
 
 
 def patch_id_to_coordinates(patch_id: int, n_patches_per_side: int = 14) -> Tuple[int, int]:
@@ -54,10 +59,13 @@ def patch_id_to_coordinates(patch_id: int, n_patches_per_side: int = 14) -> Tupl
 
 def load_saco_patch_data(csv_path: str) -> pd.DataFrame:
     """Load and process SaCo patch analysis data."""
+    print("Loading CSV data...")
     df = pd.read_csv(csv_path)
-    df[['patch_row', 'patch_col']] = df['patch_id'].apply(
-        lambda x: pd.Series(patch_id_to_coordinates(x))
-    )
+    print("Processing patch coordinates...")
+    # Vectorized coordinate conversion - much faster than apply
+    n_patches_per_side = 14
+    df['patch_row'] = df['patch_id'] // n_patches_per_side
+    df['patch_col'] = df['patch_id'] % n_patches_per_side
     return df
 
 
@@ -142,9 +150,9 @@ def _aggregate_results(
             
             stats = {
                 'n_occurrences': len(occurrences),
-                'mean_overlap_ratio': np.mean(overlap_ratios),
-                'mean_weighted_saco': np.mean(weighted_sacos),
-                'mean_activation_in_problematic': np.mean(mean_activations),
+                'mean_overlap_ratio': float(torch.tensor(overlap_ratios).mean()),
+                'mean_weighted_saco': float(torch.tensor(weighted_sacos).mean()),
+                'mean_activation_in_problematic': float(torch.tensor(mean_activations).mean()),
                 'images_affected': [occ['image'] for occ in occurrences],
                 'class_distribution': dict(class_counts),
                 'dominant_class': class_counts.most_common(1)[0][0] if class_counts else 'unknown',
@@ -192,12 +200,15 @@ def analyze_saco_features_single_pass(
         f"{len(problematic_df[problematic_df['problem_type'] == 'under_attributed'])} under-attributed patches."
     )
 
+    # Only group images that actually have problematic patches - saves memory
+    unique_problematic_images = problematic_df['image_name'].unique()
+    logging.info(f"Processing {len(unique_problematic_images)} unique images with problematic patches")
     image_groups = problematic_df.groupby('image_name')
     raw_feature_results = defaultdict(lambda: defaultdict(list))
     
     images_to_process = list(image_groups)[:n_images] if n_images is not None else list(image_groups)
     
-    for image_name, image_df in tqdm(images_to_process, desc="Processing images"):
+    for image_name, image_df in tqdm(images_to_process, desc="Processing training images", unit="img"):
         try:
             if image_name.startswith('results/'):
                 image_path = Path(image_name)
@@ -223,7 +234,7 @@ def analyze_saco_features_single_pass(
                 if target_patches_df.empty:
                     continue
 
-                target_patch_indices = torch.tensor(target_patches_df['patch_id'].values, device=device)
+                target_patch_indices = torch.tensor(target_patches_df['patch_id'].values, device=device, dtype=torch.long)
                 target_saco_scores = torch.tensor(target_patches_df['patch_saco'].values, device=device, dtype=torch.float32)
 
                 feature_metrics = _calculate_feature_metrics_for_patches(
@@ -293,18 +304,18 @@ if __name__ == "__main__":
     sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
     sae.to(next(model.parameters()).device)
     
-    saco_csv_path = "results/val/saco_patch_analysis_mean.csv"
+    saco_csv_path = "results/train/saco_patch_analysis_mean_optimized_2025-07-22_13-27.csv"
     
     results = analyze_saco_features_single_pass(
         saco_csv_path=saco_csv_path,
         model=model,
         sae=sae,
         layer_idx=layer_idx,
-        negative_threshold=-0.8,     # Balanced: catch moderately over-attributed
+        negative_threshold=-0.6,     # Balanced: catch moderately over-attributed
         positive_threshold=0.8,      # Balanced: catch strongly under-attributed  
         n_images=50000,
         min_overlap_ratio=0.7,       # Balanced: 50% overlap 
-        min_occurrences=5            # Balanced: 5+ occurrences for reliability
+        min_occurrences=20            # Balanced: 5+ occurrences for reliability
     )
     
     save_path = f"results/saco_problematic_features_l{layer_idx}.pt"
