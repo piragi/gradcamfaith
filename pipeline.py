@@ -1,14 +1,11 @@
 # pipeline.py
-import json
 import logging
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import quantus
 import torch
 from diffusers import StableDiffusionInpaintPipeline
 from PIL import Image
@@ -236,10 +233,7 @@ def classify_explain_single_image(
     image_path: Path,
     vit_model: model.VisionTransformer,  # Hooks should be registered on this model instance
     device: torch.device,
-    sae,
-    class_specific_features,
     steering_resources: Optional[Dict[int, Dict[str, Any]]],  # ADDED
-    class_analysis
 ) -> ClassificationResult:
     """
     Classifies a single image AND generates explanations.
@@ -255,7 +249,7 @@ def classify_explain_single_image(
     loaded_result = io_utils.try_load_from_cache(cache_path)
     if config.file.use_cached_original and loaded_result:
         if loaded_result.attribution_paths is not None:
-            return loaded_result, None
+            return loaded_result
 
     # 1. Preprocess image
     _, input_tensor = preprocessing.preprocess_image(str(image_path), img_size=config.classify.target_size[0])
@@ -267,11 +261,8 @@ def classify_explain_single_image(
         input_tensor=input_tensor,
         config=config,
         device=device,
-        sae=sae,
-        sf_af_dict=class_specific_features,
         steering_resources=steering_resources,
         enable_steering=config.file.weighted,
-        class_analysis=class_analysis,
     )
 
     # Extract raw attribution (shape 196 - one value per ViT patch)
@@ -346,7 +337,7 @@ def classify_explain_single_image(
     # 8. Cache the combined result
     io_utils.save_to_cache(cache_path, final_result)
 
-    return final_result, None
+    return final_result
 
 
 def classify_and_explain_dataset(
@@ -356,22 +347,17 @@ def classify_and_explain_dataset(
     image_paths_to_process: List[Path],
     output_results_csv_path: Path,
     steering_resources: Optional[Dict[int, Dict[str, Any]]],  # ADDED
-    sae,
-    class_specific_features,
-    class_analysis
-) -> Tuple[List[ClassificationResult], List[Dict[str, Any]]]:  # Return gradient infos too
+) -> List[ClassificationResult]:
     collected_results: List[ClassificationResult] = []
-    gradient_infos: List[Dict[str, Any]] = []
 
     for image_path in tqdm(
         image_paths_to_process, desc=f"Classifying & Explaining (suffix: '{config.file.output_suffix}')"
     ):
         try:
-            result, gradient_info = classify_explain_single_image(
-                config, image_path, vit_model, device, sae, class_specific_features, steering_resources, class_analysis
+            result = classify_explain_single_image(
+                config, image_path, vit_model, device, steering_resources
             )
             collected_results.append(result)
-            gradient_infos.append(gradient_info)
         except Exception as e:
             print(f"Error C&E {image_path.name}: {e}")
             import traceback
@@ -383,34 +369,7 @@ def classify_and_explain_dataset(
     else:
         print("No images successfully C&E.")
 
-    # Analyze gradient patterns across all images
-    if gradient_infos:
-        gradient_summary = collect_gradient_analysis(gradient_infos)
-        if gradient_summary:
-            print("\n=== GRADIENT ANALYSIS SUMMARY ===")
-            print(f"Analyzed {gradient_summary['num_samples']} images with SAE boosting")
-            print(f"Average Gradient Magnitude: {gradient_summary['avg_boosted_grad_magnitude']:.6f}")
-            print(f"Average Grad/Act Ratio: {gradient_summary['avg_grad_to_act_ratio']:.6f}")
-            print(f"Average Gradient Percentile: {gradient_summary['avg_grad_percentile']:.1f}%")
-            print(f"Average Gradient Sparsity: {gradient_summary['avg_gradient_sparsity']:.3f}")
-
-            # Save detailed gradient info to JSON for further analysis
-            gradient_json_path = config.file.output_dir / f"gradient_analysis{config.file.output_suffix}.json"
-            with open(gradient_json_path, 'w') as f:
-                json.dump({
-                    'summary':
-                    gradient_summary,
-                    'per_image': [{
-                        'image': str(path.name),
-                        **info
-                    } for path, info in zip(image_paths_to_process, gradient_infos) if info]
-                },
-                          f,
-                          indent=2,
-                          default=str)
-            print(f"\nDetailed gradient analysis saved to: {gradient_json_path}")
-
-    return collected_results, gradient_infos
+    return collected_results
 
 
 def classify_dataset_only(
@@ -419,14 +378,10 @@ def classify_dataset_only(
 ) -> List[ClassificationResult]:
     collected_results: List[ClassificationResult] = []
     
-    
     for image_path in tqdm(image_paths_to_process, desc=f"Classifying dataset (suffix: '{config.file.output_suffix}')"):
         try:
             result = classify_single_image(config, image_path, vit_model, device)
             collected_results.append(result)
-            
-            
-                
         except Exception as e:
             print(f"Error classifying {image_path.name}: {e}")
             import traceback
@@ -452,7 +407,6 @@ def perturb_single_patch(
     config: PipelineConfig,
     original_image_path: Path,
     patch_info_dc: PerturbationPatchInfo,
-    sd_pipe: Optional[StableDiffusionInpaintPipeline] = None
 ) -> Optional[PerturbedImageRecord]:
     original_image_stem = original_image_path.stem
     patch_size = config.perturb.patch_size
@@ -647,611 +601,6 @@ def run_classification_standalone(
     return results
 
 
-# ===== OPTIMIZED SACO FUNCTIONS =====
-
-def create_batched_masks(image_size: Tuple[int, int], patch_size: int, 
-                        patch_coords: List[Tuple[int, int]]) -> torch.Tensor:
-    """Create all patch masks for an image in a single batched tensor - MATCHES original approach exactly."""
-    height, width = image_size
-    num_patches = len(patch_coords)
-    
-    masks = torch.zeros((num_patches, height, width), dtype=torch.bool)
-    
-    for i, (x, y) in enumerate(patch_coords):
-        # Match original approach: NO bounds checking (like original perturbation.py:149)
-        # np_mask[y:y + patch_size, x:x + patch_size] = True
-        y_end = y + patch_size
-        x_end = x + patch_size
-        
-        # But we still need to prevent out-of-bounds access in tensor operations
-        y_end = min(y_end, height)
-        x_end = min(x_end, width)
-        masks[i, y:y_end, x:x_end] = True
-        
-    return masks
-
-
-def create_batched_masks_vectorized(image_size: Tuple[int, int], patch_size: int, 
-                                   patch_coords: List[Tuple[int, int]]) -> torch.Tensor:
-    """Create all patch masks using vectorized operations - much faster than loop-based approach."""
-    height, width = image_size
-    num_patches = len(patch_coords)
-    
-    if num_patches == 0:
-        return torch.zeros((0, height, width), dtype=torch.bool)
-    
-    # Convert coordinates to tensors for vectorized operations
-    coords_tensor = torch.tensor(patch_coords, dtype=torch.long)  # [num_patches, 2] (x, y)
-    x_coords = coords_tensor[:, 0]  # [num_patches]
-    y_coords = coords_tensor[:, 1]  # [num_patches]
-    
-    # Create coordinate grids
-    y_grid, x_grid = torch.meshgrid(torch.arange(height), torch.arange(width), indexing='ij')
-    y_grid = y_grid.unsqueeze(0)  # [1, height, width]
-    x_grid = x_grid.unsqueeze(0)  # [1, height, width]
-    
-    # Broadcast patch coordinates for comparison
-    x_start = x_coords.view(-1, 1, 1)  # [num_patches, 1, 1]
-    y_start = y_coords.view(-1, 1, 1)  # [num_patches, 1, 1]
-    x_end = x_start + patch_size
-    y_end = y_start + patch_size
-    
-    # Vectorized mask creation: check if each pixel is within any patch bounds
-    x_in_range = (x_grid >= x_start) & (x_grid < torch.clamp(x_end, max=width))
-    y_in_range = (y_grid >= y_start) & (y_grid < torch.clamp(y_end, max=height))
-    masks = x_in_range & y_in_range  # [num_patches, height, width]
-    
-    return masks
-
-
-def apply_batched_perturbations_exact_match(image_tensor: torch.Tensor, 
-                                          masks: torch.Tensor, 
-                                          perturbation_method: str = "mean",
-                                          original_pil_image: Image.Image = None,
-                                          patch_coords: List[Tuple[int, int]] = None,
-                                          patch_size: int = 16) -> torch.Tensor:
-    """Apply perturbations using EXACT same method as original - ensures 100% identical results."""
-    num_patches, height, width = masks.shape
-    channels = image_tensor.shape[0]
-    
-    if num_patches == 0:
-        return torch.empty((0, channels, height, width), dtype=image_tensor.dtype, device=image_tensor.device)
-    
-    if perturbation_method == "mean" and original_pil_image is not None:
-        from PIL import ImageStat
-        
-        # EXACT reproduction of perturbation.py:perturb_patch_mean()
-        processor = preprocessing.get_processor_for_precached_224_images()
-        
-        # Calculate mean color once using EXACT original method  
-        mean_channels = ImageStat.Stat(original_pil_image).mean
-        mean_color = int(mean_channels[0])  # Take only first channel like original
-        
-        # Create grayscale patch template once (performance optimization)
-        patch_template = Image.new("L", (patch_size, patch_size), mean_color)
-        
-        # Batch preprocessing: collect all PIL images first, then process together
-        pil_images = []
-        for i in range(num_patches):
-            x, y = patch_coords[i] if patch_coords else (0, 0)
-            
-            # Create perturbed PIL image using EXACT original method
-            result_pil = original_pil_image.copy()
-            
-            # Paste patch exactly like original 
-            result_pil.paste(patch_template, (x, y))
-            pil_images.append(result_pil)
-        
-        # Batch apply preprocessing (this can potentially be optimized further)
-        perturbed_tensors = [processor(pil_img) for pil_img in pil_images]
-        
-        # Stack into batch tensor
-        return torch.stack(perturbed_tensors)
-            
-    else:
-        # Fallback: use tensor-only operations for when we don't have PIL image
-        base_tensor = image_tensor.unsqueeze(0).repeat(num_patches, 1, 1, 1)
-        mean_value = image_tensor.mean().item()
-        
-        # Apply perturbation using tensor operations
-        masks_expanded = masks.unsqueeze(1).expand(-1, channels, -1, -1)
-        perturbation_values = torch.full_like(base_tensor, mean_value)
-        
-        return torch.where(masks_expanded, perturbation_values, base_tensor)
-
-
-def batched_model_inference(model_instance: model.VisionTransformer,
-                         image_batch: torch.Tensor,
-                         device: torch.device,
-                         batch_size: int = 32) -> List[Dict]:
-  """Run model inference on a batch of images efficiently."""
-  model_instance.eval()
-  all_predictions = []
-
-  with torch.no_grad():
-      for i in range(0, len(image_batch), batch_size):
-          batch_chunk = image_batch[i:i + batch_size].to(device)
-
-          logits = model_instance(batch_chunk)
-          probabilities = torch.softmax(logits, dim=1)
-          predicted_indices = torch.argmax(probabilities, dim=1)
-
-          for j in range(len(batch_chunk)):
-              pred_dict = {
-                  "predicted_class_idx": predicted_indices[j].item(),
-                  "probabilities": probabilities[j],
-                  "confidence": probabilities[j, predicted_indices[j]].item()
-              }
-              all_predictions.append(pred_dict)
-
-  return all_predictions
-
-
-def calculate_saco_vectorized(attributions: np.ndarray, confidence_impacts: np.ndarray) -> float:
-    """
-    Vectorized SaCo calculation - eliminates O(n²) nested loops.
-    
-    Args:
-        attributions: Array of attribution values per patch (already sorted descending)
-        confidence_impacts: Array of confidence impact values per patch
-        
-    Returns:
-        SaCo score
-    """
-    n = len(attributions)
-    if n < 2:
-        return 0.0
-    
-    # Create all pairwise differences using broadcasting
-    attr_diffs = attributions[:, None] - attributions[None, :]  # [n, n]
-    impact_diffs = confidence_impacts[:, None] - confidence_impacts[None, :]  # [n, n]
-    
-    # Only consider upper triangular part (i < j comparisons)
-    upper_tri_mask = np.triu(np.ones((n, n), dtype=bool), k=1)
-    
-    # Extract upper triangular values
-    attr_diffs_tri = attr_diffs[upper_tri_mask]  # [n*(n-1)/2]
-    impact_diffs_tri = impact_diffs[upper_tri_mask]  # [n*(n-1)/2]
-    
-    # Calculate faithfulness: impact_i >= impact_j (since we're looking at i < j)
-    is_faithful = impact_diffs_tri >= 0
-    
-    # Calculate weights
-    weights = np.where(is_faithful, attr_diffs_tri, -attr_diffs_tri)
-    
-    # Calculate SaCo score
-    total_weight = np.sum(np.abs(weights))
-    if total_weight > 0:
-        return np.sum(weights) / total_weight
-    else:
-        return 0.0
-
-
-def calculate_patch_saco_vectorized(attributions: np.ndarray, confidence_impacts: np.ndarray, patch_ids: np.ndarray) -> Dict[int, float]:
-    """
-    Vectorized calculation of patch-specific SaCo scores.
-    
-    Args:
-        attributions: Array of attribution values per patch (already sorted descending)
-        confidence_impacts: Array of confidence impact values per patch  
-        patch_ids: Array of patch IDs corresponding to each attribution/impact
-        
-    Returns:
-        Dictionary mapping patch_id to patch_saco_score
-    """
-    n = len(attributions)
-    if n < 2:
-        return {int(pid): 0.0 for pid in patch_ids}
-    
-    # First compute all pairwise data vectorized
-    attr_diffs = attributions[:, None] - attributions[None, :]  # [n, n]
-    impact_diffs = confidence_impacts[:, None] - confidence_impacts[None, :]  # [n, n]
-    
-    # Only consider upper triangular part (i < j comparisons)
-    upper_tri_mask = np.triu(np.ones((n, n), dtype=bool), k=1)
-    
-    # Extract pair data
-    i_indices, j_indices = np.where(upper_tri_mask)
-    attr_diffs_pairs = attr_diffs[upper_tri_mask]
-    impact_diffs_pairs = impact_diffs[upper_tri_mask]
-    
-    # Calculate faithfulness and weights
-    is_faithful = impact_diffs_pairs >= 0
-    weights = np.where(is_faithful, attr_diffs_pairs, -attr_diffs_pairs)
-    
-    # Get patch IDs for each pair
-    patch_i_ids = patch_ids[i_indices]
-    patch_j_ids = patch_ids[j_indices]
-    
-    # Calculate patch-specific SaCo scores
-    patch_saco_scores = {}
-    unique_patch_ids = np.unique(patch_ids)
-    
-    for patch_id in unique_patch_ids:
-        # Find pairs involving this patch
-        involved_as_i = (patch_i_ids == patch_id)
-        involved_as_j = (patch_j_ids == patch_id)
-        involved = involved_as_i | involved_as_j
-        
-        if not np.any(involved):
-            patch_saco_scores[int(patch_id)] = 0.0
-            continue
-        
-        # Get weights for this patch's pairs
-        patch_weights = weights[involved]
-        
-        # Calculate patch-specific SaCo
-        sum_weights = np.sum(patch_weights)
-        sum_abs_weights = np.sum(np.abs(patch_weights))
-        
-        if sum_abs_weights > 0:
-            patch_saco_scores[int(patch_id)] = sum_weights / sum_abs_weights
-        else:
-            patch_saco_scores[int(patch_id)] = 0.0
-    
-    return patch_saco_scores
-
-
-
-
-def calculate_saco_for_single_image(
-    original_result: ClassificationResult,
-    vit_model: model.VisionTransformer,
-    config: PipelineConfig,
-    device: torch.device,
-    max_patches_per_batch: int = 512
-) -> List[Dict]:
-    """Calculate SaCo metrics for a single image using optimized batched operations."""
-    image_path = original_result.image_path
-    
-    # Load and preprocess original image once
-    original_pil, original_tensor = preprocessing.preprocess_image(
-        str(image_path), img_size=config.classify.target_size[0]
-    )
-    
-    # Load raw attribution map (shape 196 - one value per ViT patch)
-    raw_attribution_path = original_result.attribution_paths.raw_attribution_path
-    raw_attribution_map = np.load(raw_attribution_path)  # Shape: (196,)
-    
-    # Generate ViT patch coordinates for 14x14 grid (224/16 = 14)
-    # Each ViT patch is 16x16 pixels
-    vit_patch_size = 16
-    patch_coords = []
-    patch_infos = []
-    
-    # Generate 14x14 = 196 patches that match ViT's patch grid
-    for patch_row in range(14):
-        for patch_col in range(14):
-            x = patch_col * vit_patch_size
-            y = patch_row * vit_patch_size
-            patch_id = patch_row * 14 + patch_col  # 0 to 195
-            
-            patch_coords.append((x, y))
-            patch_infos.append(PerturbationPatchInfo(patch_id=patch_id, x=x, y=y))
-    
-    if not patch_coords:
-        return []
-    
-    # Create all masks in batch - use vectorized approach for performance
-    # Use fixed 16x16 ViT patch size, not the config.perturb.patch_size
-    width, height = original_pil.size
-    masks = create_batched_masks_vectorized(
-        image_size=(height, width),
-        patch_size=vit_patch_size,
-        patch_coords=patch_coords
-    )
-    
-    # Memory-efficient processing: handle large patch counts by batching
-    if len(patch_coords) > max_patches_per_batch:
-        # Process in chunks to avoid memory issues
-        all_predictions = []
-        for i in range(0, len(patch_coords), max_patches_per_batch):
-            end_idx = min(i + max_patches_per_batch, len(patch_coords))
-            batch_masks = masks[i:end_idx]
-            
-            # Apply perturbations for this batch using exact match method
-            batch_coords = patch_coords[i:end_idx]
-            batch_perturbed = apply_batched_perturbations_exact_match(
-                original_tensor, batch_masks, config.perturb.method, original_pil, 
-                batch_coords, vit_patch_size
-            )
-            
-            # Run inference for this batch
-            batch_predictions = batched_model_inference(
-                vit_model, batch_perturbed, device, batch_size=min(256, len(batch_perturbed))
-            )
-            all_predictions.extend(batch_predictions)
-            
-            # Clear GPU memory for this batch to prevent accumulation
-            del batch_perturbed, batch_masks
-            if device.type == 'cuda':
-                torch.cuda.empty_cache()
-        
-        perturbed_predictions = all_predictions
-    else:
-        # Apply all perturbations using exact match approach
-        perturbed_batch = apply_batched_perturbations_exact_match(
-            original_tensor, masks, config.perturb.method, original_pil,
-            patch_coords, vit_patch_size
-        )
-        
-        # Run batched inference but ensure compatibility with original approach
-        perturbed_predictions = batched_model_inference(
-            vit_model, perturbed_batch, device, batch_size=min(1024, len(perturbed_batch))
-        )
-    
-    
-    # Calculate results for each patch
-    results = []
-    original_pred = original_result.prediction
-    
-    for i, (patch_info, (x, y)) in enumerate(zip(patch_infos, patch_coords)):
-        perturbed_pred = perturbed_predictions[i]
-        
-        # Use raw attribution value directly for this ViT patch
-        # patch_id corresponds directly to the index in raw_attribution_map
-        raw_patch_attr = float(raw_attribution_map[patch_info.patch_id])
-        
-        
-        result = {
-            "original_image": str(image_path),
-            "patch_id": patch_info.patch_id,
-            "x": patch_info.x,
-            "y": patch_info.y,
-            "mean_attribution": raw_patch_attr,
-            "original_predicted_idx": original_pred.predicted_class_idx,
-            "original_confidence": original_pred.confidence,
-            "perturbed_predicted_idx": perturbed_pred["predicted_class_idx"],
-            "perturbed_confidence": perturbed_pred["confidence"],
-            "class_changed": (original_pred.predicted_class_idx != perturbed_pred["predicted_class_idx"]),
-            "confidence_delta": perturbed_pred["confidence"] - original_pred.confidence,
-            "confidence_delta_abs": abs(perturbed_pred["confidence"] - original_pred.confidence)
-        }
-        results.append(result)
-        
-        
-    return results
-
-
-
-def run_saco_from_pipeline_outputs_optimized(
-    config: PipelineConfig,
-    original_pipeline_results: List[ClassificationResult],
-    vit_model: VisionTransformer,
-    device: torch.device,
-    generate_visualizations: bool = False,
-    save_analysis_results: bool = True
-) -> Dict[str, pd.DataFrame]:
-    """
-    Run SaCo analysis using optimized batched processing and in-memory operations.
-    """
-    print("=== SACO ANALYSIS ===")
-    
-    saco_analysis_results: Dict[str, pd.DataFrame] = {}
-    
-    # Run SaCo calculation for all images
-    all_perturbation_results = []
-    print("Running SaCo calculations...")
-    
-    for original_result in tqdm(original_pipeline_results, desc="Processing images"):
-        try:
-            image_results = calculate_saco_for_single_image(
-                original_result, vit_model, config, device
-            )
-            all_perturbation_results.extend(image_results)
-        except Exception as e:
-            print(f"Error processing {original_result.image_path.name}: {e}")
-            continue
-    
-    # Convert to DataFrame
-    perturbation_comparison_df = pd.DataFrame(all_perturbation_results)
-    
-    # Calculate SaCo scores and patch-level analysis data using vectorized approach
-    saco_scores = {}
-    patch_analysis_rows = []  # For the patch-level CSV that saco_feature_analysis.py expects
-    
-    for image_name, image_data in perturbation_comparison_df.groupby('original_image'):
-        image_data = image_data.sort_values('mean_attribution', ascending=False).reset_index(drop=True)
-        
-        attributions = image_data['mean_attribution'].values
-        confidence_impacts = image_data['confidence_delta_abs'].values
-        patch_ids = image_data['patch_id'].values
-        
-        # Calculate overall SaCo score using vectorized approach
-        # DEBUG: Print specific image's data for comparison
-        if "dev_0aec60bd" in image_name:  # Specific image for comparison
-            print(f"PATCH DEBUG - Image: {image_name}")
-            print(f"PATCH - Attributions shape: {attributions.shape}")
-            print(f"PATCH - Confidence impacts shape: {confidence_impacts.shape}")
-            print(f"PATCH - Attributions[:5]: {attributions[:5]}")
-            print(f"PATCH - Confidence impacts[:5]: {confidence_impacts[:5]}")
-            print(f"PATCH - Attribution sum: {np.sum(attributions)}")
-            print(f"PATCH - Confidence sum: {np.sum(confidence_impacts)}")
-        
-        saco_score = calculate_saco_vectorized(attributions, confidence_impacts)
-        saco_scores[image_name] = saco_score
-        # Calculate patch-specific SaCo scores using vectorized approach  
-        patch_sacos = calculate_patch_saco_vectorized(attributions, confidence_impacts, patch_ids)
-        
-        # Add patch data rows
-        for patch_id, patch_saco in patch_sacos.items():
-            patch_analysis_rows.append({
-                'image_name': image_name,
-                'patch_id': int(patch_id),
-                'faithful_pairs_count': 0,  # Not needed for saco_feature_analysis.py
-                'unfaithful_pairs_count': 0,  # Not needed for saco_feature_analysis.py
-                'faithful_pairs_pct': 0,  # Not needed for saco_feature_analysis.py
-                'patch_saco': patch_saco
-            })
-    
-    saco_df = pd.DataFrame({'image_name': list(saco_scores.keys()), 'saco_score': list(saco_scores.values())})
-    saco_analysis_results["saco_scores"] = saco_df
-    
-    # Create and save patch analysis DataFrame (compatible with saco_feature_analysis.py)
-    patch_analysis_df = pd.DataFrame(patch_analysis_rows)
-    saco_analysis_results["patch_analysis"] = patch_analysis_df
-    
-    saco_scores_map: Dict[str, float] = pd.Series(
-        saco_analysis_results["saco_scores"].saco_score.values, 
-        index=saco_analysis_results["saco_scores"].image_name
-    ).to_dict()
-    
-    faithfulness_df = analysis.analyze_faithfulness_vs_correctness_from_objects(
-        saco_scores_map, original_pipeline_results
-    )
-    saco_analysis_results["faithfulness_correctness"] = faithfulness_df
-    
-    patterns_df = analysis.analyze_key_attribution_patterns(
-        saco_analysis_results["faithfulness_correctness"], vit_model, config
-    )
-    saco_analysis_results["attribution_patterns"] = patterns_df
-    
-    if save_analysis_results:
-        print("Saving analysis results...")
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        for name, df_to_save in saco_analysis_results.items():
-            if isinstance(df_to_save, pd.DataFrame) and not df_to_save.empty:
-                if name == "patch_analysis":
-                    # Save patch analysis with the expected filename format
-                    save_path = config.file.output_dir / f"saco_patch_analysis_mean_optimized_{timestamp}.csv"
-                else:
-                    save_path = config.file.output_dir / f"analysis_{name}_optimized_{timestamp}.csv"
-                df_to_save.to_csv(save_path, index=False)
-                print(f"Saved {name} to {save_path}")
-                
-                # Also save the main patch analysis with the exact filename expected by saco_feature_analysis.py
-                if name == "patch_analysis":
-                    expected_path = config.file.output_dir / "saco_patch_analysis_mean.csv"
-                    df_to_save.to_csv(expected_path, index=False)
-                    print(f"Also saved patch analysis to expected path: {expected_path}")
-    
-    avg_saco = np.mean(list(saco_scores.values())) if saco_scores else 0
-    print(f"Average optimized SaCo score: {avg_saco:.4f} (over {len(saco_scores)} images)")
-    
-    print("=== OPTIMIZED SACO ANALYSIS COMPLETE ===")
-    return saco_analysis_results
-
-
-def run_saco_from_pipeline_outputs(
-    config: PipelineConfig,
-    original_pipeline_results: List[ClassificationResult],
-    vit_model: VisionTransformer,
-    device: torch.device,
-    generate_visualizations: bool = False,
-    save_analysis_results: bool = True
-):
-    """
-    Run SaCo (Saliency Correlation) analysis using direct outputs from the pipeline.
-    
-    Args:
-        pipeline_config: The configuration used for the pipeline run (for paths, params).
-        original_pipeline_results: List of ClassificationResult for original images.
-        all_perturbed_image_records: List of PerturbedImageRecord for all generated perturbations.
-        perturbed_pipeline_results: List of ClassificationResult for perturbed images.
-        model_instance: The loaded VisionTransformer model, if needed for pattern analysis.
-        generate_visualizations: Whether to generate comparison visualizations.
-        save_analysis_results: Whether to save all generated analysis DataFrames.
-        
-    Returns:
-        Dictionary with analysis DataFrames.
-    """
-    print("=== SACO ANALYSIS (Original) ===")
-    
-    print("Perturbations for SaCo")
-    paths_for_perturbation = [res.image_path for res in original_pipeline_results]
-
-    perturbed_image_records: List[PerturbedImageRecord] = run_perturbation(config, paths_for_perturbation)
-
-    perturbed_image_paths_to_classify = [
-        rec.perturbed_image_path for rec in perturbed_image_records if rec.perturbed_image_path.exists()
-    ]
-
-    perturbed_csv_path = config.file.output_dir / f"classification_results_perturbed_classified_only{config.file.output_suffix}_perturbed.csv"
-    print(f"Running Classify ONLY for perturbed images (suffix: '{config.file.output_suffix}_perturbed')")
-
-    perturbed_pipeline_results = classify_dataset_only(
-        config, vit_model, device, perturbed_image_paths_to_classify, perturbed_csv_path
-    )
-
-    saco_analysis_results: Dict[str, pd.DataFrame] = {}
-
-    print("Building analysis context...")
-    analysis_context = analysis.AnalysisContext.build(
-        config=config,
-        original_results=original_pipeline_results,
-        all_perturbed_records=perturbed_image_records,
-        perturbed_classification_results=perturbed_pipeline_results
-    )
-
-    print("Generating perturbation comparison DataFrame for SaCo...")
-    perturbation_comparison_df = analysis.generate_perturbation_comparison_dataframe(
-        analysis_context, generate_visualizations=generate_visualizations
-    )
-
-    print("Running core SaCo calculations...")
-    saco_scores_dict, _, _ = analysis.run_saco_analysis(
-        context=analysis_context,
-        perturbation_comparison_df=perturbation_comparison_df,
-        perturb_method_filter=config.perturb.method
-    )
-
-    saco_df = pd.DataFrame({'image_name': list(saco_scores_dict.keys()), 'saco_score': list(saco_scores_dict.values())})
-    saco_analysis_results["saco_scores"] = saco_df
-
-    saco_scores_map_for_analysis: Dict[str, float] = pd.Series(
-        saco_analysis_results["saco_scores"].saco_score.values, index=saco_analysis_results["saco_scores"].image_name
-    ).to_dict()
-
-    faithfulness_df = analysis.analyze_faithfulness_vs_correctness_from_objects(
-        saco_scores_map_for_analysis,  # Pass the dictionary: {str(image_path): score}
-        original_pipeline_results  # Pass the List[ClassificationResult]
-    )
-    saco_analysis_results["faithfulness_correctness"] = faithfulness_df
-
-    print("Analyzing key attribution patterns...")
-    patterns_df = analysis.analyze_key_attribution_patterns(
-        saco_analysis_results["faithfulness_correctness"], vit_model, config
-    )
-    saco_analysis_results["attribution_patterns"] = patterns_df
-
-    if save_analysis_results:
-        print("Saving analysis results...")
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        for name, df_to_save in saco_analysis_results.items():
-            if isinstance(df_to_save, pd.DataFrame) and not df_to_save.empty:
-                # Use a consistent naming convention, incorporating the mode and output_file_tag
-                save_path = config.file.output_dir / f"analysis_{name}_{timestamp}.csv"
-                df_to_save.to_csv(save_path, index=False)
-                print(f"Saved {name} to {save_path}")
-
-
-# Add this function to collect gradient info across images
-def collect_gradient_analysis(gradient_info_list: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Aggregate gradient analysis across multiple images to identify patterns."""
-    if not gradient_info_list:
-        return {}
-
-    # Filter out empty gradient info
-    valid_infos = [info for info in gradient_info_list if info and 'boosted_feature_idx' in info]
-    if not valid_infos:
-        return {}
-
-    # Compute aggregated statistics
-    aggregated = {
-        'num_samples': len(valid_infos),
-        'avg_boosted_grad_magnitude': np.mean([info['boosted_grad_magnitude'] for info in valid_infos]),
-        'avg_boosted_activation_strength': np.mean([info['boosted_activation_strength'] for info in valid_infos]),
-        'avg_grad_to_act_ratio': np.mean([info['boosted_grad_to_act_ratio'] for info in valid_infos]),
-        'avg_grad_percentile': np.mean([info['boosted_grad_percentile'] for info in valid_infos]),
-        'avg_gradient_sparsity': np.mean([info['gradient_sparsity'] for info in valid_infos]),
-        'feature_distribution': defaultdict(int)
-    }
-
-    # Count which features were boosted
-    for info in valid_infos:
-        aggregated['feature_distribution'][info['boosted_feature_idx']] += 1
-
-    return aggregated
 
 
 def run_pipeline(config: PipelineConfig,
@@ -1273,34 +622,18 @@ def run_pipeline(config: PipelineConfig,
     original_image_paths = preprocess_dataset(config, source_dir_for_preprocessing)
     print(f"Found {len(original_image_paths)} original images for processing.")
 
-    # vit_model = model.load_vit_model(model_path="./model/vit_b_hyperkvasir_anatomical_for_translrp.pth", device=device)
-    sae, vit_model = load_models()
-    # class_specific_features = find_class_specific_features(vit_model, sae)
-    # 2. Load all steering resources (SAEs and Dictionaries) ONCE
-    # You can control which layers to use from your config file
+    vit_model = load_models()
     steering_layers_from_config = getattr(config.classify, 'steering_layers', [8])
     steering_resources = load_steering_resources(steering_layers_from_config)
-    sae = steering_resources[8]["sae"]
     print("All steering resources loaded.")
-    class_analysis = None
     print("ViT model loaded, hooks registered, and set to eval mode.")
 
     originals_csv_path = config.file.output_dir / f"classification_results_originals_explained{config.file.output_suffix}.csv"
     print(f"Running Classify & Explain for original images")
 
-    original_results_explained, gradient_infos = classify_and_explain_dataset(
-        config, vit_model, device, original_image_paths, originals_csv_path, steering_resources, sae, None,
-        class_analysis
+    original_results_explained = classify_and_explain_dataset(
+        config=config, vit_model=vit_model, device=device, image_paths_to_process=original_image_paths, output_results_csv_path=originals_csv_path, steering_resources=steering_resources
     )
-
-    # Quick hypothesis test: Check if low gradient ratios correlate with attribution improvement
-    if gradient_infos:
-        low_ratio_threshold = 0.1  # Adjust based on your data
-        low_ratio_features = [
-            info for info in gradient_infos if info and info.get('boosted_grad_to_act_ratio', 1.0) < low_ratio_threshold
-        ]
-        print(f"\n{len(low_ratio_features)} images had low grad/act ratio (<{low_ratio_threshold})")
-        print("These might be cases where gradient-based attribution struggles without boosting")
 
     if config.classify.analysis:
         print("Evaluate Faithfulness Pipeline")
@@ -1310,25 +643,7 @@ def run_pipeline(config: PipelineConfig,
     # run_head_analysis(original_results_explained, vit_model, config)
 
     print("Compare attributions")
-    # For debugging, let's run both approaches on dev dataset to compare
-    if "dev" in str(config.file.data_dir).lower():
-        print("DEV MODE: Running both original and optimized approaches for comparison")
-
-        # Initialize patch logger for comparison
-        # initialize_patch_logger(config.file.output_dir / "patch_comparison_logs")
-        print("\n--- Running Original Approach ---")
-        # run_saco_from_pipeline_outputs(config, original_results_explained, vit_model, device)
-        print("\n--- Running Optimized Approach ---") 
-        run_saco_from_pipeline_outputs_optimized(config, original_results_explained, vit_model, device)
-        
-        # NEW: Run binned approach for comparison
-        print("\n--- Running Binned Approach ---")
-        run_binned_attribution_analysis(config, original_results_explained, device, n_bins=20)
-    else:
-        # For production (val dataset), use optimized version only
-        # run_saco_from_pipeline_outputs_optimized(config, original_results_explained, vit_model, device)
-        
-        run_binned_attribution_analysis(config, original_results_explained, device, n_bins=20)
+    run_binned_attribution_analysis(config, vit_model, original_results_explained, device, n_bins=49)
 
     print("Full pipeline finished.")
     return original_results_explained

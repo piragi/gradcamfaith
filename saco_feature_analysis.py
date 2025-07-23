@@ -58,29 +58,120 @@ def patch_id_to_coordinates(patch_id: int, n_patches_per_side: int = 14) -> Tupl
     return patch_id // n_patches_per_side, patch_id % n_patches_per_side
 
 
-def load_saco_patch_data(csv_path: str) -> pd.DataFrame:
-    """Load and process SaCo patch analysis data."""
-    print("Loading CSV data...")
+def load_saco_bin_data(csv_path: str) -> pd.DataFrame:
+    """Load and process SaCo bin analysis data from attribution_binning.py output."""
+    print("Loading bin-level CSV data...")
     df = pd.read_csv(csv_path)
-    print("Processing patch coordinates...")
-    # Vectorized coordinate conversion - much faster than apply
-    n_patches_per_side = 14
-    df['patch_row'] = df['patch_id'] // n_patches_per_side
-    df['patch_col'] = df['patch_id'] % n_patches_per_side
+    print(f"Loaded {len(df)} bin records")
+    
+    # The bin data should have columns: image_name, bin_id, mean_attribution, total_attribution, 
+    # n_patches, confidence_delta, confidence_delta_abs, class_changed, saco_score
+    required_cols = ['image_name', 'bin_id', 'mean_attribution', 'confidence_delta_abs']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns in CSV: {missing_cols}")
+    
     return df
 
 
-def classify_patches(df: pd.DataFrame, negative_threshold: float, positive_threshold: float) -> pd.DataFrame:
+def classify_bins(df: pd.DataFrame, confidence_threshold: float) -> pd.DataFrame:
     """
-    Classify patches into 'over_attributed', 'under_attributed', or 'normal'.
+    Classify bins into 'over_attributed', 'under_attributed', or 'normal' based on 
+    the relationship between attribution and confidence impact.
+    
+    A bin is problematic if it has:
+    - High attribution but low confidence impact (over_attributed)
+    - Low attribution but high confidence impact (under_attributed)
     """
+    # Sort by attribution to get percentiles
+    attr_median = df['mean_attribution'].median()
+    impact_median = df['confidence_delta_abs'].median()
+    
     conditions = [
-        df['patch_saco'] < negative_threshold,
-        df['patch_saco'] > positive_threshold
+        # High attribution, low impact = over-attributed  
+        (df['mean_attribution'] > attr_median) & (df['confidence_delta_abs'] < impact_median),
+        # Low attribution, high impact = under-attributed
+        (df['mean_attribution'] < attr_median) & (df['confidence_delta_abs'] > impact_median)
     ]
     choices = ['over_attributed', 'under_attributed']
     df['problem_type'] = np.select(conditions, choices, default='normal')
     return df
+
+
+def get_patches_for_bin(image_name: str, bin_id: int, raw_attributions: np.ndarray, n_bins: int = 20) -> List[int]:
+    """
+    Recreate which patches belong to a specific bin for a given image.
+    This replicates the binning logic from attribution_binning.py
+    """
+    if n_bins > len(raw_attributions):
+        n_bins = len(raw_attributions)
+    
+    # Sort patch indices by attribution values (descending)
+    sorted_patch_indices = np.argsort(raw_attributions)[::-1]
+    
+    # Split into equal-sized bins
+    binned_indices = np.array_split(sorted_patch_indices, n_bins)
+    
+    # Sort bins by their mean attribution to match bin_id assignment
+    temp_bins = []
+    for patch_indices_list in binned_indices:
+        if len(patch_indices_list) == 0:
+            continue
+        bin_attributions = raw_attributions[patch_indices_list]
+        temp_bins.append({
+            "indices": patch_indices_list,
+            "mean_attr": np.mean(bin_attributions)
+        })
+    
+    # Sort by mean attribution (lowest first to match bin_id assignment)
+    temp_bins.sort(key=lambda b: b['mean_attr'])
+    
+    if bin_id < len(temp_bins):
+        return temp_bins[bin_id]["indices"].tolist()
+    else:
+        return []
+
+
+def map_bins_to_spatial_regions(problematic_bins_df: pd.DataFrame, attribution_data: Dict[str, np.ndarray]) -> pd.DataFrame:
+    """
+    Map problematic bins back to their constituent patches for spatial analysis.
+    
+    Args:
+        problematic_bins_df: DataFrame with problematic bins
+        attribution_data: Dict mapping image_name to raw attribution arrays (196 values)
+    
+    Returns:
+        DataFrame with patch-level data for problematic regions
+    """
+    patch_records = []
+    
+    for _, bin_row in problematic_bins_df.iterrows():
+        image_name = bin_row['image_name']
+        bin_id = bin_row['bin_id']
+        problem_type = bin_row['problem_type']
+        
+        # Get raw attributions for this image
+        if image_name not in attribution_data:
+            logging.warning(f"No attribution data found for {image_name}")
+            continue
+        
+        raw_attrs = attribution_data[image_name]
+        
+        # Get patches belonging to this bin
+        patch_ids = get_patches_for_bin(image_name, bin_id, raw_attrs)
+        
+        # Create patch records
+        for patch_id in patch_ids:
+            patch_records.append({
+                'image_name': image_name,
+                'patch_id': patch_id,
+                'bin_id': bin_id,
+                'problem_type': problem_type,
+                'mean_attribution': raw_attrs[patch_id],
+                'bin_saco_score': bin_row.get('saco_score', 0.0)
+            })
+    
+    return pd.DataFrame(patch_records)
 
 
 def _calculate_feature_metrics_for_patches(
@@ -279,7 +370,7 @@ def process_image_batch(
                 continue
 
             target_patch_indices = torch.tensor(target_patches_df['patch_id'].values, dtype=torch.long).to(device)
-            target_saco_scores = torch.tensor(target_patches_df['patch_saco'].values, dtype=torch.float32).to(device)
+            target_saco_scores = torch.tensor(target_patches_df['bin_saco_score'].values, dtype=torch.float32).to(device)
 
             feature_metrics = _calculate_feature_metrics_for_patches(
                 feature_activations,
@@ -302,39 +393,58 @@ def process_image_batch(
     return batch_results
 
 
-def analyze_saco_features_single_pass(
-    saco_csv_path: str,
+def analyze_saco_features_bin_based(
+    saco_bin_csv_path: str,
+    attribution_dir: str,  # Directory containing raw attribution files
     model: HookedSAEViT,
     sae: SparseAutoencoder,
     layer_idx: int = 9,
-    negative_threshold: float = -0.3,
-    positive_threshold: float = 0.3,
+    confidence_threshold: float = 0.1,
     n_images: Optional[int] = 50,
     min_overlap_ratio: float = 0.3,
     min_occurrences: int = 2,
     activation_threshold: float = 0.1,
-    batch_size: int = 4,  # NEW: batch processing
+    batch_size: int = 4,
+    n_bins: int = 20,  # Number of bins used in binning analysis
 ) -> Dict[str, Any]:
     """
-    Main analysis function to identify features spanning problematic SaCo patches
-    using a single forward pass per image.
+    Main analysis function to identify features spanning problematic SaCo bins
+    using the bin-centric approach from attribution_binning.py.
     """
     device = next(model.parameters()).device
     transform = get_processor_for_precached_224_images()
     
-    saco_df = load_saco_patch_data(saco_csv_path)
-    saco_df = classify_patches(saco_df, negative_threshold, positive_threshold)
+    # Load bin-level data from attribution_binning.py output
+    saco_df = load_saco_bin_data(saco_bin_csv_path)
+    saco_df = classify_bins(saco_df, confidence_threshold)
     problematic_df = saco_df[saco_df['problem_type'] != 'normal']
     
+    logging.info(f"Found {len(problematic_df[problematic_df['problem_type'] == 'over_attributed'])} over-attributed bins and "
+                f"{len(problematic_df[problematic_df['problem_type'] == 'under_attributed'])} under-attributed bins.")
+    
+    # Load raw attribution data for mapping bins back to patches
+    attribution_data = {}
+    for image_name in problematic_df['image_name'].unique():
+        # Try to find the corresponding raw attribution file
+        image_stem = Path(image_name).stem
+        attr_file = Path(attribution_dir) / f"{image_stem}_raw_attribution.npy"
+        if attr_file.exists():
+            attribution_data[image_name] = np.load(attr_file)
+        else:
+            logging.warning(f"No attribution file found for {image_name}")
+    
+    # Map problematic bins back to their constituent patches
+    problematic_patches_df = map_bins_to_spatial_regions(problematic_df, attribution_data)
+    
     logging.info(
-        f"Found {len(problematic_df[problematic_df['problem_type'] == 'over_attributed'])} over-attributed patches and "
-        f"{len(problematic_df[problematic_df['problem_type'] == 'under_attributed'])} under-attributed patches."
+        f"Mapped bins to {len(problematic_patches_df[problematic_patches_df['problem_type'] == 'over_attributed'])} over-attributed patches and "
+        f"{len(problematic_patches_df[problematic_patches_df['problem_type'] == 'under_attributed'])} under-attributed patches."
     )
 
     # Only group images that actually have problematic patches - saves memory
-    unique_problematic_images = problematic_df['image_name'].unique()
+    unique_problematic_images = problematic_patches_df['image_name'].unique()
     logging.info(f"Processing {len(unique_problematic_images)} unique images with problematic patches")
-    image_groups = problematic_df.groupby('image_name')
+    image_groups = problematic_patches_df.groupby('image_name')
     raw_feature_results = defaultdict(lambda: defaultdict(list))
     
     images_to_process = list(image_groups)[:n_images] if n_images is not None else list(image_groups)
@@ -389,8 +499,8 @@ def analyze_saco_features_single_pass(
         'results_by_type': final_results,
         'analysis_params': {
             'layer_idx': layer_idx,
-            'negative_threshold': negative_threshold,
-            'positive_threshold': positive_threshold,
+            'confidence_threshold': confidence_threshold,
+            'n_bins': n_bins,
             'min_overlap_ratio': min_overlap_ratio,
             'min_occurrences': min_occurrences,
             'n_images_processed': len(images_to_process)
@@ -407,27 +517,30 @@ def save_analysis_results(results: Dict[str, Any], save_path: str):
 
 
 if __name__ == "__main__":
-    _, model = load_models()
+    model = load_models()
     
     layer_idx = 8
     sae_path = Path(SAE_CONFIG[layer_idx]["sae_path"])
     sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
     sae.to(next(model.parameters()).device)
     
-    saco_csv_path = "results/train/saco_patch_analysis_mean_optimized_2025-07-22_13-27.csv"
+    # Use bin-level CSV from attribution_binning.py output
+    saco_bin_csv_path = "results/val/saco_bin_analysis_binned_98bins_2025-07-23_14-23.csv"  # Update with actual file
+    attribution_dir = "results/val/attributions"  # Directory with raw attribution files
     
-    results = analyze_saco_features_single_pass(
-        saco_csv_path=saco_csv_path,
+    results = analyze_saco_features_bin_based(
+        saco_bin_csv_path=saco_bin_csv_path,
+        attribution_dir=attribution_dir,
         model=model,
         sae=sae,
         layer_idx=layer_idx,
-        negative_threshold=-0.5,     # More inclusive: catch moderate over-attribution
-        positive_threshold=0.5,      # More inclusive: catch moderate under-attribution  
+        confidence_threshold=0.1,     # Threshold for classifying problematic bins
         n_images=50000,
-        min_overlap_ratio=0.7,       # More inclusive: 30% overlap is sufficient
-        min_occurrences=5,           # Minimal cutoff: confidence weighting handles reliability
-        batch_size=32,                 # Optimized batch size for vectorized processing
+        min_overlap_ratio=0.3,        # 30% overlap is sufficient for bin-based analysis
+        min_occurrences=5,            # Minimal cutoff: confidence weighting handles reliability
+        batch_size=32,                # Optimized batch size for vectorized processing
+        n_bins=98,                    # Match the number of bins used in attribution_binning.py
     )
     
-    save_path = f"results/saco_problematic_features_l{layer_idx}_moderate.pt"
+    save_path = f"results/saco_problematic_features_bins_l{layer_idx}.pt"
     save_analysis_results(results, save_path)

@@ -9,14 +9,78 @@ This implements the binning approach as described in the SaCo paper:
 
 import numpy as np
 import torch
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from dataclasses import dataclass
 from tqdm import tqdm
 import pandas as pd
+from datetime import datetime
 
 from data_types import ClassificationResult
 import vit.preprocessing as preprocessing
 import pipeline
+import analysis
+
+def batched_model_inference(model_instance, image_batch: torch.Tensor, device: torch.device, batch_size: int = 32) -> List[Dict]:
+    """Run model inference on a batch of images efficiently."""
+    model_instance.eval()
+    all_predictions = []
+
+    with torch.no_grad():
+        for i in range(0, len(image_batch), batch_size):
+            batch_chunk = image_batch[i:i + batch_size].to(device)
+
+            logits = model_instance(batch_chunk)
+            probabilities = torch.softmax(logits, dim=1)
+            predicted_indices = torch.argmax(probabilities, dim=1)
+
+            for j in range(len(batch_chunk)):
+                pred_dict = {
+                    "predicted_class_idx": predicted_indices[j].item(),
+                    "probabilities": probabilities[j],
+                    "confidence": probabilities[j, predicted_indices[j]].item()
+                }
+                all_predictions.append(pred_dict)
+
+    return all_predictions
+
+def calculate_saco_vectorized(attributions: np.ndarray, confidence_impacts: np.ndarray) -> float:
+    """
+    Vectorized SaCo calculation - eliminates O(n²) nested loops.
+    
+    Args:
+        attributions: Array of attribution values per patch (already sorted descending)
+        confidence_impacts: Array of confidence impact values per patch
+        
+    Returns:
+        SaCo score
+    """
+    n = len(attributions)
+    if n < 2:
+        return 0.0
+    
+    # Create all pairwise differences using broadcasting
+    attr_diffs = attributions[:, None] - attributions[None, :]  # [n, n]
+    impact_diffs = confidence_impacts[:, None] - confidence_impacts[None, :]  # [n, n]
+    
+    # Only consider upper triangular part (i < j comparisons)
+    upper_tri_mask = np.triu(np.ones((n, n), dtype=bool), k=1)
+    
+    # Extract upper triangular values
+    attr_diffs_tri = attr_diffs[upper_tri_mask]  # [n*(n-1)/2]
+    impact_diffs_tri = impact_diffs[upper_tri_mask]  # [n*(n-1)/2]
+    
+    # Calculate faithfulness: impact_i >= impact_j (since we're looking at i < j)
+    is_faithful = impact_diffs_tri >= 0
+    
+    # Calculate weights
+    weights = np.where(is_faithful, attr_diffs_tri, -attr_diffs_tri)
+    
+    # Calculate SaCo score
+    total_weight = np.sum(np.abs(weights))
+    if total_weight > 0:
+        return np.sum(weights) / total_weight
+    else:
+        return 0.0
 
 @dataclass
 class BinInfo:
@@ -188,13 +252,17 @@ def calculate_binned_saco_for_image(
     config,
     device: torch.device,
     n_bins: int = 20,
-    debug: bool = False
-) -> Tuple[float, List[Dict]]:
+    debug: bool = False,
+    include_patch_level: bool = False
+) -> Tuple[float, List[Dict], List[Dict]]:
     """
     Calculate SaCo score using attribution binning for a single image.
     
+    Args:
+        include_patch_level: If True, also generate patch-level SaCo scores for compatibility
+    
     Returns:
-        Tuple of (saco_score, bin_results)
+        Tuple of (saco_score, bin_results, patch_results)
     """
     image_path = original_result.image_path
     
@@ -237,7 +305,7 @@ def calculate_binned_saco_for_image(
         return 0.0, []
     
     batch_tensor = torch.stack(perturbed_tensors)
-    predictions = pipeline.batched_model_inference(vit_model, batch_tensor, device)
+    predictions = batched_model_inference(vit_model, batch_tensor, device, batch_size=len(batch_tensor))
     
     # Calculate results
     bin_results = []
@@ -272,9 +340,18 @@ def calculate_binned_saco_for_image(
         print(f"BINNED - Impact sum: {np.sum(impacts):.4f}")
     
     # Calculate SaCo score using the same function as patch-wise
-    saco_score = pipeline.calculate_saco_vectorized(attributions, impacts)
+    saco_score = calculate_saco_vectorized(attributions, impacts)
     
-    return saco_score, bin_results
+    # Generate patch-level results if requested (for compatibility with saco_feature_analysis.py)
+    patch_results = []
+    if include_patch_level:
+        # For patch-level compatibility, we need to calculate individual patch SaCo scores
+        # This requires creating perturbations for each of the 196 patches individually
+        patch_results = calculate_patch_level_saco(
+            original_result, vit_model, config, device, raw_attributions
+        )
+    
+    return saco_score, bin_results, patch_results
 
 
 def run_binned_saco_analysis(
@@ -299,9 +376,10 @@ def run_binned_saco_analysis(
     for original_result in tqdm(original_results, desc=f"Processing with {n_bins} bins"):
         try:
             image_name = str(original_result.image_path)
-            saco_score, bin_results = calculate_binned_saco_for_image(
+            saco_score, bin_results, _ = calculate_binned_saco_for_image(
                 original_result, vit_model, config, device, n_bins,
-                debug=True  # Enable debug for specific images
+                debug=True,  # Enable debug for specific images
+                include_patch_level=False  # We don't need patch-level data in the main pipeline
             )
             
             all_saco_scores[image_name] = saco_score
@@ -330,7 +408,24 @@ def run_binned_saco_analysis(
     bin_results_df = pd.DataFrame(all_bin_results)
     analysis_results["bin_results"] = bin_results_df
     
-    # 3. Summary statistics
+    # 3. Faithfulness vs Correctness Analysis
+    saco_scores_map: Dict[str, float] = pd.Series(
+        saco_df.saco_score.values, 
+        index=saco_df.image_name
+    ).to_dict()
+    
+    faithfulness_df = analysis.analyze_faithfulness_vs_correctness_from_objects(
+        saco_scores_map, original_results
+    )
+    analysis_results["faithfulness_correctness"] = faithfulness_df
+    
+    # 4. Key Attribution Patterns Analysis
+    patterns_df = analysis.analyze_key_attribution_patterns(
+        analysis_results["faithfulness_correctness"], vit_model, config
+    )
+    analysis_results["attribution_patterns"] = patterns_df
+    
+    # 5. Summary statistics
     if len(all_saco_scores) > 0:
         avg_saco = np.mean(list(all_saco_scores.values()))
         std_saco = np.std(list(all_saco_scores.values()))
@@ -350,33 +445,46 @@ def run_binned_saco_analysis(
             print(f"  Difference: {avg_saco - patch_wise_avg:.4f}")
     
     if save_results:
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        print("Saving analysis results...")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         
-        for name, df in analysis_results.items():
-            if len(df) > 0:
-                filename = f"binned_{name}_{n_bins}bins_{timestamp}.csv"
-                save_path = config.file.output_dir / filename
-                df.to_csv(save_path, index=False)
+        for name, df_to_save in analysis_results.items():
+            if isinstance(df_to_save, pd.DataFrame) and not df_to_save.empty:
+                if name == "bin_results":
+                    # Save bin results with special naming for compatibility
+                    save_path = config.file.output_dir / f"saco_bin_analysis_binned_{n_bins}bins_{timestamp}.csv"
+                else:
+                    # Use consistent naming scheme with optimized version  
+                    save_path = config.file.output_dir / f"analysis_{name}_binned_{timestamp}.csv"
+                df_to_save.to_csv(save_path, index=False)
                 print(f"Saved {name} to {save_path}")
+                
+                # Also save main results with expected filename format for compatibility
+                if name == "saco_scores":
+                    expected_path = config.file.output_dir / f"saco_scores_binned_{n_bins}bins.csv"
+                    df_to_save.to_csv(expected_path, index=False)
+                    print(f"Also saved saco scores to expected path: {expected_path}")
     
+    # Final summary similar to optimized version
+    if len(all_saco_scores) > 0:
+        avg_saco = np.mean(list(all_saco_scores.values()))
+        print(f"Average binned SaCo score: {avg_saco:.4f} (over {len(all_saco_scores)} images)")
+    
+    print("=== BINNED SACO ANALYSIS COMPLETE ===")
     return analysis_results
 
 
 # For easy integration with your pipeline, add this wrapper function:
 def run_binned_attribution_analysis(
     config,
+    vit_model,
     original_results: List[ClassificationResult],
     device: torch.device,
     n_bins: int = 20
-) -> None:
+) -> Dict[str, pd.DataFrame]:
     """
     Wrapper function that matches your pipeline interface.
     """
-    from transmm_sfaf import load_models
-    
-    # Load model
-    sae, vit_model = load_models()
     vit_model.to(device)
     vit_model.eval()
     
@@ -384,31 +492,4 @@ def run_binned_attribution_analysis(
     results = run_binned_saco_analysis(
         config, original_results, vit_model, device, n_bins
     )
-    
-    # Optional: Run comparison with different bin counts
-    if n_bins == 20:  # Only do comparison for default run
-        print("\n=== Running bin count comparison ===")
-        bin_counts = [28, 49, 98, 196]
-        comparison_results = []
-        
-        for n in bin_counts:
-            print(f"\nTesting with {n} bins...")
-            temp_results = run_binned_saco_analysis(
-                config, original_results, vit_model, device, n, save_results=False
-            )
-            
-            avg_saco = temp_results["saco_scores"]["saco_score"].mean()
-            comparison_results.append({
-                "n_bins": n,
-                "avg_saco": avg_saco,
-                "n_images": len(temp_results["saco_scores"])
-            })
-        
-        comparison_df = pd.DataFrame(comparison_results)
-        print("\nBin count comparison:")
-        print(comparison_df)
-        
-        # Save comparison
-        comparison_path = config.file.output_dir / "binned_saco_bin_comparison.csv"
-        comparison_df.to_csv(comparison_path, index=False)
-        print(f"Saved comparison to {comparison_path}")
+    return results    
