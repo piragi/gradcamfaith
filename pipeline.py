@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
-from diffusers import StableDiffusionInpaintPipeline
 from PIL import Image
 from tqdm import tqdm
 
@@ -406,10 +405,7 @@ def generate_perturbed_identifier(
     Returns:
         Unique identifier string for the perturbed image
     """
-    if config.perturb.method == "sd":
-        return f"{original_image_stem}_patch{patch_info.patch_id}_x{patch_info.x}_y{patch_info.y}_s{config.perturb.strength}"
-    else:
-        return f"{original_image_stem}_patch{patch_info.patch_id}_x{patch_info.x}_y{patch_info.y}_{config.perturb.method}"
+    return f"{original_image_stem}_patch{patch_info.patch_id}_x{patch_info.x}_y{patch_info.y}_{config.perturb.method}"
 
 
 def perturb_single_patch(
@@ -430,14 +426,12 @@ def perturb_single_patch(
             mask_path=mask_path,
             patch_info=patch_info_dc,
             perturbation_method=config.perturb.method,
-            perturbation_strength=config.perturb.strength if config.perturb.method == "sd" else None
+            perturbation_strength=None
         )
     try:
         io_utils.ensure_directories([config.file.perturbed_dir, config.file.mask_dir])
         patch_coordinates = (patch_info_dc.x, patch_info_dc.y, patch_size)
-        if config.perturb.method == "sd":
-            raise ValueError("Stable Diffusion perturbation method is no longer supported")
-        elif config.perturb.method == "mean":
+        if config.perturb.method == "mean":
             result_image, np_mask = perturbation.perturb_patch_mean(
                 str(original_image_path), patch_coordinates, config.file
             )
@@ -451,7 +445,7 @@ def perturb_single_patch(
             mask_path=mask_path,
             patch_info=patch_info_dc,
             perturbation_method=config.perturb.method,
-            perturbation_strength=config.perturb.strength if config.perturb.method == "sd" else None
+            perturbation_strength=None
         )
     except Exception as e:
         print(f"Error perturbing patch for {original_image_stem} (ID {patch_info_dc.patch_id}): {e}")
@@ -482,19 +476,17 @@ def generate_patch_coordinates(image: Image.Image, patch_size: int) -> List[Tupl
 
 def perturb_image_patches(
     config: PipelineConfig,
-    original_image_path: Path,
-    sd_pipe: Optional[StableDiffusionInpaintPipeline] = None
+    original_image_path: Path
 ) -> List[PerturbedImageRecord]:
     """
     Perturb patches in a single image.
     
     Args:
         config: Pipeline configuration
-        image_path: Path to the image to perturb
-        sd_pipe: Optional StableDiffusionInpaintPipeline for SD method
+        original_image_path: Path to the image to perturb
         
     Returns:
-        List of paths to perturbed images
+        List of perturbed image records
     """
     perturbed_records: List[PerturbedImageRecord] = []
     try:
@@ -513,24 +505,22 @@ def perturb_image_patches(
 
 def perturb_dataset(
     config: PipelineConfig,
-    image_paths_to_perturb: List[Path],
-    sd_pipe: Optional[StableDiffusionInpaintPipeline] = None
+    image_paths_to_perturb: List[Path]
 ) -> List[PerturbedImageRecord]:
     """
     Perturb patches in all images.
     
     Args:
         config: Pipeline configuration
-        results_df: DataFrame with classification results
-        sd_pipe: Optional StableDiffusionInpaintPipeline for SD method
+        image_paths_to_perturb: List of image paths to process
         
     Returns:
-        List of paths to perturbed images
+        List of perturbed image records
     """
     io_utils.ensure_directories([config.file.perturbed_dir, config.file.mask_dir])
     all_perturbed_records: List[PerturbedImageRecord] = []
     for image_path in tqdm(image_paths_to_perturb, desc="Perturbing dataset"):
-        records_for_image = perturb_image_patches(config, image_path, sd_pipe)
+        records_for_image = perturb_image_patches(config, image_path)
         all_perturbed_records.extend(records_for_image)
     print(f"Generated {len(all_perturbed_records)} perturbed image records.")
     return all_perturbed_records
@@ -542,17 +532,12 @@ def run_perturbation(config: PipelineConfig, image_paths: List[Path]) -> List[Pe
     
     Args:
         config: Pipeline configuration
-        results_df: Classification results
+        image_paths: List of image paths to process
         
     Returns:
-        List of paths to perturbed images
+        List of perturbed image records
     """
-    # Load the SD pipeline if needed
-    sd_pipe = None
-    if config.perturb.method == "sd":
-        sd_pipe = perturbation.load_sd_model()
-
-    return perturb_dataset(config, image_paths, sd_pipe)
+    return perturb_dataset(config, image_paths)
 
 
 def visualize_attributions(results_df: pd.DataFrame, output_dir: str = './results/visualizations') -> None:
