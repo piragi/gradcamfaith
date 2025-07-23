@@ -17,7 +17,6 @@ from datetime import datetime
 
 from data_types import ClassificationResult
 import vit.preprocessing as preprocessing
-import pipeline
 import analysis
 
 def batched_model_inference(model_instance, image_batch: torch.Tensor, device: torch.device, batch_size: int = 32) -> List[Dict]:
@@ -204,13 +203,11 @@ def apply_binned_perturbation(
     """
     Apply perturbation to all patches in a bin.
     
-    *** QUICK TEST VERSION ***
-    This version uses the EXACT SAME GRAYSCALE PERTURBATION as the 
-    'optimized' patch-wise pipeline to check for consistency.
+    Uses grayscale perturbation method for consistency with patch-wise approach.
     """
     if perturbation_method == "mean":
         if original_pil_image is not None:
-            # This logic is now identical to pipeline.py's apply_batched_perturbations_exact_match
+            # Use consistent grayscale perturbation method
             from PIL import Image, ImageStat
             import vit.preprocessing as preprocessing # Make sure this import is available
             
@@ -435,14 +432,6 @@ def run_binned_saco_analysis(
         print(f"  Number of bins: {n_bins}")
         print(f"  Average SaCo: {avg_saco:.4f}")
         print(f"  Std SaCo: {std_saco:.4f}")
-        
-        # Compare with patch-wise if available
-        patch_wise_file = config.file.output_dir / "analysis_saco_scores_optimized_2024-12-19_14-30.csv"
-        if patch_wise_file.exists():
-            patch_wise_df = pd.read_csv(patch_wise_file)
-            patch_wise_avg = patch_wise_df["saco_score"].mean()
-            print(f"  Patch-wise average: {patch_wise_avg:.4f}")
-            print(f"  Difference: {avg_saco - patch_wise_avg:.4f}")
     
     if save_results:
         print("Saving analysis results...")
@@ -454,7 +443,7 @@ def run_binned_saco_analysis(
                     # Save bin results with special naming for compatibility
                     save_path = config.file.output_dir / f"saco_bin_analysis_binned_{n_bins}bins_{timestamp}.csv"
                 else:
-                    # Use consistent naming scheme with optimized version  
+                    # Use consistent naming scheme for analysis results
                     save_path = config.file.output_dir / f"analysis_{name}_binned_{timestamp}.csv"
                 df_to_save.to_csv(save_path, index=False)
                 print(f"Saved {name} to {save_path}")
@@ -465,7 +454,7 @@ def run_binned_saco_analysis(
                     df_to_save.to_csv(expected_path, index=False)
                     print(f"Also saved saco scores to expected path: {expected_path}")
     
-    # Final summary similar to optimized version
+    # Final summary
     if len(all_saco_scores) > 0:
         avg_saco = np.mean(list(all_saco_scores.values()))
         print(f"Average binned SaCo score: {avg_saco:.4f} (over {len(all_saco_scores)} images)")

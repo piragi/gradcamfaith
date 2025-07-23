@@ -1,6 +1,5 @@
 # pipeline.py
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,7 +13,6 @@ from tqdm import tqdm
 # Suppress PIL debug logging
 logging.getLogger('PIL').setLevel(logging.WARNING)
 
-import analysis
 import io_utils
 import perturbation
 import visualization
@@ -397,6 +395,17 @@ def classify_dataset_only(
 def generate_perturbed_identifier(
     config: PipelineConfig, original_image_stem: str, patch_info: PerturbationPatchInfo
 ) -> str:
+    """
+    Generate unique identifier for a perturbed image based on patch info and method.
+    
+    Args:
+        config: Pipeline configuration
+        original_image_stem: Original image filename without extension
+        patch_info: Information about the patch being perturbed
+        
+    Returns:
+        Unique identifier string for the perturbed image
+    """
     if config.perturb.method == "sd":
         return f"{original_image_stem}_patch{patch_info.patch_id}_x{patch_info.x}_y{patch_info.y}_s{config.perturb.strength}"
     else:
@@ -427,7 +436,7 @@ def perturb_single_patch(
         io_utils.ensure_directories([config.file.perturbed_dir, config.file.mask_dir])
         patch_coordinates = (patch_info_dc.x, patch_info_dc.y, patch_size)
         if config.perturb.method == "sd":
-            raise Exception("do not include sd anymore")
+            raise ValueError("Stable Diffusion perturbation method is no longer supported")
         elif config.perturb.method == "mean":
             result_image, np_mask = perturbation.perturb_patch_mean(
                 str(original_image_path), patch_coordinates, config.file
@@ -496,8 +505,9 @@ def perturb_image_patches(
     patch_coordinates_list = generate_patch_coordinates(image, config.perturb.patch_size)
     for patch_id, x, y in patch_coordinates_list:
         patch_info_dc = PerturbationPatchInfo(patch_id=patch_id, x=x, y=y)
-        record = perturb_single_patch(config, original_image_path, patch_info_dc, sd_pipe)
-        if record: perturbed_records.append(record)
+        record = perturb_single_patch(config, original_image_path, patch_info_dc)
+        if record: 
+            perturbed_records.append(record)
     return perturbed_records
 
 
@@ -545,7 +555,17 @@ def run_perturbation(config: PipelineConfig, image_paths: List[Path]) -> List[Pe
     return perturb_dataset(config, image_paths, sd_pipe)
 
 
-def visualize_attributions(results_df: pd.DataFrame):
+def visualize_attributions(results_df: pd.DataFrame, output_dir: str = './results/visualizations') -> None:
+    """
+    Generate visualization images for attribution results.
+    
+    Args:
+        results_df: DataFrame containing image paths and attribution paths
+        output_dir: Directory to save visualization images
+    """
+    # Ensure output directory exists
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
     for _, row in results_df.iterrows():
         # Extract file locations from the DataFrame row
         image_path = row["image_path"]
@@ -561,7 +581,7 @@ def visualize_attributions(results_df: pd.DataFrame):
         visualization.visualize_attribution_map(
             attribution_map,
             original_image,
-            save_path=f'./results/vit_inputs_unweighted/{Path(image_path).stem}_visualization.png'
+            save_path=f'{output_dir}/{Path(image_path).stem}_visualization.png'
         )
 
 
@@ -639,8 +659,6 @@ def run_pipeline(config: PipelineConfig,
         print("Evaluate Faithfulness Pipeline")
         evaluate_and_report_faithfulness(config, vit_model, device, original_results_explained)
 
-    # print("Run Head Analysis")
-    # run_head_analysis(original_results_explained, vit_model, config)
 
     print("Compare attributions")
     run_binned_attribution_analysis(config, vit_model, original_results_explained, device, n_bins=49)
