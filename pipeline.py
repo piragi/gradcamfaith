@@ -31,6 +31,7 @@ from data_types import (
 from faithfulness import evaluate_and_report_faithfulness
 from translrp.ViT_new import VisionTransformer
 from transmm_sfaf import (generate_attribution_prisma, load_models, load_steering_resources)
+from attribution_binning import run_binned_attribution_analysis
 
 
 def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
@@ -123,8 +124,9 @@ def save_attribution_bundle_to_files(
     class_embedding_path = Path("")
     head_contribution_path = Path("")
 
-    # Save positive attribution
+    # Save positive attribution (224x224 - for visualization)
     np.save(attribution_path, attribution_bundle.positive_attribution)
+    # Save raw attribution (196,) - one value per ViT patch for SACO calculations
     np.save(raw_attribution_path, attribution_bundle.raw_attribution)
 
     # Save logits (save empty array if None)
@@ -272,8 +274,8 @@ def classify_explain_single_image(
         class_analysis=class_analysis,
     )
 
-    # Extract gradient analysis info if present
-    raw_attr = raw_attribution_result_dict.get("raw_attribution", {})
+    # Extract raw attribution (shape 196 - one value per ViT patch)
+    raw_attr = raw_attribution_result_dict.get("raw_attribution", np.array([]))
 
     # 3. Instantiate ClassificationPrediction from the "predictions" field
     prediction_data = raw_attribution_result_dict["predictions"]
@@ -907,22 +909,23 @@ def calculate_saco_for_single_image(
         str(image_path), img_size=config.classify.target_size[0]
     )
     
-    # Load attribution map once
-    attribution_path = original_result.attribution_paths.attribution_path
-    attribution_map = np.load(attribution_path)
+    # Load raw attribution map (shape 196 - one value per ViT patch)
+    raw_attribution_path = original_result.attribution_paths.raw_attribution_path
+    raw_attribution_map = np.load(raw_attribution_path)  # Shape: (196,)
     
-    # Generate all patch coordinates - MATCH ORIGINAL APPROACH EXACTLY
-    width, height = original_pil.size
+    # Generate ViT patch coordinates for 14x14 grid (224/16 = 14)
+    # Each ViT patch is 16x16 pixels
+    vit_patch_size = 16
     patch_coords = []
     patch_infos = []
     
-    # Use SAME patch ID calculation as original approach (generate_patch_coordinates)
-    num_patches_x = width // config.perturb.patch_size
-    
-    for y in range(0, height - config.perturb.patch_size + 1, config.perturb.patch_size):
-        for x in range(0, width - config.perturb.patch_size + 1, config.perturb.patch_size):
-            # Match original: patch_id = (y // patch_size) * num_patches_x + (x // patch_size)
-            patch_id = (y // config.perturb.patch_size) * num_patches_x + (x // config.perturb.patch_size)
+    # Generate 14x14 = 196 patches that match ViT's patch grid
+    for patch_row in range(14):
+        for patch_col in range(14):
+            x = patch_col * vit_patch_size
+            y = patch_row * vit_patch_size
+            patch_id = patch_row * 14 + patch_col  # 0 to 195
+            
             patch_coords.append((x, y))
             patch_infos.append(PerturbationPatchInfo(patch_id=patch_id, x=x, y=y))
     
@@ -930,9 +933,11 @@ def calculate_saco_for_single_image(
         return []
     
     # Create all masks in batch - use vectorized approach for performance
+    # Use fixed 16x16 ViT patch size, not the config.perturb.patch_size
+    width, height = original_pil.size
     masks = create_batched_masks_vectorized(
         image_size=(height, width),
-        patch_size=config.perturb.patch_size,
+        patch_size=vit_patch_size,
         patch_coords=patch_coords
     )
     
@@ -948,7 +953,7 @@ def calculate_saco_for_single_image(
             batch_coords = patch_coords[i:end_idx]
             batch_perturbed = apply_batched_perturbations_exact_match(
                 original_tensor, batch_masks, config.perturb.method, original_pil, 
-                batch_coords, config.perturb.patch_size
+                batch_coords, vit_patch_size
             )
             
             # Run inference for this batch
@@ -967,7 +972,7 @@ def calculate_saco_for_single_image(
         # Apply all perturbations using exact match approach
         perturbed_batch = apply_batched_perturbations_exact_match(
             original_tensor, masks, config.perturb.method, original_pil,
-            patch_coords, config.perturb.patch_size
+            patch_coords, vit_patch_size
         )
         
         # Run batched inference but ensure compatibility with original approach
@@ -983,11 +988,9 @@ def calculate_saco_for_single_image(
     for i, (patch_info, (x, y)) in enumerate(zip(patch_infos, patch_coords)):
         perturbed_pred = perturbed_predictions[i]
         
-        # Calculate mean attribution in patch
-        y_end = min(y + config.perturb.patch_size, attribution_map.shape[0])
-        x_end = min(x + config.perturb.patch_size, attribution_map.shape[1])
-        patch_region = attribution_map[y:y_end, x:x_end]
-        mean_patch_attr = float(np.mean(patch_region))
+        # Use raw attribution value directly for this ViT patch
+        # patch_id corresponds directly to the index in raw_attribution_map
+        raw_patch_attr = float(raw_attribution_map[patch_info.patch_id])
         
         
         result = {
@@ -995,7 +998,7 @@ def calculate_saco_for_single_image(
             "patch_id": patch_info.patch_id,
             "x": patch_info.x,
             "y": patch_info.y,
-            "mean_attribution": mean_patch_attr,
+            "mean_attribution": raw_patch_attr,
             "original_predicted_idx": original_pred.predicted_class_idx,
             "original_confidence": original_pred.confidence,
             "perturbed_predicted_idx": perturbed_pred["predicted_class_idx"],
@@ -1055,6 +1058,16 @@ def run_saco_from_pipeline_outputs_optimized(
         patch_ids = image_data['patch_id'].values
         
         # Calculate overall SaCo score using vectorized approach
+        # DEBUG: Print specific image's data for comparison
+        if "dev_0aec60bd" in image_name:  # Specific image for comparison
+            print(f"PATCH DEBUG - Image: {image_name}")
+            print(f"PATCH - Attributions shape: {attributions.shape}")
+            print(f"PATCH - Confidence impacts shape: {confidence_impacts.shape}")
+            print(f"PATCH - Attributions[:5]: {attributions[:5]}")
+            print(f"PATCH - Confidence impacts[:5]: {confidence_impacts[:5]}")
+            print(f"PATCH - Attribution sum: {np.sum(attributions)}")
+            print(f"PATCH - Confidence sum: {np.sum(confidence_impacts)}")
+        
         saco_score = calculate_saco_vectorized(attributions, confidence_impacts)
         saco_scores[image_name] = saco_score
         # Calculate patch-specific SaCo scores using vectorized approach  
@@ -1267,6 +1280,7 @@ def run_pipeline(config: PipelineConfig,
     # You can control which layers to use from your config file
     steering_layers_from_config = getattr(config.classify, 'steering_layers', [8])
     steering_resources = load_steering_resources(steering_layers_from_config)
+    sae = steering_resources[8]["sae"]
     print("All steering resources loaded.")
     class_analysis = None
     print("ViT model loaded, hooks registered, and set to eval mode.")
@@ -1299,15 +1313,22 @@ def run_pipeline(config: PipelineConfig,
     # For debugging, let's run both approaches on dev dataset to compare
     if "dev" in str(config.file.data_dir).lower():
         print("DEV MODE: Running both original and optimized approaches for comparison")
+
         # Initialize patch logger for comparison
         # initialize_patch_logger(config.file.output_dir / "patch_comparison_logs")
         print("\n--- Running Original Approach ---")
         # run_saco_from_pipeline_outputs(config, original_results_explained, vit_model, device)
         print("\n--- Running Optimized Approach ---") 
-        run_saco_from_pipeline_outputs(config, original_results_explained, vit_model, device)
+        run_saco_from_pipeline_outputs_optimized(config, original_results_explained, vit_model, device)
+        
+        # NEW: Run binned approach for comparison
+        print("\n--- Running Binned Approach ---")
+        run_binned_attribution_analysis(config, original_results_explained, device, n_bins=20)
     else:
         # For production (val dataset), use optimized version only
-        run_saco_from_pipeline_outputs_optimized(config, original_results_explained, vit_model, device)
+        # run_saco_from_pipeline_outputs_optimized(config, original_results_explained, vit_model, device)
+        
+        run_binned_attribution_analysis(config, original_results_explained, device, n_bins=20)
 
     print("Full pipeline finished.")
     return original_results_explained
