@@ -50,9 +50,10 @@ SAE_CONFIG = {
     6: {
         # "sae_path": "models/sweep/sae_l6_k128_exp64_lr0.0002/becaec1e-vit_medical_sae_k_sweep/n_images_49276.pt",
         "sae_path": "./models/sweep/sae_l6_k64_exp64_lr2e-05/81ea5ed2-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_local_l6_alignment_min1_128k64.pt"
+        "dict_path": "./sae_dictionaries/steer_corr_local_l6_alignment_min1_128k64.pt",
         # "dict_path": "./sae_dictionaries/steer_corr_l6_alignment_min1_128k64.pt"
         # "dict_path": "./sae_dictionaries/sfaf_stealth_l6_alignment_min3_128k64.pt"
+        "saco_dict_path": "./results/saco_problematic_features_bins_l6.pt"
     },
     7: {
         # "sae_path": "models/sweep/sae_l7_k64_exp64_lr0.0002/21922d4b-vit_medical_sae_k_sweep/n_images_49276.pt",
@@ -69,7 +70,8 @@ SAE_CONFIG = {
         "dict_path": "./sae_dictionaries/steer_corr_local_l8_alignment_min1_128k64.pt",
         # "dict_path": "./sae_dictionaries/steer_corr_l8_alignment_min1_128k64.pt"
         # "dict_path": "./sae_dictionaries/sfaf_stealth_l8_alignment_min3_128k64.pt"
-        "saco_dict_path": "./results/saco_problematic_features_l8.pt"  # NEW: SaCo results
+        # "saco_dict_path": "./results/saco_problematic_features_l8_moderate.pt"  # NEW: SaCo results
+        "saco_dict_path": "./results/saco_problematic_features_bins_l8.pt"
     },
     9: {
         # "sae_path": "models/sweep/sae_l9_k128_exp64_lr0.0002/e06c6b1d-vit_medical_sae_k_sweep/n_images_49276.pt",
@@ -94,30 +96,6 @@ SAE_CONFIG = {
 
 def load_models():
     """Load SAE and fine-tuned model"""
-    # Load SAE
-    # layer 6
-    # sae_path = "./models/sweep/sae_k128_exp8_lr0.0002/1756558b-vit_medical_sae_k_sweep/n_images_49276.pt"
-    # layer 7 - 32/512
-    # sae_path = "./models/sweep/sae_k512_exp32_lr2e-05/0e1e8e5b-vit_medical_sae_k_sweep/n_images_49276.pt"
-    # layer 8 - 32/512
-    # sae_path = "./models/sweep/sae_k512_exp32_lr0.0002/8d3c1d4e-vit_medical_sae_k_sweep/n_images_49276.pt"
-    # layer 9
-    # sae_path = "./models/sweep/sae_k128_exp8_lr0.0002/e1074fed-vit_medical_sae_k_sweep/n_images_49276.pt"
-    # layer 9 - 32/512
-    # sae_path = "./models/sweep/sae_k512_exp32_lr0.0002/ba4246a2-vit_medical_sae_k_sweep/n_images_49276.pt"
-    # layer 9 - 32/512 lr0.00002
-    # sae_path = "./models/sweep/sae_k512_exp32_lr2e-05/9f16d6da-vit_medical_sae_k_sweep/n_images_49276.pt"
-    # layer 9 - 32/1024
-    # sae_path = "./models/sweep/sae_k1024_exp32_lr2e-05/434e6b18-vit_medical_sae_k_sweep/n_images_49276.pt"
-    # layer 10
-    # sae_path = "./models/sweep/vanilla_l1_5e-06_exp8_lr1e-05/28ebc3ab-vit_medical_sae_vanilla_sweep/n_images_49276.pt"
-    # layer 11
-    # sae_path = "./models/sweep/vanilla_l1_1e-05_exp8_lr1e-05/518dec78-vit_medical_sae_vanilla_sweep/n_images_49276.pt"
-
-    # sae_path = "./models/sweep/sae_k1024_exp32_lr2e-05/37bf7afa-vit_medical_sae_k_sweep/n_images_49276.pt"
-    # sae = SparseAutoencoder.load_from_pretrained(sae_path)
-    # sae.cuda().eval()
-
     # Load model
     model = HookedSAEViT.from_pretrained("vit_base_patch16_224")
     model.head = torch.nn.Linear(model.cfg.d_model, 6)
@@ -136,7 +114,7 @@ def load_models():
     model.load_state_dict(converted_weights)
     model.cuda().eval()
 
-    return None, model
+    return model
 
 
 def load_steering_resources(layers: List[int]) -> Dict[int, Dict[str, Any]]:
@@ -169,7 +147,8 @@ def load_steering_resources(layers: List[int]) -> Dict[int, Dict[str, Any]]:
             if "saco_dict_path" in config:
                 saco_dict_path = Path(config["saco_dict_path"])
                 if saco_dict_path.exists():
-                    resources[layer_idx]["saco_dict_path"] = str(saco_dict_path)
+                    saco_results = torch.load(saco_dict_path, weights_only=False)
+                    resources[layer_idx]["saco_dict"] = saco_results  # Load once, store in memory
                     print(f"Loaded SaCo dictionary for layer {layer_idx}: {saco_dict_path}")
                 else:
                     print(f"Warning: SaCo dict path specified but file not found: {saco_dict_path}")
@@ -206,7 +185,6 @@ def transmm_prisma(
     steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,  # CHANGED: Pass resources in
     enable_steering: bool = True,
     steering_strength: float = 1.5,
-    class_analysis=None
 ) -> Tuple[Dict[str, Any], np.ndarray, Dict[str, Any]]:
     """
     TransMM with S_f/A_f based patch boosting on multiple layers.
@@ -281,7 +259,6 @@ def transmm_prisma(
     R_pos = torch.eye(num_tokens, num_tokens, device='cpu')
     all_boosted_features = {}
 
-    print(f"Predicted class. {IDX2CLS[predicted_class_idx]}")
     for i in range(model_prisma.cfg.n_layers):
         hname = f"blocks.{i}.attn.hook_pattern"
         grad = gradients[hname + "_grad"]
@@ -307,26 +284,34 @@ def transmm_prisma(
                 #     debug=True
                 # )
                 
-                # ===== NEW SACO-BASED BOOST =====
-                if "saco_dict_path" in resources:
-                    print(f"Loading SaCo results from: {resources['saco_dict_path']}")
-                    saco_results = torch.load(resources["saco_dict_path"], weights_only=False)
+                # ===== RANDOM BASELINE BOOST =====
+                if "saco_dict" in resources:
+                    # print(f"Using random baseline boosting for layer {i}")
+                    # boost_mask, selected_feat_ids = build_boost_mask_random(
+                        # sae_codes=codes_for_layer,
+                        # device=device,
+                        # suppress_strength=0.3,
+                        # boost_strength=10.0,
+                        # top_k_suppress=0,
+                        # top_k_boost=15,
+                        # min_activation=0.05,
+                        # seed=42,  # For reproducibility
+                        # debug=True
+                    # )
                     
-                    # Option 1: Bidirectional (suppress + boost)
-                    boost_mask, selected_feat_dict = build_boost_mask_saco_bidirectional(
-                        sae_codes=codes_for_layer,
-                        saco_results=saco_results,
-                        predicted_class=predicted_class_idx,
-                        device=device,
-                        suppress_strength=0.3,
-                        boost_strength=5.,
-                        top_k_suppress=15,  # Increase to catch more features
-                        top_k_boost=10,     # Increase to catch more features
-                        class_specific_boost=True,  # NEW: Enable class-specific selection
-                        strict_class_filter=True,   # NEW: Prevent cross-class contamination
-                        debug=True
+                    # ===== SIMPLIFIED SACO-BASED BOOST =====
+                    saco_results = resources["saco_dict"]  # Keep loading for potential future use
+                    boost_mask, selected_feat_ids = build_boost_mask_saco_simple(
+                    sae_codes=codes_for_layer,
+                    saco_results=saco_results,
+                    device=device,
+                    suppress_strength=0.3,
+                    boost_strength=5,
+                    top_k_suppress=8,
+                    top_k_boost=15,
+                    min_activation=0.05,
+                    debug=True
                     )
-                    selected_feat_ids = selected_feat_dict['suppress'] + selected_feat_dict['boost']
                     
                     # Option 2: Conservative suppression only
                     # boost_mask, selected_feat_ids = build_boost_mask_saco_suppress_only(
@@ -395,6 +380,7 @@ def transmm_prisma(
                 # )
                 #
                 if selected_feat_ids:
+                    print(f"Predicted class. {IDX2CLS[predicted_class_idx]}")
                     print(f"Layer {i}: Boosting based on {len(selected_feat_ids)} features: {selected_feat_ids}")
                     cam_pos_avg[0, 1:] *= boost_mask.cpu()
                     all_boosted_features[i] = selected_feat_ids
@@ -938,7 +924,7 @@ def build_boost_mask_saco_bidirectional(
     *,
     suppress_strength: float = 0.7,  # Suppress over-attributed (multiply by this)
     boost_strength: float = 1.4,    # Boost under-attributed (multiply by this)
-    min_activation: float = 0.05,
+    min_activation: float = 0.01,
     top_k_suppress: int = 10,       # Top features to suppress per class
     top_k_boost: int = 5,           # Top features to boost per class
     class_specific_boost: bool = True,  # NEW: Use class-specific feature selection
@@ -1199,7 +1185,329 @@ def build_boost_mask_saco_suppress_only(
     
     return boost_mask, suppress_features
 
+
+@torch.no_grad()
+def build_boost_mask_saco_under_attributed_focus(
+    sae_codes: torch.Tensor,
+    saco_results: Dict[str, Any],
+    predicted_class: int,
+    device: torch.device,
+    *,
+    boost_strength: float = 8.0,        # Higher boost for focused strategy
+    min_activation: float = 0.01,       # Much lower threshold to capture more active features
+    top_k_boost: int = 20,              # More features to find the good ones
+    class_specific_boost: bool = True,
+    strict_class_filter: bool = False,   # Use looser signal-focused filter
+    debug: bool = False
+) -> Tuple[torch.Tensor, Dict[str, List[int]]]:
+    """
+    Focus ONLY on boosting under-attributed features with looser restrictions.
+    Designed for classes with heavy under-attribution bias (pylorus, z-line, etc.).
+    """
+    codes = sae_codes[0, 1:].to(device)  # Remove CLS token
+    n_patches, n_feats = codes.shape
+    
+    # Initialize mask as all ones (no effect)
+    boost_mask = torch.ones(n_patches, device=device)
+    selected_features = {'boost': []}
+    
+    # Get results by patch type - ONLY under-attributed
+    results_by_type = saco_results.get('results_by_type', {})
+    under_attributed = results_by_type.get('under_attributed', {})
+    
+    if not under_attributed:
+        if debug:
+            print("No under-attributed features found in SaCo results")
+        return boost_mask, selected_features
+    
+    boost_features = []
+    
+    if class_specific_boost:
+        predicted_class_name = IDX2CLS.get(predicted_class, 'unknown')
+        
+        # Filter features with LOOSER restrictions for more coverage
+        class_relevant_features = []
+        for feat_id, stats in under_attributed.items():
+            class_dist = stats.get('class_distribution', {})
+            if predicted_class_name in class_dist:
+                
+                # Calculate quality metrics
+                class_count = class_dist.get(predicted_class_name, 0)
+                total_occurrences = sum(class_dist.values())
+                class_frequency = class_count / max(total_occurrences, 1)
+                overlap_ratio = stats.get('mean_overlap_ratio', 0.0)
+                saco_strength = abs(stats.get('mean_weighted_saco', 0.0))
+                mean_activation = stats.get('mean_activation_in_problematic', 0.0)
+                
+                # ACTIVATION-FOCUSED filtering: prioritize features that will actually fire
+                if strict_class_filter:
+                    # Much simpler filter focused on activation potential and basic quality
+                    if (mean_activation >= 2.0 and        # Must have decent activation in problematic patches
+                        class_count >= 1 and              # Just needs to appear for this class
+                        saco_strength >= 0.6):            # Moderate signal requirement
+                        pass  # Feature passes activation-focused filter
+                    else:
+                        continue  # Skip features unlikely to be active
+                
+                # ACTIVATION-FOCUSED scoring: prioritize features that actually activate
+                activation_score = mean_activation * saco_strength * (1 + class_frequency)
+                class_relevant_features.append((feat_id, stats, activation_score))
+        
+        # Sort by activation score and take top_k (highest activation score first)
+        class_relevant_features.sort(key=lambda x: x[2], reverse=True)
+        selected_features_data = class_relevant_features[:top_k_boost]
+        
+        if debug:
+            print(f"Found {len(class_relevant_features)} class-relevant boost features for {predicted_class_name}")
+            print(f"Selected top {len(selected_features_data)} features with ACTIVATION-FOCUSED strategy")
+    else:
+        # Original method: just take top global features
+        selected_features_data = [(feat_id, stats, stats['mean_weighted_saco']) 
+                                  for feat_id, stats in list(under_attributed.items())[:top_k_boost]]
+    
+    for feat_id, stats, _ in selected_features_data:
+        # Check if feature exists and is active in this sample
+        if feat_id >= n_feats:
+            continue
+            
+        feat_activations = codes[:, feat_id]
+        active_mask = feat_activations > min_activation
+        
+        # Skip if feature is not active in this sample
+        if not active_mask.any():
+            continue
+        
+        # Apply boosting where feature is active
+        saco_score = stats['mean_weighted_saco']
+        adaptive_boost = 1.0 + (boost_strength - 1.0) * min(1.0, saco_score)
+        
+        # Apply multiplicative boost
+        patch_boost = 1.0 + feat_activations * (adaptive_boost - 1.0)
+        boost_mask *= patch_boost
+        
+        boost_features.append(feat_id)
+        
+        if debug:
+            n_active_patches = active_mask.sum().item()
+            print(f"  Boosting feature {feat_id}: saco={stats['mean_weighted_saco']:.3f}, "
+                  f"class={stats['dominant_class']}, strength={adaptive_boost:.3f}, "
+                  f"active_patches={n_active_patches}")
+    
+    selected_features['boost'] = boost_features
+    
+    if debug:
+        # Count total active features for context
+        total_active_features = (codes.abs() > min_activation).any(dim=0).sum().item()
+        print(f"Under-attributed focus applied: {len(boost_features)} boosted features "
+              f"(from {total_active_features} total active features)")
+    
+    return boost_mask, selected_features
+
 # =====================================================================
+
+@torch.no_grad()
+def build_boost_mask_saco_simple(
+    sae_codes: torch.Tensor,
+    saco_results: Dict[str, Any],
+    device: torch.device,
+    *,
+    suppress_strength: float = 0.5,  # Suppress over-attributed features
+    boost_strength: float = 2.0,     # Boost under-attributed features  
+    min_activation: float = 0.05,
+    top_k_suppress: int = 10,        # Top over-attributed features to suppress
+    top_k_boost: int = 8,            # Top under-attributed features to boost
+    debug: bool = False
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Simplified SaCo-based boosting without class filtering.
+    Just uses the top features by confidence-adjusted score regardless of class.
+    """
+    codes = sae_codes[0, 1:].to(device)  # Remove CLS token
+    n_patches, n_feats = codes.shape
+    boost_mask = torch.ones(n_patches, device=device)
+    selected_features = []
+    
+    results_by_type = saco_results.get('results_by_type', {})
+    
+    # Process over-attributed features (SUPPRESS) - no class filtering
+    over_attributed = results_by_type.get('over_attributed', {})
+    if over_attributed:
+        # Sort by confidence score (already computed in analysis)
+        sorted_features = sorted(
+            over_attributed.items(), 
+            key=lambda x: x[1].get('saco_adjusted_score', 0.0), 
+            reverse=True
+        )
+        
+        suppress_count = 0
+        for feat_id, stats in sorted_features:
+            if suppress_count >= top_k_suppress:
+                break
+                
+            # Check if feature exists and is active
+            if feat_id >= n_feats:
+                continue
+                
+            feat_activations = codes[:, feat_id]
+            active_mask = feat_activations > min_activation
+            
+            if not active_mask.any():
+                continue
+            
+            # Apply suppression - simpler formula
+            patch_suppression = suppress_strength + (1.0 - suppress_strength) * (1.0 - feat_activations.clamp(0, 1))
+            boost_mask *= patch_suppression
+            
+            selected_features.append(feat_id)
+            suppress_count += 1
+            
+            if debug:
+                n_active = active_mask.sum().item()
+                print(f"  SUPPRESS feature {feat_id}: conf_score={stats.get('saco_adjusted_score', 0):.3f}, "
+                      f"active_patches={n_active}")
+    
+    # Process under-attributed features (BOOST) - no class filtering  
+    under_attributed = results_by_type.get('under_attributed', {})
+    if under_attributed:
+        # Sort by confidence score 
+        sorted_features = sorted(
+            under_attributed.items(),
+            key=lambda x: x[1].get('saco_adjusted_score', 0.0),
+            reverse=True
+        )
+        
+        boost_count = 0
+        for feat_id, stats in sorted_features:
+            if boost_count >= top_k_boost:
+                break
+                
+            # Check if feature exists and is active
+            if feat_id >= n_feats:
+                continue
+                
+            feat_activations = codes[:, feat_id] 
+            active_mask = feat_activations > min_activation
+            
+            if not active_mask.any():
+                continue
+            
+            # Apply boost - simpler formula
+            patch_boost = 1.0 + feat_activations.clamp(0, 1) * (boost_strength - 1.0)
+            boost_mask *= patch_boost
+            
+            selected_features.append(feat_id)
+            boost_count += 1
+            
+            if debug:
+                n_active = active_mask.sum().item()
+                print(f"  BOOST feature {feat_id}: conf_score={stats.get('saco_adjusted_score', 0):.3f}, "
+                      f"active_patches={n_active}")
+    
+    if debug:
+        total_active = (codes.abs() > min_activation).any(dim=0).sum().item()
+        print(f"Simple SaCo mask: {len(selected_features)} total features selected "
+              f"(from {total_active} active features)")
+    
+    return boost_mask, selected_features
+
+
+@torch.no_grad()
+def build_boost_mask_random(
+    sae_codes: torch.Tensor,
+    device: torch.device,
+    *,
+    suppress_strength: float = 0.5,
+    boost_strength: float = 2.0,
+    min_activation: float = 0.05,
+    top_k_suppress: int = 10,
+    top_k_boost: int = 8,
+    seed: Optional[int] = None,
+    debug: bool = False
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Random feature boosting/suppression for baseline comparison.
+    Randomly selects features that are active in the current sample.
+    
+    Args:
+        sae_codes: SAE feature codes [1+T, k]
+        device: Device to run on
+        suppress_strength: Suppression strength (< 1.0)
+        boost_strength: Boost strength (> 1.0)
+        min_activation: Minimum activation threshold
+        top_k_suppress: Number of features to suppress
+        top_k_boost: Number of features to boost
+        seed: Random seed for reproducibility
+        debug: Print debug information
+    
+    Returns:
+        boost_mask: Multiplicative mask for patches
+        selected_features: List of selected feature IDs
+    """
+    codes = sae_codes[0, 1:].to(device)  # Remove CLS token
+    n_patches, n_feats = codes.shape
+    boost_mask = torch.ones(n_patches, device=device)
+    selected_features = []
+    
+    # Set random seed if provided
+    if seed is not None:
+        torch.manual_seed(seed)
+        import random
+        random.seed(seed)
+    
+    # Vectorized: Find all active features in this sample
+    active_mask = (codes > min_activation).any(dim=0)  # [n_feats]
+    active_features = active_mask.nonzero(as_tuple=True)[0]  # Tensor of active feature indices
+    
+    if len(active_features) == 0:
+        if debug:
+            print("No active features found for random boosting")
+        return boost_mask, selected_features
+    
+    # Randomly sample features for suppression and boosting (vectorized)
+    n_suppress = min(top_k_suppress, len(active_features))
+    n_boost = min(top_k_boost, len(active_features))
+    n_total = min(n_suppress + n_boost, len(active_features))
+    
+    if n_total > 0:
+        # Single random permutation for both suppress and boost
+        perm = torch.randperm(len(active_features))[:n_total]
+        selected_feat_indices = active_features[perm]
+        
+        # Split into suppress and boost
+        suppress_indices = selected_feat_indices[:n_suppress] if n_suppress > 0 else torch.tensor([], dtype=torch.long, device=device)
+        boost_indices = selected_feat_indices[n_suppress:n_suppress + n_boost] if n_boost > 0 else torch.tensor([], dtype=torch.long, device=device)
+        
+        # Vectorized suppression
+        if len(suppress_indices) > 0:
+            suppress_activations = codes[:, suppress_indices]  # [n_patches, n_suppress]
+            suppress_masks = suppress_strength + (1.0 - suppress_strength) * (1.0 - suppress_activations.clamp(0, 1))
+            boost_mask *= suppress_masks.prod(dim=1)  # Multiply all suppression effects
+            
+            if debug:
+                for i, feat_id in enumerate(suppress_indices):
+                    n_active = (suppress_activations[:, i] > min_activation).sum().item()
+                    print(f"  SUPPRESS feature {feat_id.item()} (random): active_patches={n_active}")
+        
+        # Vectorized boosting  
+        if len(boost_indices) > 0:
+            boost_activations = codes[:, boost_indices]  # [n_patches, n_boost]
+            boost_masks = 1.0 + boost_activations.clamp(0, 1) * (boost_strength - 1.0)
+            boost_mask *= boost_masks.prod(dim=1)  # Multiply all boost effects
+            
+            if debug:
+                for i, feat_id in enumerate(boost_indices):
+                    n_active = (boost_activations[:, i] > min_activation).sum().item()
+                    print(f"  BOOST feature {feat_id.item()} (random): active_patches={n_active}")
+        
+        # Convert to list for return value
+        selected_features = selected_feat_indices.cpu().tolist()
+    
+    if debug:
+        total_active = len(active_features)
+        print(f"Random mask: {len(selected_features)} total features selected "
+              f"(from {total_active} active features)")
+    
+    return boost_mask, selected_features
 
 
 def generate_attribution_prisma(
@@ -1207,11 +1515,8 @@ def generate_attribution_prisma(
     input_tensor: torch.Tensor,
     config: PipelineConfig,
     device: Optional[torch.device] = None,
-    sae: Optional[SparseAutoencoder] = None,
-    sf_af_dict: Optional[Dict[str, torch.Tensor]] = None,
-    steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,  # ADDED
+    steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,
     enable_steering: bool = True,
-    class_analysis=None
 ) -> Dict[str, Any]:
     """
     Generate attribution with S_f/A_f based steering.
@@ -1221,20 +1526,19 @@ def generate_attribution_prisma(
 
     input_tensor = input_tensor.to(device)
 
-    (pred_dict, pos_attr_np, raw_attr) = transmm_prisma(
+    (pred_dict, pos_attr_np, raw_patch_map) = transmm_prisma(
         model_prisma=model,
         input_tensor=input_tensor,
         steering_resources=steering_resources,
         config=config,
         enable_steering=enable_steering,
-        class_analysis=class_analysis
     )
 
     # Structure output
     return {
         "predictions": pred_dict,
         "attribution_positive": pos_attr_np,
-        "raw_attribution": raw_attr,
+        "raw_attribution": raw_patch_map,
         "logits": None,
         "ffn_activity": [],
         "class_embedding_representation": [],

@@ -53,11 +53,6 @@ def extract_class_from_image_name(image_name: str) -> str:
         return 'unknown'
 
 
-def patch_id_to_coordinates(patch_id: int, n_patches_per_side: int = 14) -> Tuple[int, int]:
-    """Convert patch ID to (row, col) coordinates."""
-    return patch_id // n_patches_per_side, patch_id % n_patches_per_side
-
-
 def load_saco_bin_data(csv_path: str) -> pd.DataFrame:
     """Load and process SaCo bin analysis data from attribution_binning.py output."""
     print("Loading bin-level CSV data...")
@@ -74,24 +69,34 @@ def load_saco_bin_data(csv_path: str) -> pd.DataFrame:
     return df
 
 
-def classify_bins(df: pd.DataFrame, confidence_threshold: float) -> pd.DataFrame:
+def classify_bins(df: pd.DataFrame, attr_quantiles: tuple = (0.3, 0.7), impact_quantiles: tuple = (0.3, 0.7)) -> pd.DataFrame:
     """
     Classify bins into 'over_attributed', 'under_attributed', or 'normal' based on 
-    the relationship between attribution and confidence impact.
+    per-image quantiles of attribution and confidence impact.
     
     A bin is problematic if it has:
-    - High attribution but low confidence impact (over_attributed)
-    - Low attribution but high confidence impact (under_attributed)
+    - High attribution (>70th percentile) + Low impact (<30th percentile) = over-attributed
+    - Low attribution (<30th percentile) + High impact (>70th percentile) = under-attributed
+    
+    Args:
+        df: DataFrame with bin data including 'mean_attribution' and 'confidence_delta_abs'
+        attr_quantiles: (low, high) quantiles for attribution thresholds 
+        impact_quantiles: (low, high) quantiles for confidence impact thresholds
     """
-    # Sort by attribution to get percentiles
-    attr_median = df['mean_attribution'].median()
-    impact_median = df['confidence_delta_abs'].median()
+    # Calculate per-image quantile thresholds
+    attr_low_q, attr_high_q = attr_quantiles
+    impact_low_q, impact_high_q = impact_quantiles
+    
+    attr_high_threshold = df.groupby('image_name')['mean_attribution'].transform(lambda x: x.quantile(attr_high_q))
+    attr_low_threshold = df.groupby('image_name')['mean_attribution'].transform(lambda x: x.quantile(attr_low_q))
+    impact_high_threshold = df.groupby('image_name')['confidence_delta_abs'].transform(lambda x: x.quantile(impact_high_q))
+    impact_low_threshold = df.groupby('image_name')['confidence_delta_abs'].transform(lambda x: x.quantile(impact_low_q))
     
     conditions = [
-        # High attribution, low impact = over-attributed  
-        (df['mean_attribution'] > attr_median) & (df['confidence_delta_abs'] < impact_median),
-        # Low attribution, high impact = under-attributed
-        (df['mean_attribution'] < attr_median) & (df['confidence_delta_abs'] > impact_median)
+        # High attribution + Low impact = over-attributed
+        (df['mean_attribution'] > attr_high_threshold) & (df['confidence_delta_abs'] < impact_low_threshold),
+        # Low attribution + High impact = under-attributed  
+        (df['mean_attribution'] < attr_low_threshold) & (df['confidence_delta_abs'] > impact_high_threshold)
     ]
     choices = ['over_attributed', 'under_attributed']
     df['problem_type'] = np.select(conditions, choices, default='normal')
@@ -135,41 +140,59 @@ def get_patches_for_bin(image_name: str, bin_id: int, raw_attributions: np.ndarr
 def map_bins_to_spatial_regions(problematic_bins_df: pd.DataFrame, attribution_data: Dict[str, np.ndarray]) -> pd.DataFrame:
     """
     Map problematic bins back to their constituent patches for spatial analysis.
-    
-    Args:
-        problematic_bins_df: DataFrame with problematic bins
-        attribution_data: Dict mapping image_name to raw attribution arrays (196 values)
-    
-    Returns:
-        DataFrame with patch-level data for problematic regions
+    OPTIMIZED: Vectorized operations and batch processing.
     """
+    # Pre-compute all patch mappings to avoid repeated computation
+    image_patch_mappings = {}
+    
     patch_records = []
     
-    for _, bin_row in problematic_bins_df.iterrows():
-        image_name = bin_row['image_name']
-        bin_id = bin_row['bin_id']
-        problem_type = bin_row['problem_type']
-        
-        # Get raw attributions for this image
+    # Group by image to minimize repeated computations
+    for image_name, image_bins in problematic_bins_df.groupby('image_name'):
         if image_name not in attribution_data:
             logging.warning(f"No attribution data found for {image_name}")
             continue
         
         raw_attrs = attribution_data[image_name]
         
-        # Get patches belonging to this bin
-        patch_ids = get_patches_for_bin(image_name, bin_id, raw_attrs)
+        # Pre-compute binning for this image once
+        if image_name not in image_patch_mappings:
+            n_bins = len(image_bins['bin_id'].unique())
+            sorted_patch_indices = np.argsort(raw_attrs)[::-1]
+            binned_indices = np.array_split(sorted_patch_indices, n_bins)
+            
+            # Create mapping from bin_id to patch_ids
+            temp_bins = []
+            for patch_indices_list in binned_indices:
+                if len(patch_indices_list) == 0:
+                    continue
+                bin_attributions = raw_attrs[patch_indices_list]
+                temp_bins.append({
+                    "indices": patch_indices_list,
+                    "mean_attr": np.mean(bin_attributions)
+                })
+            
+            temp_bins.sort(key=lambda b: b['mean_attr'])
+            image_patch_mappings[image_name] = {i: temp_bins[i]["indices"] for i in range(len(temp_bins))}
         
-        # Create patch records
-        for patch_id in patch_ids:
-            patch_records.append({
-                'image_name': image_name,
-                'patch_id': patch_id,
-                'bin_id': bin_id,
-                'problem_type': problem_type,
-                'mean_attribution': raw_attrs[patch_id],
-                'bin_saco_score': bin_row.get('saco_score', 0.0)
-            })
+        # Use pre-computed mapping
+        patch_mapping = image_patch_mappings[image_name]
+        
+        # Vectorized creation of patch records
+        for _, bin_row in image_bins.iterrows():
+            bin_id = bin_row['bin_id']
+            if bin_id in patch_mapping:
+                patch_ids = patch_mapping[bin_id]
+                
+                # Create records for all patches in this bin at once
+                patch_records.extend([{
+                    'image_name': image_name,
+                    'patch_id': int(patch_id),
+                    'bin_id': bin_id,
+                    'problem_type': bin_row['problem_type'],
+                    'mean_attribution': raw_attrs[patch_id],
+                    'bin_saco_score': bin_row.get('saco_score', 0.0)
+                } for patch_id in patch_ids])
     
     return pd.DataFrame(patch_records)
 
@@ -222,27 +245,29 @@ def _calculate_feature_metrics_for_patches(
     return feature_metrics
 
 
-def compute_confidence_adjusted_score(
-    saco_score: float, 
+def compute_saco_adjusted_confidence_score(
+    mean_saco: float,
     overlap_ratio: float, 
     n_occurrences: int,
+    image_saco_scores: List[float],
     confidence_threshold: int = 20
 ) -> float:
     """
-    Compute confidence-adjusted quality score that balances statistical reliability 
-    with feature quality.
+    Compute SaCo-adjusted confidence score that prioritizes features from 
+    problematic (low SaCo) images.
     
     Args:
-        saco_score: Mean weighted SaCo score 
+        mean_saco: Mean weighted SaCo score for this feature
         overlap_ratio: Mean overlap ratio
         n_occurrences: Number of occurrences
+        image_saco_scores: List of SaCo scores from images where this feature appears
         confidence_threshold: Sample size for full confidence (default: 20)
     
     Returns:
-        Confidence-adjusted quality score
+        SaCo-adjusted confidence score (higher = more important to analyze)
     """
     # Base quality score (higher absolute SaCo + higher overlap = better)
-    base_quality = abs(saco_score) * overlap_ratio
+    base_quality = abs(mean_saco) * overlap_ratio
     
     # Confidence penalty: linear ramp up to confidence_threshold
     confidence_factor = min(n_occurrences / confidence_threshold, 1.0)
@@ -251,13 +276,22 @@ def compute_confidence_adjusted_score(
     if n_occurrences < 5:
         confidence_factor *= 0.5  # Heavy penalty for unreliable features
     
-    return base_quality * confidence_factor
+    # NEW: SaCo adjustment - prioritize features from low SaCo (problematic) images
+    if len(image_saco_scores) > 0:
+        mean_image_saco = np.mean(image_saco_scores)
+        # Higher penalty for features from low-SaCo images (more problematic = higher priority)
+        saco_boost = 1.0 + (1.0 - max(0.0, mean_image_saco))  # Boost between 1.0 and 2.0
+    else:
+        saco_boost = 1.0
+    
+    return base_quality * confidence_factor * saco_boost
 
 
 def _aggregate_results(
     raw_results: Dict[int, Dict[str, List]],
     min_occurrences: int = 2,
-    confidence_threshold: int = 20
+    confidence_threshold: int = 20,
+    image_saco_scores: Dict[str, float] = None
 ) -> Dict[str, Dict[int, Dict[str, Any]]]:
     """Aggregate raw occurrence data into final statistics with confidence-adjusted scoring."""
     aggregated = defaultdict(dict)
@@ -271,6 +305,7 @@ def _aggregate_results(
             weighted_sacos = [occ['weighted_saco_score'] for occ in occurrences]
             mean_activations = [occ['mean_target_activation'] for occ in occurrences]
             classes_affected = [occ['image_class'] for occ in occurrences]
+            images_affected = [occ['image'] for occ in occurrences]
             class_counts = Counter(classes_affected)
             
             # Compute standard statistics (optimized with numpy)
@@ -279,9 +314,16 @@ def _aggregate_results(
             mean_saco = float(np.mean(weighted_sacos))
             mean_activation = float(np.mean(mean_activations))
             
-            # NEW: Compute confidence-adjusted score
-            confidence_score = compute_confidence_adjusted_score(
-                mean_saco, mean_overlap, n_occ, confidence_threshold
+            # Collect image SaCo scores for this feature
+            feature_image_saco_scores = []
+            if image_saco_scores:
+                for img_name in images_affected:
+                    if img_name in image_saco_scores:
+                        feature_image_saco_scores.append(image_saco_scores[img_name])
+            
+            # NEW: Compute SaCo-adjusted confidence score
+            confidence_score = compute_saco_adjusted_confidence_score(
+                mean_saco, mean_overlap, n_occ, feature_image_saco_scores, confidence_threshold
             )
             
             stats = {
@@ -289,20 +331,22 @@ def _aggregate_results(
                 'mean_overlap_ratio': mean_overlap,
                 'mean_weighted_saco': mean_saco,
                 'mean_activation_in_problematic': mean_activation,
-                'confidence_adjusted_score': confidence_score,  # NEW
-                'images_affected': [occ['image'] for occ in occurrences],
+                'saco_adjusted_score': confidence_score,  # NEW: Updated name to reflect SaCo adjustment
+                'images_affected': images_affected,
                 'class_distribution': dict(class_counts),
                 'dominant_class': class_counts.most_common(1)[0][0] if class_counts else 'unknown',
+                'mean_image_saco': float(np.mean(feature_image_saco_scores)) if feature_image_saco_scores else 0.0,  # NEW
+                'image_saco_scores': feature_image_saco_scores,  # NEW: For debugging/analysis
             }
             aggregated[patch_type][feat_id] = stats
 
-    # Sort by confidence-adjusted score instead of raw SaCo score
+    # Sort by SaCo-adjusted score instead of raw SaCo score
     sorted_results = {}
     for patch_type, feature_stats in aggregated.items():
         sorted_features = sorted(
             feature_stats.items(),
-            key=lambda item: item[1]['confidence_adjusted_score'],
-            reverse=True  # Higher confidence score = better
+            key=lambda item: item[1]['saco_adjusted_score'],
+            reverse=True  # Higher SaCo-adjusted score = better
         )
         sorted_results[patch_type] = dict(sorted_features)
 
@@ -399,7 +443,8 @@ def analyze_saco_features_bin_based(
     model: HookedSAEViT,
     sae: SparseAutoencoder,
     layer_idx: int = 9,
-    confidence_threshold: float = 0.1,
+    attr_quantiles: tuple = (0.3, 0.7),
+    impact_quantiles: tuple = (0.3, 0.7),
     n_images: Optional[int] = 50,
     min_overlap_ratio: float = 0.3,
     min_occurrences: int = 2,
@@ -416,8 +461,14 @@ def analyze_saco_features_bin_based(
     
     # Load bin-level data from attribution_binning.py output
     saco_df = load_saco_bin_data(saco_bin_csv_path)
-    saco_df = classify_bins(saco_df, confidence_threshold)
+    saco_df = classify_bins(saco_df, attr_quantiles, impact_quantiles)
     problematic_df = saco_df[saco_df['problem_type'] != 'normal']
+    
+    # Extract image-level SaCo scores for weighting feature importance
+    image_saco_scores = {}
+    if 'saco_score' in saco_df.columns:
+        for _, row in saco_df.iterrows():
+            image_saco_scores[row['image_name']] = row['saco_score']
     
     logging.info(f"Found {len(problematic_df[problematic_df['problem_type'] == 'over_attributed'])} over-attributed bins and "
                 f"{len(problematic_df[problematic_df['problem_type'] == 'under_attributed'])} under-attributed bins.")
@@ -441,10 +492,15 @@ def analyze_saco_features_bin_based(
         f"{len(problematic_patches_df[problematic_patches_df['problem_type'] == 'under_attributed'])} under-attributed patches."
     )
 
-    # Only group images that actually have problematic patches - saves memory
-    unique_problematic_images = problematic_patches_df['image_name'].unique()
-    logging.info(f"Processing {len(unique_problematic_images)} unique images with problematic patches")
-    image_groups = problematic_patches_df.groupby('image_name')
+    # Early filtering: Only process images with significant numbers of problematic patches
+    patch_counts = problematic_patches_df['image_name'].value_counts()
+    min_patches_per_image = 3  # Skip images with < 3 problematic patches
+    significant_images = patch_counts[patch_counts >= min_patches_per_image].index.tolist()
+    
+    filtered_df = problematic_patches_df[problematic_patches_df['image_name'].isin(significant_images)]
+    logging.info(f"Filtered from {len(problematic_patches_df['image_name'].unique())} to {len(significant_images)} images with ≥{min_patches_per_image} problematic patches")
+    
+    image_groups = filtered_df.groupby('image_name')
     raw_feature_results = defaultdict(lambda: defaultdict(list))
     
     images_to_process = list(image_groups)[:n_images] if n_images is not None else list(image_groups)
@@ -477,14 +533,15 @@ def analyze_saco_features_bin_based(
             torch.cuda.empty_cache()
 
     logging.info(f"\n--- Aggregating results from {len(images_to_process)} processed images ---")
-    final_results = _aggregate_results(raw_feature_results, min_occurrences, confidence_threshold=20)
+    final_results = _aggregate_results(raw_feature_results, min_occurrences, confidence_threshold=20, image_saco_scores=image_saco_scores)
 
     for patch_type, sorted_features in final_results.items():
         logging.info(f"\nTop 10 features for '{patch_type}' patches (found {len(sorted_features)} total):")
         for i, (feat_id, stats) in enumerate(list(sorted_features.items())[:20]):
              logging.info(
                 f"  {i+1}. Feature {feat_id}: "
-                f"conf_score={stats['confidence_adjusted_score']:.3f}, "
+                f"saco_adj_score={stats['saco_adjusted_score']:.3f}, "
+                f"mean_img_saco={stats['mean_image_saco']:.3f}, "
                 f"w_saco={stats['mean_weighted_saco']:.3f}, "
                 f"overlap={stats['mean_overlap_ratio']:.2f}, "
                 f"n_occ={stats['n_occurrences']}, "
@@ -499,7 +556,8 @@ def analyze_saco_features_bin_based(
         'results_by_type': final_results,
         'analysis_params': {
             'layer_idx': layer_idx,
-            'confidence_threshold': confidence_threshold,
+            'attr_quantiles': attr_quantiles,
+            'impact_quantiles': impact_quantiles,
             'n_bins': n_bins,
             'min_overlap_ratio': min_overlap_ratio,
             'min_occurrences': min_occurrences,
@@ -519,14 +577,14 @@ def save_analysis_results(results: Dict[str, Any], save_path: str):
 if __name__ == "__main__":
     model = load_models()
     
-    layer_idx = 8
+    layer_idx = 6
     sae_path = Path(SAE_CONFIG[layer_idx]["sae_path"])
     sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
     sae.to(next(model.parameters()).device)
     
     # Use bin-level CSV from attribution_binning.py output
-    saco_bin_csv_path = "results/val/saco_bin_analysis_binned_98bins_2025-07-23_14-23.csv"  # Update with actual file
-    attribution_dir = "results/val/attributions"  # Directory with raw attribution files
+    saco_bin_csv_path = "results/train/saco_bin_analysis_binned_49bins_2025-07-23_15-41.csv"  # Update with actual file
+    attribution_dir = "results/train/attributions"  # Directory with raw attribution files
     
     results = analyze_saco_features_bin_based(
         saco_bin_csv_path=saco_bin_csv_path,
@@ -534,12 +592,13 @@ if __name__ == "__main__":
         model=model,
         sae=sae,
         layer_idx=layer_idx,
-        confidence_threshold=0.1,     # Threshold for classifying problematic bins
+        attr_quantiles=(0.3, 0.7),   # 30th and 70th percentiles for attribution thresholds
+        impact_quantiles=(0.3, 0.7), # 30th and 70th percentiles for confidence impact thresholds
         n_images=50000,
-        min_overlap_ratio=0.3,        # 30% overlap is sufficient for bin-based analysis
+        min_overlap_ratio=0.6,        # 30% overlap is sufficient for bin-based analysis
         min_occurrences=5,            # Minimal cutoff: confidence weighting handles reliability
         batch_size=32,                # Optimized batch size for vectorized processing
-        n_bins=98,                    # Match the number of bins used in attribution_binning.py
+        n_bins=49,                    # Match the number of bins used in attribution_binning.py
     )
     
     save_path = f"results/saco_problematic_features_bins_l{layer_idx}.pt"

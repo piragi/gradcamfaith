@@ -628,7 +628,7 @@ def run_pipeline(config: PipelineConfig,
     print(f"Found {len(original_image_paths)} original images for processing.")
 
     vit_model = load_models()
-    steering_layers_from_config = getattr(config.classify, 'steering_layers', [8])
+    steering_layers_from_config = getattr(config.classify, 'steering_layers', [6])
     steering_resources = load_steering_resources(steering_layers_from_config)
     print("All steering resources loaded.")
     print("ViT model loaded, hooks registered, and set to eval mode.")

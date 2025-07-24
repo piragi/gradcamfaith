@@ -325,7 +325,24 @@ def calculate_binned_saco_for_image(
     # Sort by mean attribution (descending)
     bin_results.sort(key=lambda x: x["total_attribution"], reverse=True)
     
-    # Extract arrays for SaCo calculation
+    # Calculate bin-level SaCo scores (individual score per bin)
+    if len(bin_results) >= 2:
+        attributions = np.array([r["total_attribution"] for r in bin_results])
+        impacts = np.array([r["confidence_delta_abs"] for r in bin_results])
+        bin_ids = np.array([r["bin_id"] for r in bin_results])
+        
+        # Calculate bin-level SaCo score using vectorized approach  
+        bin_saco_score = calculate_saco_vectorized(attributions, impacts)
+        
+        # Add bin-level SaCo scores to results (same score for all bins in this image)
+        for result in bin_results:
+            result["bin_saco_score"] = bin_saco_score
+    else:
+        # If only one bin, SaCo score is 0
+        for result in bin_results:
+            result["bin_saco_score"] = 0.0
+    
+    # Extract arrays for overall image SaCo calculation
     attributions = np.array([r["total_attribution"] for r in bin_results])
     impacts = np.array([r["confidence_delta_abs"] for r in bin_results])
     
@@ -336,7 +353,7 @@ def calculate_binned_saco_for_image(
         print(f"BINNED - Attribution sum: {np.sum(attributions):.4f}")
         print(f"BINNED - Impact sum: {np.sum(impacts):.4f}")
     
-    # Calculate SaCo score using the same function as patch-wise
+    # Calculate overall image SaCo score using the same function as patch-wise
     saco_score = calculate_saco_vectorized(attributions, impacts)
     
     # Generate patch-level results if requested (for compatibility with saco_feature_analysis.py)
