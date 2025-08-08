@@ -19,9 +19,9 @@ if __name__ == "__main__":
     pipeline_config = config.PipelineConfig()
     pipeline_config.file.use_cached_original = False
     pipeline_config.file.use_cached_perturbed = ""
-    pipeline_config.file.current_mode = "Val"
+    pipeline_config.file.current_mode = "dev"
     pipeline_config.file.weighted = True
-    pipeline_config.classify.analysis = False
+    pipeline_config.classify.analysis = True
     pipeline_config.classify.data_collection = False  #not pipeline_config.file.weighted
 
     main(pipeline_config)

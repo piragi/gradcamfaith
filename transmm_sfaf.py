@@ -13,7 +13,6 @@ from vit_prisma.sae import SparseAutoencoder
 
 from config import PipelineConfig
 from vit.model import IDX2CLS
-from build_boost_mask_optimized import build_boost_mask_saco_direct_cached
 from build_boost_mask_improved import build_boost_mask_improved, precache_sorted_features
 
 SAE_CONFIG = {
@@ -248,18 +247,6 @@ def transmm_prisma(
             codes_for_layer = sae_codes.get(i)
 
             if codes_for_layer is not None:
-                # ===== ORIGINAL BOOST METHODS (COMMENTED OUT) =====
-                # boost_mask, selected_feat_ids = build_boost_mask_combined(
-                #     sae_codes=codes_for_layer,
-                #     alignment_dict=resources["dict"],
-                #     predicted_class=predicted_class_idx,
-                #     device=device,
-                #     top_k=25,
-                #     base_strength=10.,
-                #     min_score=0.6,  # The combined score is 0-1, so this is a reasonable floor
-                #     min_occurrences_for_class=1,
-                #     debug=True
-                # )
                 
                 # ===== RANDOM BASELINE BOOST =====
                 if "saco_dict" in resources:
@@ -291,82 +278,18 @@ def transmm_prisma(
                             debug=True
                         )
                     
-                    # Alternative: Use original method for comparison
-                    # boost_mask, selected_feat_ids = build_boost_mask_saco_direct_cached(
-                    # sae_codes=codes_for_layer,
-                    # saco_results=saco_results,
-                    # device=device,
-                    # suppress_strength=0.5,
-                    # boost_strength=5,
-                    # top_k_suppress=0,
-                    # top_k_boost=15,
-                    # min_activation=0.1,
-                    # use_log_ratio_weighting=False,
-                    # debug=True
-                    # )
-                    
-                    # Option 2: Conservative suppression only
-                    # boost_mask, selected_feat_ids = build_boost_mask_saco_suppress_only(
-                        # sae_codes=codes_for_layer,
-                        # saco_results=saco_results,
-                        # predicted_class=predicted_class_idx,
-                        # device=device,
-                        # suppress_strength=0.7,
-                        # top_k=15,
-                        # overlap_threshold=0.7,
-                        # debug=True
-                    # )
                 else:
-                    print(f"No SaCo dict found for layer {i}, falling back to combined boost")
-                    boost_mask, selected_feat_ids = build_boost_mask_combined(
+                    print(f"No SaCo dict found for layer {i}, using random baseline")
+                    boost_mask, selected_feat_ids = build_boost_mask_random(
                         sae_codes=codes_for_layer,
-                        alignment_dict=resources["dict"],
-                        predicted_class=predicted_class_idx,
                         device=device,
-                        top_k=25,
-                        base_strength=10.,
-                        min_score=0.6,
-                        min_occurrences_for_class=1,
+                        suppress_strength=0.5,
+                        boost_strength=2.0,
+                        top_k_suppress=10,
+                        top_k_boost=8,
+                        min_activation=0.05,
                         debug=True
                     )
-                # Option 2: Use correlation-based boosting (original)
-                # boost_mask, selected_feat_ids = build_boost_mask_hybrid_tier(
-                #     sae_codes=codes_for_layer,
-                #     alignment_dict=resources["dict"],
-                #     predicted_class=predicted_class_idx,
-                #     device=device,
-                #     layer_idx=i,  # ADD THIS
-                #     debug=True  # To see what's being selected
-                # )
-                # boost_mask, selected_feat_ids = build_boost_mask_light(
-                # sae_codes=codes_for_layer,
-                # alignment_dict=resources["dict"],
-                # predicted_class=predicted_class_idx,  # already here
-                # device=device,
-                # min_corr=0.55,
-                # min_occ=1,  # keep minimal
-                # top_k=6,
-                # base_str=2.1
-                # )
-                # boost_mask, selected_feat_ids = build_boost_mask_hybrid(
-                # sae_codes=codes_for_layer,
-                # alignment_dict=resources["dict"],
-                # predicted_class=predicted_class_idx,
-                # device=device,
-                # # You can now easily tune the strategy here
-                # reliable_corr_thresh=0.35,
-                # reliable_occ_thresh=20,
-                # rare_corr_thresh=0.65,  # High bar for rare features!
-                # top_k=5,
-                # base_strength=2.0
-                # )
-                # boost_mask, selected_feat_ids = build_boost_mask_simple(
-                # sae_codes=codes_for_layer,
-                # alignment_dict=resources["dict"],
-                # predicted_class=predicted_class_idx,
-                # device=device,
-                # top_k=15,
-                # base_strength=1.2,
                 # min_pfac_for_consideration=0.1,
                 # min_occurrences_for_class=10
                 # )
