@@ -510,12 +510,32 @@ def analyze_faithfulness_vs_correctness_from_objects(  # Renamed for clarity
 
 def extract_true_class_from_filename(filename: Union[str, Path]) -> Optional[str]:
     """
-    Extract the true class from a filename based on path patterns.
+    Extract the true class from a filename based on directory structure or filename patterns.
+    Handles both new directory structure (lung/Test/COVID-19/images/) and old flat structure.
     """
-    filepath_str = str(filename)
-
+    filepath_str = str(filename).lower()
+    
+    # First, try to extract from directory structure (preferred method)
     for cls in CLASSES:
+        cls_lower = cls.lower()
+        # Look for class name in the directory path (e.g., "/covid-19/images/")
+        if f"/{cls_lower}/" in filepath_str or f"\\{cls_lower}\\" in filepath_str:
+            return cls
+    
+    # Fallback to filename-based extraction for backward compatibility
+    for cls in CLASSES:
+        # Check exact match first
         if cls in filepath_str:
+            return cls
+        
+        # Check with underscore instead of hyphen for flexibility
+        cls_underscore = cls.replace('-', '_').lower()
+        if cls_underscore in filepath_str:
+            return cls
+            
+        # Check with hyphen instead of underscore
+        cls_hyphen = cls.replace('_', '-').lower()
+        if cls_hyphen in filepath_str:
             return cls
 
     return None

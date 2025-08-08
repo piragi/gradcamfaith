@@ -12,7 +12,7 @@ from translrp.ViT_new import VisionTransformer
 from translrp.ViT_new import vit_base_patch16_224 as vit_mm
 
 # Constants
-CLASSES = ["cecum", "ileum", "retroflex-rectum", "pylorus", "retroflex-stomach", "z-line"]
+CLASSES = ['COVID-19','Non-COVID','Normal']
 IDX2CLS = {i: cls for i, cls in enumerate(CLASSES)}
 CLS2IDX = {cls: i for i, cls in enumerate(CLASSES)}
 

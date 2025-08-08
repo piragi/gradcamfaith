@@ -23,6 +23,7 @@ from data_types import (
     ClassificationResult, FFNActivityItem, HeadContributionItem, PerturbationPatchInfo, PerturbedImageRecord
 )
 from faithfulness import evaluate_and_report_faithfulness
+import math
 from translrp.ViT_new import VisionTransformer
 from transmm_sfaf import (generate_attribution_prisma, load_models, load_steering_resources)
 from attribution_binning import run_binned_attribution_analysis
@@ -42,25 +43,25 @@ def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
     """
     io_utils.ensure_directories([config.file.data_dir])
 
-    image_files = list(source_dir.glob("**/*.jpg"))
+    image_files = list(source_dir.glob("**/*.jpg")) + list(source_dir.glob("**/*.png"))
     print(f"Found {len(image_files)} images")
 
     processed_paths = []
     for image_file in image_files:
         try:
             # Extract class and split information from directory structure
-            # Assuming structure: source_dir/split/class/image.jpg or source_dir/class/image.jpg
-            class_name = image_file.parent.name
-
-            # Check if we have a split directory (train/val/test)
-            potential_split = image_file.parent.parent.name
-            if potential_split in ['train', 'val', 'test']:
-                split_name = potential_split
-                # Create filename with split and class: train_akiec_ISIC_0024306.jpg
-                new_filename = f"{class_name}_{image_file.name}"
+            # Handle structure: source_dir/class/images/file.png or source_dir/class/file.jpg
+            immediate_parent = image_file.parent.name
+            
+            if immediate_parent == "images":
+                # Structure: class/images/file.png - class is grandparent
+                class_name = image_file.parent.parent.name
             else:
-                # No split directory, just use class: akiec_ISIC_0024306.jpg
-                new_filename = f"{class_name}_{image_file.name}"
+                # Structure: class/file.jpg - class is parent
+                class_name = immediate_parent
+
+            # Create filename with class prefix
+            new_filename = f"{class_name}_{image_file.name}"
 
             output_path = config.file.data_dir / new_filename
 
@@ -642,7 +643,12 @@ def run_pipeline(config: PipelineConfig,
 
     if config.classify.analysis:
         print("Evaluate Faithfulness Pipeline")
-        evaluate_and_report_faithfulness(config, vit_model, device, original_results_explained)
+        try:
+            evaluate_and_report_faithfulness(config, vit_model, device, original_results_explained)
+        except Exception as e:
+            print(f"Error in faithfulness evaluation: {e}")
+            import traceback
+            traceback.print_exc()
 
 
     print("Compare attributions")

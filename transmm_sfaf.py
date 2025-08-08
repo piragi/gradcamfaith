@@ -1,7 +1,7 @@
 # transmm_sfaf.py
 import gc
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -11,85 +11,61 @@ from vit_prisma.models.base_vit import HookedSAEViT
 from vit_prisma.models.weight_conversion import convert_timm_weights
 from vit_prisma.sae import SparseAutoencoder
 
-import vit.model as model_handler  # You might need to adapt or replace this too
 from config import PipelineConfig
 from vit.model import IDX2CLS
-from vit.preprocessing import get_processor_for_precached_224_images
+from build_boost_mask_optimized import build_boost_mask_saco_direct_cached
+from build_boost_mask_improved import build_boost_mask_improved, precache_sorted_features
 
 SAE_CONFIG = {
     1: {
         "sae_path": "models/sweep/sae_l1_k128_exp64_lr0.0002/48a0f474-vit_medical_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/sfaf_stealth_l2_alignment_min1_128k64.pt"
-        #"dict_path": "./sae_dictionaries/sfaf_stealth_l1_alignment_min3_128k64.pt"
     },
     2: {
-        # "sae_path": "models/sweep/sae_l2_k128_exp64_lr0.0002/41db76e2-vit_medical_sae_k_sweep/n_images_49276.pt",
         "sae_path": "./models/sweep/sae_l2_k64_exp64_lr2e-05/92bcc2fc-vit_medical_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_l2_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l2_alignment_min3_128k64.pt"
     },
     3: {
-        # "sae_path": "models/sweep/sae_l3_k128_exp64_lr0.0002/6fd8fb1a-vit_medical_sae_k_sweep/n_images_49276.pt",
         "sae_path": "./models/sweep/sae_l3_k64_exp64_lr2e-05/99defb16-vit_medical_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_l3_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l3_alignment_min3_128k64.pt"
     },
     4: {
-        # "sae_path": "models/sweep/sae_l4_k128_exp64_lr0.0002/20673e0c-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "sae_path": "./models/sweep/sae_l4_k64_exp64_lr2e-05/72421a1a-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l4_k64_exp64_lr2e-05/24d1b962-vit_covidquex_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_l4_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l4_alignment_min3_128k64.pt"
     },
     5: {
-        # "sae_path": "models/sweep/sae_l5_k128_exp64_lr0.0002/e7fdbb62-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "sae_path": "./models/sweep/sae_l5_k64_exp64_lr2e-05/09853b08-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l5_k64_exp64_lr2e-05/d9216a1a-vit_covidquex_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_local_l5_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/steer_corr_l5_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l5_alignment_min3_128k64.pt"
     },
     6: {
-        # "sae_path": "models/sweep/sae_l6_k128_exp64_lr0.0002/becaec1e-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "sae_path": "./models/sweep/sae_l6_k64_exp64_lr2e-05/81ea5ed2-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l6_k64_exp64_lr2e-05/41fa0ab7-vit_covidquex_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_local_l6_alignment_min1_128k64.pt",
-        # "dict_path": "./sae_dictionaries/steer_corr_l6_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l6_alignment_min3_128k64.pt"
-        "saco_dict_path": "./results/saco_problematic_features_bins_l6.pt"
+        "saco_dict_path": "./results/saco_features_direct_l6.pt"
     },
     7: {
-        # "sae_path": "models/sweep/sae_l7_k64_exp64_lr0.0002/21922d4b-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "sae_path": "./models/sweep/sae_l7_k64_exp64_lr2e-05/31a0aa2d-vit_medical_sae_k_sweep/n_images_49276.pt",
-        # "sae_path": "./models/sweep/sae_l7_k128_exp32_lr2e-05/d77c1ce8-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_local_l7_alignment_min1_64k64.pt"
-        # "dict_path": "./sae_dictionaries/steer_corr_local_l7_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/steer_corr_l7_alignment_min1_32k128.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l7_alignment_min1_32k128.pt"
+        "sae_path": "./models/sweep/sae_l7_k64_exp64_lr2e-05/1a690d9c-vit_covidquex_sae_k_sweep/n_images_49276.pt",
+        "dict_path": "./sae_dictionaries/steer_corr_local_l7_alignment_min1_64k64.pt",
+        "saco_dict_path": "./results/saco_features_direct_l7.pt"
+        # "saco_dict_path": "./results/refiltered_saco_features_min_occ_30.pt"
+        # "saco_dict_path": "./results/saco_problematic_features_bins_l7.pt"
+
     },
     8: {
-        # "sae_path": "models/sweep/sae_l8_k128_exp64_lr0.0002/dc5d1afd-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "sae_path": "./models/sweep/sae_l8_k64_exp64_lr2e-05/a43b7675-vit_medical_sae_k_sweep/n_images_49276.pt",
+        "sae_path": "./models/sweep/sae_l8_k64_exp64_lr2e-05/e23b1351-vit_covidquex_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_local_l8_alignment_min1_128k64.pt",
-        # "dict_path": "./sae_dictionaries/steer_corr_l8_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l8_alignment_min3_128k64.pt"
-        # "saco_dict_path": "./results/saco_problematic_features_l8_moderate.pt"  # NEW: SaCo results
-        "saco_dict_path": "./results/saco_problematic_features_bins_l8.pt"
+        "saco_dict_path": "./results/saco_features_direct_l8.pt"
     },
     9: {
-        # "sae_path": "models/sweep/sae_l9_k128_exp64_lr0.0002/e06c6b1d-vit_medical_sae_k_sweep/n_images_49276.pt",
         "sae_path": "./models/sweep/sae_l9_k64_exp64_lr2e-05/9058e0a1-vit_medical_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_local_l9_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/steer_corr_l9_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l9_alignment_min3_128k64.pt"
     },
     10: {
-        # "sae_path": "models/sweep/sae_l10_k128_exp64_lr0.0002/4ade9e1f-vit_medical_sae_k_sweep/n_images_49276.pt",
         "sae_path": "./models/sweep/sae_l10_k64_exp64_lr2e-05/d25db388-vit_medical_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_l10_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l10_alignment_min3_128k64.pt"
     },
     11: {
         "sae_path": "models/sweep/sae_l11_k128_exp64_lr0.0002/a29c74a6-vit_medical_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_l11_alignment_min1_128k64.pt"
-        # "dict_path": "./sae_dictionaries/sfaf_stealth_l11_alignment_min3_128k64.pt"
     },
 }
 
@@ -98,12 +74,12 @@ def load_models():
     """Load SAE and fine-tuned model"""
     # Load model
     model = HookedSAEViT.from_pretrained("vit_base_patch16_224")
-    model.head = torch.nn.Linear(model.cfg.d_model, 6)
+    model.head = torch.nn.Linear(model.cfg.d_model, 3)
 
     checkpoint = torch.load(
-        "./model/vit_b-ImageNet_class_init-frozen_False-dataset_Hyperkvasir_anatomical.pth", weights_only=False
+        "./model/model_best.pth.tar"
     )
-    state_dict = checkpoint['model_state_dict'].copy()
+    state_dict = checkpoint['state_dict'].copy()
 
     if 'lin_head.weight' in state_dict:
         state_dict['head.weight'] = state_dict.pop('lin_head.weight')
@@ -132,16 +108,12 @@ def load_steering_resources(layers: List[int]) -> Dict[int, Dict[str, Any]]:
         if not sae_path.exists():
             print(f"Warning: SAE file not found for layer {layer_idx} at {sae_path}. Skipping.")
             continue
-        if not dict_path.exists():
-            print(f"Warning: S_f/A_f dictionary not found for layer {layer_idx} at {dict_path}. Skipping.")
-            continue
 
         try:
             sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
             sae.cuda().eval()
-            sf_af_dict = torch.load(dict_path, weights_only=False)
 
-            resources[layer_idx] = {"sae": sae, "dict": sf_af_dict}
+            resources[layer_idx] = {"sae": sae}
             
             # Load SaCo dictionary if available
             if "saco_dict_path" in config:
@@ -150,6 +122,12 @@ def load_steering_resources(layers: List[int]) -> Dict[int, Dict[str, Any]]:
                     saco_results = torch.load(saco_dict_path, weights_only=False)
                     resources[layer_idx]["saco_dict"] = saco_results  # Load once, store in memory
                     print(f"Loaded SaCo dictionary for layer {layer_idx}: {saco_dict_path}")
+                    
+                    # Pre-cache sorted features for performance
+                    try:
+                        precache_sorted_features(saco_results)
+                    except Exception as e:
+                        print(f"Warning: Could not pre-cache features: {e}")
                 else:
                     print(f"Warning: SaCo dict path specified but file not found: {saco_dict_path}")
             
@@ -237,7 +215,6 @@ def transmm_prisma(
 
     # Forward and backward pass (unchanged)
     with model_prisma.hooks(fwd_hooks=fwd_hooks, bwd_hooks=bwd_hooks):
-        print(input_tensor.shape)
         logits = model_prisma(input_tensor)
         probabilities = F.softmax(logits, dim=-1)
         predicted_class_idx = torch.argmax(probabilities, dim=-1).item()
@@ -286,32 +263,47 @@ def transmm_prisma(
                 
                 # ===== RANDOM BASELINE BOOST =====
                 if "saco_dict" in resources:
-                    # print(f"Using random baseline boosting for layer {i}")
-                    # boost_mask, selected_feat_ids = build_boost_mask_random(
-                        # sae_codes=codes_for_layer,
-                        # device=device,
-                        # suppress_strength=0.3,
-                        # boost_strength=10.0,
-                        # top_k_suppress=0,
-                        # top_k_boost=15,
-                        # min_activation=0.05,
-                        # seed=42,  # For reproducibility
-                        # debug=True
-                    # )
+                    # Toggle between random baseline and SACO-based method
+                    use_random_baseline = False  # Set to False to use SACO method
                     
-                    # ===== SIMPLIFIED SACO-BASED BOOST =====
-                    saco_results = resources["saco_dict"]  # Keep loading for potential future use
-                    boost_mask, selected_feat_ids = build_boost_mask_saco_simple(
-                    sae_codes=codes_for_layer,
-                    saco_results=saco_results,
-                    device=device,
-                    suppress_strength=0.3,
-                    boost_strength=5,
-                    top_k_suppress=8,
-                    top_k_boost=15,
-                    min_activation=0.05,
-                    debug=True
-                    )
+                    if use_random_baseline:
+                        print(f"Using RANDOM BASELINE boosting for layer {i}")
+                        boost_mask, selected_feat_ids = build_boost_mask_random(
+                            sae_codes=codes_for_layer,
+                            device=device,
+                            suppress_strength=0.2,  # Match improved method
+                            boost_strength=5.0,      # Match improved method
+                            top_k_suppress=5,       # Match improved method (max_suppress)
+                            top_k_boost=15,          # Match improved method (max_boost)
+                            min_activation=0.05,     # Match improved method
+                            seed=42,  # For reproducibility
+                            debug=True
+                        )
+                    else:
+                        # ===== IMPROVED FEATURE-BASED BOOST =====
+                        print(f"Using SACO-BASED boosting for layer {i}")
+                        saco_results = resources["saco_dict"]
+                        boost_mask, selected_feat_ids = build_boost_mask_improved(
+                            sae_codes=codes_for_layer,
+                            saco_results=saco_results,
+                            predicted_class=predicted_class_idx,
+                            device=device,
+                            debug=True
+                        )
+                    
+                    # Alternative: Use original method for comparison
+                    # boost_mask, selected_feat_ids = build_boost_mask_saco_direct_cached(
+                    # sae_codes=codes_for_layer,
+                    # saco_results=saco_results,
+                    # device=device,
+                    # suppress_strength=0.5,
+                    # boost_strength=5,
+                    # top_k_suppress=0,
+                    # top_k_boost=15,
+                    # min_activation=0.1,
+                    # use_log_ratio_weighting=False,
+                    # debug=True
+                    # )
                     
                     # Option 2: Conservative suppression only
                     # boost_mask, selected_feat_ids = build_boost_mask_saco_suppress_only(
@@ -1304,6 +1296,136 @@ def build_boost_mask_saco_under_attributed_focus(
     return boost_mask, selected_features
 
 # =====================================================================
+
+@torch.no_grad()
+def build_boost_mask_saco_direct(
+    sae_codes: torch.Tensor,
+    saco_results: Dict[str, Any],
+    device: torch.device,
+    *,
+    suppress_strength: float = 0.5,  # Suppress over-attributed features
+    boost_strength: float = 2.0,     # Boost under-attributed features  
+    min_activation: float = 0.05,
+    top_k_suppress: int = 10,        # Top over-attributed features to suppress
+    top_k_boost: int = 8,            # Top under-attributed features to boost
+    use_log_ratio_weighting: bool = False,  # Weight by log ratio magnitude
+    debug: bool = False
+) -> Tuple[torch.Tensor, List[int]]:
+    """
+    Direct feature-based boosting using log(impact/attribution) ratios.
+    - Boosts under-attributed features (positive log ratio = high impact, low attribution)
+    - Suppresses over-attributed features (negative log ratio = low impact, high attribution)
+    """
+    codes = sae_codes[0, 1:].to(device)  # Remove CLS token
+    n_patches, n_feats = codes.shape
+    boost_mask = torch.ones(n_patches, device=device)
+    selected_features = []
+    
+    results_by_type = saco_results.get('results_by_type', {})
+    
+    # Process over-attributed features (SUPPRESS)
+    over_attributed = results_by_type.get('over_attributed', {})
+    if over_attributed:
+        # Sort by mean log ratio (most negative first for over-attributed)
+        sorted_features = sorted(
+            over_attributed.items(), 
+            key=lambda x: x[1].get('sum_of_means', 0.0), 
+            reverse=False  # Want most negative first
+        )
+        
+        suppress_count = 0
+        for feat_id, stats in sorted_features:
+            if suppress_count >= top_k_suppress:
+                break
+                
+            # Check if feature exists and is active
+            if feat_id >= n_feats:
+                continue
+                
+            feat_activations = codes[:, feat_id]
+            active_mask = feat_activations > min_activation
+            
+            if not active_mask.any():
+                continue
+            
+            # Weight suppression by log ratio magnitude if enabled
+            if use_log_ratio_weighting:
+                # More negative log ratio = stronger suppression
+                log_ratio_weight = min(abs(stats['sum_of_means']) / 3.0, 1.0)
+                effective_suppress = suppress_strength * log_ratio_weight
+            else:
+                effective_suppress = suppress_strength
+            
+            # Apply suppression
+            patch_suppression = 1.0 - feat_activations.clamp(0, 1) * (1.0 - effective_suppress)
+            boost_mask *= patch_suppression
+            
+            selected_features.append(feat_id)
+            suppress_count += 1
+            
+            if debug:
+                n_active = active_mask.sum().item()
+                print(f"  SUPPRESS feature {feat_id}: "
+                    f"log_ratio={stats['sum_of_means']:.3f}, "
+                      f"confidence={stats['confidence_score']:.3f}, "
+                      f"strength={effective_suppress:.3f}, "
+                      f"active_patches={n_active}")
+    
+    # Process under-attributed features (BOOST)
+    under_attributed = results_by_type.get('under_attributed', {})
+    if under_attributed:
+        # Sort by mean log ratio (most positive first for under-attributed)
+        sorted_features = sorted(
+            under_attributed.items(),
+            key=lambda x: x[1].get('sum_of_means', 0.0),
+            reverse=True  # Want most positive first
+        )
+        
+        boost_count = 0
+        for feat_id, stats in sorted_features:
+            if boost_count >= top_k_boost:
+                break
+                
+            # Check if feature exists and is active
+            if feat_id >= n_feats:
+                continue
+                
+            feat_activations = codes[:, feat_id] 
+            active_mask = feat_activations > min_activation
+            
+            if not active_mask.any():
+                continue
+            
+            # Weight boost by log ratio magnitude if enabled
+            if use_log_ratio_weighting:
+                # More positive log ratio = stronger boost
+                log_ratio_weight = min(stats['sum_of_means'] / 3.0, 1.0)
+                effective_boost = 1.0 + (boost_strength - 1.0) * log_ratio_weight
+            else:
+                effective_boost = boost_strength
+            
+            # Apply boost
+            patch_boost = 1.0 + feat_activations.clamp(0, 1) * (effective_boost - 1.0)
+            boost_mask *= patch_boost
+            
+            selected_features.append(feat_id)
+            boost_count += 1
+            
+            if debug:
+                n_active = active_mask.sum().item()
+                print(f"  BOOST feature {feat_id}: "
+                      f"log_ratio={stats['sum_of_means']:.3f}, "
+                      f"confidence={stats['confidence_score']:.3f}, "
+                      f"strength={effective_boost:.3f}, "
+                      f"active_patches={n_active}")
+    
+    if debug:
+        total_active = (codes.abs() > min_activation).any(dim=0).sum().item()
+        print(f"Direct feature mask: {len(selected_features)} total features selected "
+              f"(from {total_active} active features)")
+    
+    return boost_mask, selected_features
+
 
 @torch.no_grad()
 def build_boost_mask_saco_simple(

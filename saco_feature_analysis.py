@@ -22,9 +22,14 @@ from PIL import Image
 from tqdm import tqdm
 from vit_prisma.models.base_vit import HookedSAEViT
 from vit_prisma.sae import SparseAutoencoder
+from vit.preprocessing import get_processor_for_precached_224_images
 
 # Restore your original imports. Make sure this path is correct for your project structure.
-from transmm_sfaf import (SAE_CONFIG, get_processor_for_precached_224_images, load_models)
+from transmm_sfaf import (SAE_CONFIG, load_models)
+import logging
+
+# Suppress PIL debug logging
+logging.getLogger('PIL').setLevel(logging.WARNING)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -577,14 +582,14 @@ def save_analysis_results(results: Dict[str, Any], save_path: str):
 if __name__ == "__main__":
     model = load_models()
     
-    layer_idx = 6
+    layer_idx = 7
     sae_path = Path(SAE_CONFIG[layer_idx]["sae_path"])
     sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
     sae.to(next(model.parameters()).device)
     
     # Use bin-level CSV from attribution_binning.py output
-    saco_bin_csv_path = "results/train/saco_bin_analysis_binned_49bins_2025-07-23_15-41.csv"  # Update with actual file
-    attribution_dir = "results/train/attributions"  # Directory with raw attribution files
+    saco_bin_csv_path = "results/Train/saco_bin_analysis_binned_49bins_2025-07-24_17-34.csv"  # Update with actual file
+    attribution_dir = "results/Train/attributions"  # Directory with raw attribution files
     
     results = analyze_saco_features_bin_based(
         saco_bin_csv_path=saco_bin_csv_path,
@@ -592,11 +597,11 @@ if __name__ == "__main__":
         model=model,
         sae=sae,
         layer_idx=layer_idx,
-        attr_quantiles=(0.3, 0.7),   # 30th and 70th percentiles for attribution thresholds
-        impact_quantiles=(0.3, 0.7), # 30th and 70th percentiles for confidence impact thresholds
-        n_images=50000,
-        min_overlap_ratio=0.6,        # 30% overlap is sufficient for bin-based analysis
-        min_occurrences=5,            # Minimal cutoff: confidence weighting handles reliability
+        attr_quantiles=(0.2, 0.8),   # 30th and 70th percentiles for attribution thresholds
+        impact_quantiles=(0.2, 0.8), # 30th and 70th percentiles for confidence impact thresholds
+        n_images=None,
+        min_overlap_ratio=0.7,        # 30% overlap is sufficient for bin-based analysis
+        min_occurrences=10,            # Minimal cutoff: confidence weighting handles reliability
         batch_size=32,                # Optimized batch size for vectorized processing
         n_bins=49,                    # Match the number of bins used in attribution_binning.py
     )

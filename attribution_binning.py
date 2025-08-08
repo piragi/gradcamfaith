@@ -9,7 +9,7 @@ This implements the binning approach as described in the SaCo paper:
 
 import numpy as np
 import torch
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 from dataclasses import dataclass
 from tqdm import tqdm
 import pandas as pd
@@ -368,117 +368,124 @@ def calculate_binned_saco_for_image(
     return saco_score, bin_results, patch_results
 
 
+def _get_or_compute_binned_results(
+    config: Any,
+    original_results: List[ClassificationResult],
+    vit_model: Any,
+    device: torch.device,
+    n_bins: int,
+) -> pd.DataFrame:
+    """
+    Gets binned SaCo results by either loading from cache or computing them.
+
+    If results are computed from scratch, they are automatically saved to the
+    cache file for future use (if save_on_compute is True).
+
+    Returns:
+        A pd.DataFrame containing the detailed bin results.
+    """
+
+    # --- ATTEMPT TO LOAD FROM CACHE ---
+    if config.file.use_cached_perturbed:
+        cache_path = config.file.output_dir / config.file.use_cached_perturbed
+        print(f"Attempting to load cached results from: {cache_path}")
+        if cache_path.exists():
+            print(f"Cache file found! Loading...")
+            return pd.read_csv(cache_path)
+        else:
+            print(f"Cache file not found. Proceeding with computation.")
+
+    # --- COMPUTE FROM SCRATCH ---
+    print(f"Computing binned SaCo results for {len(original_results)} images...")
+    all_bin_results = []
+    
+    for original_result in tqdm(original_results, desc=f"Processing with {n_bins} bins"):
+        try:
+            saco_score, bin_results, _ = calculate_binned_saco_for_image(
+                original_result, vit_model, config, device, n_bins
+            )
+            for result in bin_results:
+                result["image_name"] = str(original_result.image_path)
+                result["saco_score"] = saco_score
+                all_bin_results.append(result)
+        except Exception as e:
+            print(f"Error processing {original_result.image_path.name}: {e}")
+            continue
+            
+    bin_results_df = pd.DataFrame(all_bin_results)
+
+    return bin_results_df
+
+
 def run_binned_saco_analysis(
     config,
     original_results: List[ClassificationResult],
     vit_model,
     device: torch.device,
     n_bins: int = 20,
-    save_results: bool = True
 ) -> Dict[str, pd.DataFrame]:
     """
-    Run binned SaCo analysis for entire dataset.
-    
-    Returns dictionary with analysis results DataFrames.
+    Run binned SaCo analysis for entire dataset, with optional caching.
+
+    This function first gets the raw data (either by computing it or loading
+    from a cache), and then performs all subsequent analysis steps.
+    It will also save derived analysis files (e.g., faithfulness).
+
+    Returns:
+        A dictionary with analysis results as DataFrames.
     """
     print(f"=== BINNED SACO ANALYSIS (n_bins={n_bins}) ===")
     
-    all_saco_scores = {}
-    all_bin_results = []
+    # 1. Get data by either loading from cache or computing (and saving).
+    bin_results_df = _get_or_compute_binned_results(
+        config, original_results, vit_model, device, n_bins,
+    )
+
+    if bin_results_df.empty:
+        print("No results were generated or loaded. Aborting analysis.")
+        return {}
+
+    # --- START OF ANALYSIS SECTION ---
+    print("\n--- Performing post-hoc analysis on results ---")
+    analysis_results = {"bin_results": bin_results_df}
     
-    # Process each image
-    for original_result in tqdm(original_results, desc=f"Processing with {n_bins} bins"):
-        try:
-            image_name = str(original_result.image_path)
-            saco_score, bin_results, _ = calculate_binned_saco_for_image(
-                original_result, vit_model, config, device, n_bins,
-                debug=True,  # Enable debug for specific images
-                include_patch_level=False  # We don't need patch-level data in the main pipeline
-            )
-            
-            all_saco_scores[image_name] = saco_score
-            
-            # Add image name to each bin result
-            for result in bin_results:
-                result["image_name"] = image_name
-                result["saco_score"] = saco_score
-                all_bin_results.append(result)
-                
-        except Exception as e:
-            print(f"Error processing {original_result.image_path.name}: {e}")
-            continue
-    
-    # Create analysis DataFrames
-    analysis_results = {}
-    
-    # 1. SaCo scores DataFrame
-    saco_df = pd.DataFrame([
-        {"image_name": name, "saco_score": score}
-        for name, score in all_saco_scores.items()
-    ])
+    # 2. Derive SaCo scores DataFrame
+    saco_df = bin_results_df[['image_name', 'saco_score']].drop_duplicates().reset_index(drop=True)
     analysis_results["saco_scores"] = saco_df
     
-    # 2. Detailed bin results DataFrame
-    bin_results_df = pd.DataFrame(all_bin_results)
-    analysis_results["bin_results"] = bin_results_df
-    
     # 3. Faithfulness vs Correctness Analysis
-    saco_scores_map: Dict[str, float] = pd.Series(
-        saco_df.saco_score.values, 
-        index=saco_df.image_name
-    ).to_dict()
-    
-    faithfulness_df = analysis.analyze_faithfulness_vs_correctness_from_objects(
-        saco_scores_map, original_results
-    )
+    saco_scores_map = pd.Series(saco_df.saco_score.values, index=saco_df.image_name).to_dict()
+    faithfulness_df = analysis.analyze_faithfulness_vs_correctness_from_objects(saco_scores_map, original_results)
     analysis_results["faithfulness_correctness"] = faithfulness_df
     
     # 4. Key Attribution Patterns Analysis
-    patterns_df = analysis.analyze_key_attribution_patterns(
-        analysis_results["faithfulness_correctness"], vit_model, config
-    )
+    patterns_df = analysis.analyze_key_attribution_patterns(analysis_results["faithfulness_correctness"], vit_model, config)
     analysis_results["attribution_patterns"] = patterns_df
     
     # 5. Summary statistics
-    if len(all_saco_scores) > 0:
-        avg_saco = np.mean(list(all_saco_scores.values()))
-        std_saco = np.std(list(all_saco_scores.values()))
-        
+    if not saco_df.empty:
+        avg_saco = saco_df['saco_score'].mean()
+        std_saco = saco_df['saco_score'].std()
         print(f"\nBinned SaCo Analysis Summary:")
-        print(f"  Number of images: {len(all_saco_scores)}")
+        print(f"  Number of images: {len(saco_df)}")
         print(f"  Number of bins: {n_bins}")
         print(f"  Average SaCo: {avg_saco:.4f}")
         print(f"  Std SaCo: {std_saco:.4f}")
     
-    if save_results:
-        print("Saving analysis results...")
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    print("\nSaving derived analysis files...")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    
+    for name, df_to_save in analysis_results.items():
+        if name == "bin_results":
+            continue
         
-        for name, df_to_save in analysis_results.items():
-            if isinstance(df_to_save, pd.DataFrame) and not df_to_save.empty:
-                if name == "bin_results":
-                    # Save bin results with special naming for compatibility
-                    save_path = config.file.output_dir / f"saco_bin_analysis_binned_{n_bins}bins_{timestamp}.csv"
-                else:
-                    # Use consistent naming scheme for analysis results
-                    save_path = config.file.output_dir / f"analysis_{name}_binned_{timestamp}.csv"
-                df_to_save.to_csv(save_path, index=False)
-                print(f"Saved {name} to {save_path}")
-                
-                # Also save main results with expected filename format for compatibility
-                if name == "saco_scores":
-                    expected_path = config.file.output_dir / f"saco_scores_binned_{n_bins}bins.csv"
-                    df_to_save.to_csv(expected_path, index=False)
-                    print(f"Also saved saco scores to expected path: {expected_path}")
-    
-    # Final summary
-    if len(all_saco_scores) > 0:
-        avg_saco = np.mean(list(all_saco_scores.values()))
-        print(f"Average binned SaCo score: {avg_saco:.4f} (over {len(all_saco_scores)} images)")
-    
+        if isinstance(df_to_save, pd.DataFrame) and not df_to_save.empty:
+            save_path = config.file.output_dir / f"analysis_{name}_binned_{timestamp}.csv"
+            df_to_save.to_csv(save_path, index=False)
+            print(f"Saved {name} to {save_path}")
+
     print("=== BINNED SACO ANALYSIS COMPLETE ===")
     return analysis_results
-
 
 # For easy integration with your pipeline, add this wrapper function:
 def run_binned_attribution_analysis(

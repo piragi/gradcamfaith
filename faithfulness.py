@@ -264,10 +264,9 @@ def calc_faithfulness(
     y_batch: np.ndarray,
     a_batch_expl: np.ndarray,
     device: torch.device,
-    n_trials: int = 3,  # Reduced from 5 for faster computation
-    nr_runs: int = 50,  # Reduced from 100 - biggest performance impact!
-    subset_size: int = 98,  # Reduced from 196 for faster sampling
-    patch_size: int = 16,
+    n_trials: int = 3,
+    nr_runs: int = 50,
+    subset_size: int = 98,
 ) -> Dict[str, Any]:
     """
     Calculate faithfulness scores with statistical robustness through multiple trials.
@@ -280,113 +279,119 @@ def calc_faithfulness(
         device: Device to run calculations on
         n_trials: Number of trials to run for statistical robustness
         nr_runs: Number of random perturbations per image
-        subset_size: Size of feature subset to perturb (should be less than total features)
+        subset_size: Size of feature subset to perturb
         
     Returns:
         Dictionary with faithfulness statistics for each estimator
     """
     print(f'Settings - n_trials: {n_trials}, nr_runs: {nr_runs}, subset_size: {subset_size}')
 
-    # Define all the estimators to use
+    # Define estimators
     estimator_configs = [
         FaithfulnessEstimatorConfig(
             name="FaithfulnessCorrelation",
             n_trials=n_trials,
             estimator_fn=faithfulness_correlation,
-            kwargs={
-                "subset_size": 20,
-                "nr_runs": nr_runs
-            }
+            kwargs={"subset_size": 20, "nr_runs": nr_runs}
         ),
         FaithfulnessEstimatorConfig(
             name="PixelFlipping_PatchLevel",
-            n_trials=1,  # Fast patch-level version (~100x faster)
+            n_trials=1,  # Fast patch-level version
             estimator_fn=faithfulness_pixel_flipping_optimized,
         ),
     ]
+    
     results_by_estimator = {}
-
-    root_logger = logging.getLogger()
-    original_level = root_logger.level
-    root_logger.setLevel(logging.WARNING)
+    
+    # Suppress quantus logging
+    quantus_logger = logging.getLogger('quantus')
+    original_level = quantus_logger.level
+    quantus_logger.setLevel(logging.ERROR)
 
     for estimator_config in estimator_configs:
         print(f"Running estimator: {estimator_config.name}")
-        all_results = []
-        estimator_results = {
-            "n_trials": n_trials,
-            "nr_runs": nr_runs,
-            "subset_size": subset_size,
-        }
-
-        for trial in range(estimator_config.n_trials):
-            # Set seed for this trial
-            trial_seed = 42 + trial
-
-            # Save original numpy random state
-            original_state = np.random.get_state()
-
-            # Set specific seed for this evaluation
-            np.random.seed(trial_seed)
-
-            try:
-                # Create the estimator
-                faithfulness_estimator = estimator_config.create_estimator()
-                print(faithfulness_estimator.get_params)
-
-                # Run the estimator
-                faithfulness_estimate = faithfulness_estimator(
-                    model=vit_model,
-                    x_batch=x_batch,
-                    y_batch=y_batch,
-                    a_batch=a_batch_expl,
-                    device=str(device),
-                )
-
-                # Process results - estimators can return different types of data
-                if isinstance(faithfulness_estimate, dict):
-                    # For estimators that return dictionaries (like ROAD)
-                    faithfulness_score = np.array(faithfulness_estimate.get('auc', [0]))
-                else:
-                    faithfulness_score = np.array(faithfulness_estimate)
-
-                # Handle multi-dimensional results - some estimators return arrays per sample
-                # If results are multi-dimensional, compute mean across dimensions
-                if len(faithfulness_score.shape) > 1 and faithfulness_score.shape[0] == len(y_batch):
-                    # For 2D arrays where rows are samples, keep as is
-                    pass
-                elif len(faithfulness_score.shape) > 1:
-                    # For arrays with multiple values per sample, take mean
-                    faithfulness_score = np.mean(
-                        faithfulness_score, axis=tuple(range(1, len(faithfulness_score.shape)))
-                    )
-
-                all_results.append(faithfulness_score)
-            except Exception as e:
-                print(f"Error running estimator {estimator_config.name}: {e}")
-                # If the estimator fails, use NaN values
-                dummy_result = np.full_like(y_batch, np.nan, dtype=float)
-                all_results.append(dummy_result)
-            finally:
-                # Restore random state
-                np.random.set_state(original_state)
-
-        if all_results:
-            # Stack results from all trials
-            all_results = np.stack(all_results, axis=0)
-
-            # Calculate mean and std across trials for each sample
-            mean_scores = np.nanmean(all_results, axis=0)
-            std_scores = np.nanstd(all_results, axis=0)
-
-            # Add the evaluation metrics to the results
-            estimator_results.update({"mean_scores": mean_scores, "std_scores": std_scores, "all_trials": all_results})
-
+        
+        estimator_results = _run_estimator_trials(
+            estimator_config, vit_model, x_batch, y_batch, a_batch_expl, 
+            device, n_trials, nr_runs, subset_size
+        )
+        
+        if estimator_results:
             results_by_estimator[estimator_config.name] = estimator_results
 
-    root_logger.setLevel(original_level)
-
+    quantus_logger.setLevel(original_level)
     return results_by_estimator
+
+
+def _run_estimator_trials(
+    estimator_config: FaithfulnessEstimatorConfig,
+    vit_model: model.VisionTransformer,
+    x_batch: np.ndarray,
+    y_batch: np.ndarray,
+    a_batch_expl: np.ndarray,
+    device: torch.device,
+    n_trials: int,
+    nr_runs: int,
+    subset_size: int
+) -> Dict[str, Any]:
+    """Run multiple trials for a single estimator."""
+    all_results = []
+    
+    for trial in range(estimator_config.n_trials):
+        # Set reproducible seed for this trial
+        original_state = np.random.get_state()
+        np.random.seed(42 + trial)
+        
+        try:
+            estimator = estimator_config.create_estimator()
+            
+            # Run estimator
+            faithfulness_estimate = estimator(
+                model=vit_model,
+                x_batch=x_batch,
+                y_batch=y_batch,
+                a_batch=a_batch_expl,
+                device=str(device),
+                batch_size=512
+            )
+            
+            # Process results
+            scores = _process_estimator_output(faithfulness_estimate, len(y_batch))
+            all_results.append(scores)
+            
+        except Exception as e:
+            print(f"Error in trial {trial} for {estimator_config.name}: {e}")
+            all_results.append(np.full(len(y_batch), np.nan))
+        finally:
+            np.random.set_state(original_state)
+    
+    if not all_results:
+        return {}
+    
+    # Calculate statistics across trials
+    all_results = np.stack(all_results, axis=0)
+    return {
+        "mean_scores": np.nanmean(all_results, axis=0),
+        "std_scores": np.nanstd(all_results, axis=0),
+        "all_trials": all_results,
+        "n_trials": n_trials,
+        "nr_runs": nr_runs,
+        "subset_size": subset_size
+    }
+
+
+def _process_estimator_output(output: Any, expected_length: int) -> np.ndarray:
+    """Process estimator output into a consistent numpy array format."""
+    if isinstance(output, dict):
+        scores = np.array(output.get('auc', [0]))
+    else:
+        scores = np.array(output)
+    
+    # Handle multi-dimensional results
+    if len(scores.shape) > 1 and scores.shape[0] != expected_length:
+        scores = np.mean(scores, axis=tuple(range(1, len(scores.shape))))
+    
+    return scores
 
 
 def convert_patch_attribution_to_image(attribution_196, patch_size=16):
@@ -408,129 +413,229 @@ def convert_patch_attribution_to_image(attribution_196, patch_size=16):
 
 def evaluate_faithfulness_for_results(
     config: PipelineConfig, vit_model: model.VisionTransformer, device: torch.device,
-    classification_results: List[ClassificationResult]
+    classification_results: List[ClassificationResult],
+    batch_size: int = 1000
 ) -> Tuple[Dict[str, Any], np.ndarray]:
     """
-    Evaluate faithfulness scores with patch-level attributions converted to quantus-compatible format.
+    Evaluate faithfulness scores with patch-level attributions.
+    Processes data in batches to avoid memory issues.
     """
-    x_batch_list = []
-    y_batch_list = []
-    a_batch_converted_list = []  # Store converted attributions
-
-    for result in classification_results:
-        # Load high-res image and labels
-        img_path = result.image_path
-        _, input_tensor = preprocessing.preprocess_image(str(img_path), img_size=config.classify.target_size[0])
-        x_batch_list.append(input_tensor.cpu().numpy())
-        class_idx = result.prediction.predicted_class_idx
-        y_batch_list.append(class_idx)
-
-        try:
-            # Load attribution file
-            attribution_path = result.attribution_paths.raw_attribution_path
-            attr_map = np.load(attribution_path)
-
-            # Convert to 196-dimensional if needed
-            if attr_map.shape == (224, 224):
-                # Downsample back to 14x14 patches by average pooling
-                attr_map = attr_map.reshape(14, 16, 14, 16).mean(axis=(1, 3))
-
-            # Flatten to 196-dimensional vector
-            if attr_map.ndim == 2:
-                attr_map = attr_map.flatten()
-
-            # Ensure we have exactly 196 features
-            if attr_map.shape[0] != 196:
-                print(f"Warning: Expected 196 features, got {attr_map.shape[0]}. Skipping.")
-                x_batch_list.pop()
-                y_batch_list.pop()
-                continue
-
-            # Convert to quantus-compatible format (3, 224, 224)
-            attr_image = convert_patch_attribution_to_image(attr_map)
-            a_batch_converted_list.append(attr_image)
-
-        except Exception as e:
-            print(f"Warning: Could not process attribution for {Path(img_path).name}. Skipping. Error: {e}")
-            x_batch_list.pop()
-            y_batch_list.pop()
+    import gc
+    
+    total_samples = len(classification_results)
+    num_batches = (total_samples + batch_size - 1) // batch_size
+    
+    print(f"Processing {total_samples} samples in {num_batches} batches")
+    
+    all_faithfulness_scores = {}
+    all_y_labels = []
+    
+    for batch_idx in range(num_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, total_samples)
+        batch_results = classification_results[start_idx:end_idx]
+        
+        print(f"\nBatch {batch_idx + 1}/{num_batches} (samples {start_idx}-{end_idx-1})")
+        
+        # Process batch data
+        batch_data = _prepare_batch_data(config, batch_results)
+        if not batch_data:
+            print(f"No valid samples in batch {batch_idx + 1}")
             continue
+        
+        x_batch, y_batch, a_batch = batch_data
+        
+        # Calculate faithfulness for this batch
+        batch_faithfulness = calc_faithfulness(
+            vit_model=vit_model,
+            x_batch=x_batch,
+            y_batch=y_batch,
+            a_batch_expl=a_batch,
+            device=device,
+            n_trials=3,
+            nr_runs=50,
+            subset_size=98
+        )
+        
+        # Store labels
+        all_y_labels.extend(y_batch.tolist())
+        
+        # Aggregate scores from this batch
+        _aggregate_batch_scores(all_faithfulness_scores, batch_faithfulness)
+        
+        # Clean up memory
+        del x_batch, y_batch, a_batch
+        gc.collect()
+        torch.cuda.empty_cache()
+    
+    # Compute final statistics
+    final_results = _compute_final_statistics(all_faithfulness_scores)
+    
+    print(f"\nProcessed {len(all_y_labels)} total samples")
+    
+    return final_results, np.array(all_y_labels)
 
-    # Convert lists to final numpy arrays
-    x_batch = np.stack(x_batch_list)
-    y_batch = np.array(y_batch_list)
-    a_batch_converted = np.stack(a_batch_converted_list)  # Shape: (N, 3, 224, 224)
 
-    # Call faithfulness with converted attributions
-    faithfulness_results = calc_faithfulness(
-        vit_model=vit_model,
-        x_batch=x_batch,
-        y_batch=y_batch,
-        a_batch_expl=a_batch_converted,  # Pass quantus-compatible attributions
-        device=device,
-    )
+def _prepare_batch_data(
+    config: PipelineConfig, 
+    batch_results: List[ClassificationResult]
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Prepare batch data for faithfulness evaluation."""
+    x_list = []
+    y_list = []
+    a_list = []
+    
+    for result in batch_results:
+        try:
+            # Load image
+            _, input_tensor = preprocessing.preprocess_image(
+                str(result.image_path), 
+                img_size=config.classify.target_size[0]
+            )
+            
+            # Load attribution
+            attr_map = np.load(result.attribution_paths.raw_attribution_path)
+            attr_map = _normalize_attribution_format(attr_map)
+            
+            if attr_map is None:
+                continue
+                
+            x_list.append(input_tensor.cpu().numpy())
+            y_list.append(result.prediction.predicted_class_idx)
+            a_list.append(convert_patch_attribution_to_image(attr_map))
+            
+        except Exception as e:
+            print(f"Warning: Could not process {result.image_path.name}: {e}")
+            continue
+    
+    if not x_list:
+        return None
+        
+    return np.stack(x_list), np.array(y_list), np.stack(a_list)
 
-    return faithfulness_results, y_batch
+
+def _normalize_attribution_format(attr_map: np.ndarray) -> Optional[np.ndarray]:
+    """Normalize attribution to 196-dimensional patch format."""
+    # Handle different input formats
+    if attr_map.shape == (224, 224):
+        # Downsample to patch level
+        attr_map = attr_map.reshape(14, 16, 14, 16).mean(axis=(1, 3))
+    
+    if attr_map.ndim == 2:
+        attr_map = attr_map.flatten()
+    
+    if attr_map.shape[0] != 196:
+        print(f"Warning: Expected 196 features, got {attr_map.shape[0]}")
+        return None
+        
+    return attr_map
 
 
-def calculate_faithfulness_stats_by_class(faithfulness_results: Dict[str, Dict[str, Any]],
-                                          class_labels: np.ndarray) -> Dict[str, Dict[int, Dict[str, float]]]:
+def _aggregate_batch_scores(
+    all_scores: Dict[str, Dict], 
+    batch_scores: Dict[str, Dict]
+) -> None:
+    """Aggregate scores from a batch into the overall scores dictionary."""
+    for estimator_name, estimator_data in batch_scores.items():
+        if estimator_name not in all_scores:
+            all_scores[estimator_name] = {
+                'mean_scores': [],
+                'std_scores': [],
+                'metadata': {
+                    'n_trials': estimator_data.get('n_trials', 3),
+                    'nr_runs': estimator_data.get('nr_runs', 50),
+                    'subset_size': estimator_data.get('subset_size', 98)
+                }
+            }
+        
+        # Add scores from this batch
+        mean_scores = estimator_data.get('mean_scores', [])
+        std_scores = estimator_data.get('std_scores', [])
+        
+        if isinstance(mean_scores, np.ndarray):
+            mean_scores = mean_scores.tolist()
+        if isinstance(std_scores, np.ndarray):
+            std_scores = std_scores.tolist()
+            
+        all_scores[estimator_name]['mean_scores'].extend(mean_scores)
+        all_scores[estimator_name]['std_scores'].extend(std_scores)
+
+
+def _compute_final_statistics(all_scores: Dict[str, Dict]) -> Dict[str, Dict]:
+    """Compute final statistics from aggregated scores."""
+    final_results = {}
+    
+    for estimator_name, data in all_scores.items():
+        mean_scores = np.array(data['mean_scores'])
+        std_scores = np.array(data['std_scores'])
+        metadata = data['metadata']
+        
+        if len(mean_scores) == 0:
+            final_results[estimator_name] = {
+                'mean_scores': [],
+                'std_scores': [],
+                'overall': {'mean': 0, 'std': 0, 'median': 0, 'min': 0, 'max': 0, 'count': 0},
+                'error': 'No valid scores collected'
+            }
+        else:
+            final_results[estimator_name] = {
+                'mean_scores': mean_scores.tolist(),
+                'std_scores': std_scores.tolist(),
+                **metadata,
+                'overall': {
+                    'mean': float(np.mean(mean_scores)),
+                    'std': float(np.std(mean_scores)),
+                    'median': float(np.median(mean_scores)),
+                    'min': float(np.min(mean_scores)),
+                    'max': float(np.max(mean_scores)),
+                    'count': len(mean_scores)
+                }
+            }
+    
+    return final_results
+
+
+def calculate_faithfulness_stats_by_class(
+    faithfulness_results: Dict[str, Dict[str, Any]],
+    class_labels: np.ndarray
+) -> Dict[str, Dict[int, Dict[str, float]]]:
     """
-    Calculate statistics for faithfulness scores grouped by class for each estimator.
+    Calculate statistics for faithfulness scores grouped by class.
     
     Args:
         faithfulness_results: Dictionary with faithfulness results per estimator
-        class_labels: Array of class labels corresponding to each score
+        class_labels: Array of class labels
         
     Returns:
-        Dictionary with estimator names as keys and per-class statistics as values
+        Dictionary with per-class statistics for each estimator
     """
-    stats_by_estimator_and_class = {}
+    stats_by_estimator = {}
 
     for estimator_name, estimator_results in faithfulness_results.items():
-        # Use the mean scores for statistics
-        faithfulness_scores = estimator_results["mean_scores"]
-        faithfulness_stds = estimator_results["std_scores"]
-
+        scores = np.array(estimator_results["mean_scores"])
+        stds = np.array(estimator_results["std_scores"])
+        
         # Group scores by class
-        scores_by_class = defaultdict(list)
-        stds_by_class = defaultdict(list)
+        class_stats = {}
+        for class_idx in np.unique(class_labels):
+            mask = class_labels == class_idx
+            class_scores = scores[mask]
+            class_stds = stds[mask]
+            
+            if len(class_scores) > 0:
+                class_stats[int(class_idx)] = {
+                    'count': len(class_scores),
+                    'mean': float(np.mean(class_scores)),
+                    'median': float(np.median(class_scores)),
+                    'min': float(np.min(class_scores)),
+                    'max': float(np.max(class_scores)),
+                    'std': float(np.std(class_scores)),
+                    'avg_trial_std': float(np.mean(class_stds))
+                }
+        
+        stats_by_estimator[estimator_name] = class_stats
 
-        for score, std, label in zip(faithfulness_scores, faithfulness_stds, class_labels):
-            # Handle multi-dimensional scores - some estimators return arrays per sample
-            if hasattr(score, 'shape') and len(score.shape) > 0:
-                # For array scores, use mean as the representative value
-                score_value = float(np.mean(score))
-            else:
-                score_value = float(score)
-
-            if hasattr(std, 'shape') and len(std.shape) > 0:
-                std_value = float(np.mean(std))
-            else:
-                std_value = float(std)
-
-            scores_by_class[int(label)].append(score_value)
-            stds_by_class[int(label)].append(std_value)
-
-        # Calculate statistics for each class
-        stats_by_class = {}
-        for class_idx, scores in scores_by_class.items():
-            scores_array = np.array(scores)
-            stds_array = np.array(stds_by_class[class_idx])
-
-            stats_by_class[class_idx] = {
-                'count': len(scores),
-                'mean': float(np.mean(scores_array)),
-                'median': float(np.median(scores_array)),
-                'min': float(np.min(scores_array)),
-                'max': float(np.max(scores_array)),
-                'std': float(np.std(scores_array)),
-                'avg_trial_std': float(np.mean(stds_array)),  # Average std across trials
-            }
-
-        stats_by_estimator_and_class[estimator_name] = stats_by_class
-
-    return stats_by_estimator_and_class
+    return stats_by_estimator
 
 
 def handle_array_values(arr):
@@ -554,7 +659,7 @@ def evaluate_and_report_faithfulness(
     classification_results: List[ClassificationResult],
 ) -> Dict[str, Any]:
     """
-    Evaluate faithfulness with statistical robustness and report statistics by class.
+    Evaluate faithfulness and report statistics.
     
     Args:
         config: Pipeline configuration
@@ -563,13 +668,31 @@ def evaluate_and_report_faithfulness(
         classification_results: List of classification results
         
     Returns:
-        Dictionary with overall and per-class statistics for each estimator
+        Dictionary with overall and per-class statistics
     """
+    # Evaluate faithfulness
     faithfulness_results, class_labels = evaluate_faithfulness_for_results(
         config, vit_model, device, classification_results
     )
 
-    # Initialize results structure
+    # Build results structure
+    results = _build_results_structure(config, faithfulness_results, class_labels)
+    
+    # Print summary
+    _print_faithfulness_summary(results['metrics'])
+    
+    # Save results
+    _save_faithfulness_results(config, faithfulness_results, class_labels, results)
+    
+    return results
+
+
+def _build_results_structure(
+    config: PipelineConfig,
+    faithfulness_results: Dict[str, Dict],
+    class_labels: np.ndarray
+) -> Dict[str, Any]:
+    """Build the results structure with statistics."""
     results = {
         'boosting_method': 'head_boosting',
         'boost_factor_per_head': config.classify.head_boost_value,
@@ -577,135 +700,83 @@ def evaluate_and_report_faithfulness(
         'metrics': {},
         'class_labels': class_labels.tolist()
     }
-
-    # Check if existing results file exists
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    results_path = config.file.output_dir / f"faithfulness_stats{config.file.output_suffix}_{timestamp}.json"
-    if os.path.exists(results_path):
-        try:
-            with open(results_path, 'r') as f:
-                existing_results = json.load(f)
-                # Preserve existing data
-                for key, value in existing_results.items():
-                    if key != 'metrics' and key != 'class_labels':
-                        results[key] = value
-        except Exception as e:
-            print(f"Error reading existing results file: {e}")
-
-    # Calculate and store results for each estimator
+    
+    # Calculate statistics for each estimator
+    class_stats_all = calculate_faithfulness_stats_by_class(faithfulness_results, class_labels)
+    
     for estimator_name, estimator_results in faithfulness_results.items():
-        # Get the mean scores for overall statistics
-        faithfulness_scores = estimator_results["mean_scores"]
-        faithfulness_stds = estimator_results["std_scores"]
-
-        # Calculate overall statistics
+        if "mean_scores" not in estimator_results:
+            continue
+        
+        scores = np.array(estimator_results["mean_scores"])
+        stds = np.array(estimator_results.get("std_scores", np.zeros_like(scores)))
+        
+        # Overall statistics
         overall_stats = {
-            'count':
-            len(faithfulness_scores),
-            'mean':
-            float(
-                np.nanmean(
-                    np.array([
-                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
-                    ])
-                )
-            ),
-            'median':
-            float(
-                np.nanmedian(
-                    np.array([
-                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
-                    ])
-                )
-            ),
-            'min':
-            float(
-                np.nanmin(
-                    np.array([
-                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
-                    ])
-                )
-            ),
-            'max':
-            float(
-                np.nanmax(
-                    np.array([
-                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
-                    ])
-                )
-            ),
-            'std':
-            float(
-                np.nanstd(
-                    np.array([
-                        np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_scores
-                    ])
-                )
-            ),
-            'avg_trial_std':
-            float(
-                np.nanmean(
-                    np.array([np.mean(s) if hasattr(s, 'shape') and len(s.shape) > 0 else s for s in faithfulness_stds])
-                )
-            ),  # Average std across trials
+            'count': len(scores),
+            'mean': float(np.nanmean(scores)),
+            'median': float(np.nanmedian(scores)),
+            'min': float(np.nanmin(scores)),
+            'max': float(np.nanmax(scores)),
+            'std': float(np.nanstd(scores)),
+            'avg_trial_std': float(np.nanmean(stds)),
             'method_params': {
-                'n_trials': estimator_results["n_trials"],
-                'nr_runs': estimator_results["nr_runs"],
-                'subset_size': estimator_results["subset_size"]
+                'n_trials': estimator_results.get("n_trials", 3),
+                'nr_runs': estimator_results.get("nr_runs", 50),
+                'subset_size': estimator_results.get("subset_size", 98)
             }
         }
-
-        # Calculate per-class statistics for this estimator
-        class_stats = calculate_faithfulness_stats_by_class({estimator_name: estimator_results},
-                                                            class_labels)[estimator_name]
-
-        # Store results for this estimator
+        
+        # Store results
         results['metrics'][estimator_name] = {
             'overall': overall_stats,
-            'by_class': class_stats,
-            'mean_scores': handle_array_values(faithfulness_scores),
-            'std_scores': handle_array_values(faithfulness_stds)
+            'by_class': class_stats_all[estimator_name],
+            'mean_scores': handle_array_values(scores),
+            'std_scores': handle_array_values(stds)
         }
+    
+    return results
 
-        # Print summary with added stability information
-        print(f"\n{estimator_name} faithfulness statistics (across {estimator_results['n_trials']} trials):")
-        print(f"  Mean: {overall_stats['mean']:.4f}")
-        print(f"  Median: {overall_stats['median']:.4f}")
-        print(f"  Count: {overall_stats['count']}")
-        print(f"  Avg trial std: {overall_stats['avg_trial_std']:.4f} (lower is more stable)")
 
-        print(f"\n{estimator_name} per-class faithfulness statistics:")
-        for class_idx, stats in class_stats.items():
-            print(f"  Class {class_idx}:")
-            print(f"    Mean: {stats['mean']:.4f}")
-            print(f"    Median: {stats['median']:.4f}")
-            print(f"    Count: {stats['count']}")
-            print(f"    Avg trial std: {stats['avg_trial_std']:.4f}")
+def _print_faithfulness_summary(metrics: Dict[str, Dict]):
+    """Print a summary of faithfulness metrics."""
+    for estimator_name, estimator_data in metrics.items():
+        overall = estimator_data['overall']
+        print(f"\n{estimator_name} faithfulness statistics:")
+        print(f"  Mean: {overall['mean']:.4f}")
+        print(f"  Median: {overall['median']:.4f}")
+        print(f"  Count: {overall['count']}")
+        print(f"  Avg trial std: {overall['avg_trial_std']:.4f}")
+        
+        print(f"\n{estimator_name} per-class statistics:")
+        for class_idx, stats in estimator_data['by_class'].items():
+            print(f"  Class {class_idx}: mean={stats['mean']:.4f}, count={stats['count']}")
 
-    # Save scores for each estimator
+
+def _save_faithfulness_results(
+    config: PipelineConfig,
+    faithfulness_results: Dict[str, Dict],
+    class_labels: np.ndarray,
+    results: Dict[str, Any]
+):
+    """Save faithfulness results to files."""
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    
+    # Save JSON statistics
+    json_path = config.file.output_dir / f"faithfulness_stats{config.file.output_suffix}_{timestamp}.json"
+    with open(json_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"\nFaithfulness statistics saved to {json_path}")
+    
+    # Save raw scores for each estimator
     for estimator_name, estimator_results in faithfulness_results.items():
-        scores_path = config.file.output_dir / f"faithfulness_scores_{estimator_name}{config.file.output_suffix}.npy"
-
-        # Prepare data for saving
+        scores_path = config.file.output_dir / f"faithfulness_scores_{estimator_name}{config.file.output_suffix}"
+        
         save_dict = {
             'mean_scores': estimator_results["mean_scores"],
-            'std_scores': estimator_results["std_scores"],
-            'class_labels': class_labels,
-            'all_trials': estimator_results["all_trials"]
+            'std_scores': estimator_results.get("std_scores", []),
+            'class_labels': class_labels
         }
-
-        # Add special metrics if they exist
-        if 'road_curves' in estimator_results:
-            save_dict['road_curves'] = estimator_results['road_curves']
-
-        # Save to NPZ
+        
         np.savez(scores_path, **save_dict)
         print(f"Raw scores for {estimator_name} saved to {scores_path}.npz")
-
-    # Save JSON stats
-    with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2)
-
-    print(f"Faithfulness statistics saved to {results_path}")
-
-    return results

@@ -9,42 +9,32 @@ from vit_prisma.sae import VisionSAETrainer
 from vit_prisma.sae.config import VisionModelSAERunnerConfig
 
 import wandb
-from vit.preprocessing import get_processor_for_precached_224_images
+from vit.preprocessing import get_default_processor
+from transmm_sfaf import load_models
+import logging
+
+# Suppress PIL debug logging
+logging.getLogger('PIL').setLevel(logging.WARNING)
 
 model_name = "vit_base_patch16_224"
 hooked_model = HookedSAEViT.from_pretrained(model_name, load_pretrained_model=False)
 
-num_classes = 6
+num_classes = 3
 hooked_model.head = torch.nn.Linear(hooked_model.cfg.d_model, num_classes)
 
-# Load your fine-tuned model checkpoint
-checkpoint_path = "./model/vit_b-ImageNet_class_init-frozen_False-dataset_Hyperkvasir_anatomical.pth"
-checkpoint = torch.load(checkpoint_path, weights_only=False)
+hooked_model = load_models()
+train_path = "./lung/Train"
+val_path = "./lung/Val"
 
-state_dict = checkpoint.get('model_state_dict', checkpoint)
-if 'lin_head.weight' in state_dict:
-    state_dict['head.weight'] = state_dict.pop('lin_head.weight')
-if 'lin_head.bias' in state_dict:
-    state_dict['head.bias'] = state_dict.pop('lin_head.bias')
-hooked_model.load_state_dict(state_dict, strict=False)
-hooked_model.to('cuda')
-hooked_model.eval()
-print(f"Successfully loaded fine-tuned model from {checkpoint_path}")
+transform = get_default_processor(224)
 
-train_path = "./hyper-kvasir_imagefolder/train"
-val_path = "./hyper-kvasir_imagefolder/val"
-
-transform = get_processor_for_precached_224_images()
-
-label_map = {2: 3, 3: 2}
+# label_map = {2: 3, 3: 2}
+# def custom_target_transform(target):
+    # return label_map.get(target, target)
 
 
-def custom_target_transform(target):
-    return label_map.get(target, target)
-
-
-train_dataset = torchvision.datasets.ImageFolder(train_path, transform, target_transform=custom_target_transform)
-val_dataset = torchvision.datasets.ImageFolder(val_path, transform, target_transform=custom_target_transform)
+train_dataset = torchvision.datasets.ImageFolder(train_path, transform) #, target_transform=custom_target_transform)
+val_dataset = torchvision.datasets.ImageFolder(val_path, transform) #, target_transform=custom_target_transform)
 print(f"Training dataset size: {len(train_dataset)} images")
 
 base_config = VisionModelSAERunnerConfig(
@@ -66,7 +56,7 @@ base_config = VisionModelSAERunnerConfig(
     initialization_method="encoder_transpose_decoder",
     dataset_name="hyper-kvasir",
     log_to_wandb=True,
-    wandb_project='vit_medical_sae_k_sweep',
+    wandb_project='vit_covidquex_sae_k_sweep',
     n_checkpoints=1,
     use_ghost_grads=True,
     dead_feature_threshold=1e-9,
@@ -74,7 +64,7 @@ base_config = VisionModelSAERunnerConfig(
     dead_feature_window=20,
 )
 
-sweep_parameters = {'hook_point_layer': [6, 7, 8, 9, 10]}
+sweep_parameters = {'hook_point_layer': [4,5]}
 
 for layer_idx in sweep_parameters['hook_point_layer']:
     # Clear memory at start of each iteration

@@ -16,7 +16,7 @@ class FileConfig:
 
     # Caching behavior
     use_cached_original: bool = True
-    use_cached_perturbed: bool = True
+    use_cached_perturbed: str = ""
 
     @property
     def mode_dir(self) -> Path:
