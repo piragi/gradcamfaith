@@ -12,15 +12,14 @@ import torch
 from typing import Dict, Any, List, Tuple, Optional
 
 
-# Class names mapping (from vit/model.py)
-IDX2CLS = {0: 'COVID-19', 1: 'Non-COVID', 2: 'Normal'}
+# Class names mapping will be passed as parameter, not hardcoded
 
 
 def precache_sorted_features(
     saco_results: Dict[str, Any],
-    min_occurrences: int = 5,
+    min_occurrences: int = 1,
     max_occurrences: int = 100000,
-    min_log_ratio: float = 1.8,
+    min_log_ratio: float = 1.,
     use_balanced_score: bool = True
 ):
     """
@@ -75,14 +74,15 @@ def build_boost_mask_improved(
     sae_codes: torch.Tensor,
     saco_results: Dict[str, Any],
     predicted_class: int,
+    idx_to_class: Dict[int, str],  # Pass class mapping as parameter
     device: torch.device,
     *,
     # Frequency filtering - MUCH WIDER RANGE
-    min_occurrences: int = 5,        # Include rarer features
+    min_occurrences: int = 1,        # Include rarer features
     max_occurrences: int = 100000,      # Include more common features
     
     # Ratio thresholds - LOWER THRESHOLD
-    min_log_ratio: float = 2.,      # Include more moderate misalignments
+    min_log_ratio: float = 1.,      # Include more moderate misalignments
     
     # Class-specific behavior (disabled by default for general testing)
     class_aware: bool = False,
@@ -93,7 +93,7 @@ def build_boost_mask_improved(
     
     # Selection limits - MORE FEATURES
     max_suppress: int = 5,          # More suppressions
-    max_boost: int = 15,             # Many more boosts
+    max_boost: int = 8,             # Many more boosts
     
     # Activation threshold - LOWER TO CATCH MORE
     min_activation: float = 0.05,    # Lower threshold to include more patches
@@ -116,10 +116,9 @@ def build_boost_mask_improved(
     codes = sae_codes[0, 1:].to(device)  # Remove CLS token
     n_patches, n_feats = codes.shape
     boost_mask = torch.ones(n_patches, device=device)
-    selected_features = []
     
     results_by_type = saco_results.get('results_by_type', {})
-    predicted_class_name = IDX2CLS.get(predicted_class, 'unknown')
+    predicted_class_name = idx_to_class.get(predicted_class, f'class_{predicted_class}')
     
     if debug:
         print(f"\n=== Improved Boosting for {predicted_class_name} ===")
@@ -136,6 +135,11 @@ def build_boost_mask_improved(
     #     min_log_ratio = 2.0  # Higher threshold for Normal
     #     actual_max_suppress = int(max_suppress * 0.7)
     #     actual_max_boost = int(max_boost * 0.7)
+    
+    # Initialize counters
+    suppress_count = 0
+    boost_count = 0
+    selected_features = []
     
     # Process OVER-ATTRIBUTED features (SUPPRESS)
     over_attributed = results_by_type.get('over_attributed', {})
@@ -181,7 +185,6 @@ def build_boost_mask_improved(
                 if len(filtered_features) >= actual_max_suppress:
                     break  # Stop early once we have enough
         
-        suppress_count = 0
         for feat_id, stats, score in filtered_features[:actual_max_suppress]:
             # We already checked activity in filtering, get activations directly
             feat_activations = codes[:, feat_id]
@@ -250,7 +253,6 @@ def build_boost_mask_improved(
                 if len(filtered_features) >= actual_max_boost:
                     break  # Stop early once we have enough
         
-        boost_count = 0
         for feat_id, stats, score in filtered_features[:actual_max_boost]:
             # We already checked activity in filtering, get activations directly
             feat_activations = codes[:, feat_id]

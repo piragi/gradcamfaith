@@ -75,6 +75,7 @@ def save_classification_results_to_csv(results: List[ClassificationResult], outp
             'image_path': str(res.image_path),
             'predicted_class_label': res.prediction.predicted_class_label,
             'predicted_class_idx': res.prediction.predicted_class_idx,
+            'true_label': res.true_label if hasattr(res, 'true_label') else None,
             'confidence': res.prediction.confidence,
             'probabilities': res.prediction.probabilities
         }

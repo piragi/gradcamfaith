@@ -468,8 +468,8 @@ def analyze_faithfulness_vs_correctness_from_objects(  # Renamed for clarity
         image_path_str = str(original_res.image_path)
         saco_score = saco_scores.get(image_path_str)
 
-        # Extract true class from the image_path using the helper
-        true_class_label = extract_true_class_from_filename(original_res.image_path)
+        # Use true_label from ClassificationResult if available, otherwise fall back to extraction
+        true_class_label = original_res.true_label if original_res.true_label else extract_true_class_from_filename(original_res.image_path)
 
         prediction_info = original_res.prediction
         attribution_paths_info = original_res.attribution_paths  # This is an AttributionOutputPaths object or None
@@ -511,9 +511,18 @@ def analyze_faithfulness_vs_correctness_from_objects(  # Renamed for clarity
 def extract_true_class_from_filename(filename: Union[str, Path]) -> Optional[str]:
     """
     Extract the true class from a filename based on directory structure or filename patterns.
-    Handles both new directory structure (lung/Test/COVID-19/images/) and old flat structure.
+    Handles both new directory structure (lung/Test/COVID-19/images/) and old flat structure,
+    as well as unified format (class_0, class_1, class_2).
     """
     filepath_str = str(filename).lower()
+    
+    # Check for unified format first (class_0, class_1, class_2)
+    if '/class_0/' in filepath_str or '\\class_0\\' in filepath_str:
+        return CLASSES[0]  # COVID-19
+    elif '/class_1/' in filepath_str or '\\class_1\\' in filepath_str:
+        return CLASSES[1]  # Non-COVID
+    elif '/class_2/' in filepath_str or '\\class_2\\' in filepath_str:
+        return CLASSES[2]  # Normal
     
     # First, try to extract from directory structure (preferred method)
     for cls in CLASSES:

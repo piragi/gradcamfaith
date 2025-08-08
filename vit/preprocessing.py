@@ -101,8 +101,11 @@ def preprocess_image(
 
     # Get default processor if none provided
     if processor is None:
-        # processor = get_default_processor(img_size)
-        processor = get_processor_for_precached_224_images()
+        # Check if image is already 224x224 (preprocessed)
+        if image.size == (224, 224):
+            processor = get_processor_for_precached_224_images()
+        else:
+            processor = get_default_processor(img_size)
 
     # Apply preprocessing
     input_tensor = processor(image)

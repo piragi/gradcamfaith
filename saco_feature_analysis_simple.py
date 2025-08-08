@@ -1,0 +1,470 @@
+"""
+Simplified SaCo Feature Analysis
+Identifies SAE features corresponding to patches with misaligned attribution vs. impact.
+"""
+
+import logging
+from collections import defaultdict
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
+from tqdm import tqdm
+
+from vit.preprocessing import get_processor_for_precached_224_images
+from dataset_config import get_dataset_config
+from pipeline_unified import load_model_for_dataset
+from vit_prisma.sae import SparseAutoencoder
+
+# Suppress debug logging
+logging.getLogger('PIL').setLevel(logging.WARNING)
+
+# ============ CONFIG ============
+config = {
+    'dataset': 'hyperkvasir',  # 'covidquex' or 'hyperkvasir'
+    'layer': 6,                 # Which layer's SAE to analyze
+    'n_images': None,          # None for all, or specific number
+    'activation_threshold': 0.01,  # Min activation to consider feature active (lowered from 0.1)
+    'min_patches': 3,          # Min patches per feature
+    'min_occurrences': 5,      # Min times feature must appear across dataset
+    
+    # Path configuration
+    'results_dir': 'results/val',  # Where SaCo results are stored
+    'sae_base_dir': 'data',        # Base directory for SAE models (data/sae_hyperkvasir/...)
+    'image_base_dir': 'data',      # Base directory for images (data/hyperkvasir_unified/...)
+    'split': 'val',                # Which split to analyze: 'train', 'val', or 'test'
+}
+# ================================
+
+
+def recreate_bin_to_patch_mapping(raw_attributions, n_bins=49):
+    """Recreate bin-to-patch mapping from attribution values."""
+    n_patches = len(raw_attributions)
+    n_bins = min(n_bins, n_patches)
+    
+    # Sort patches by attribution (descending)
+    sorted_indices = np.argsort(raw_attributions)[::-1]
+    binned_indices = np.array_split(sorted_indices, n_bins)
+    
+    # Create bins sorted by mean attribution
+    temp_bins = []
+    for indices in binned_indices:
+        if len(indices) > 0:
+            temp_bins.append({
+                "indices": indices,
+                "mean_attr": np.mean(raw_attributions[indices])
+            })
+    
+    temp_bins.sort(key=lambda b: b['mean_attr'])
+    
+    # Map bin_id to patch indices
+    bin_to_patches = {}
+    for bin_id, bin_data in enumerate(temp_bins):
+        bin_to_patches[bin_id] = bin_data["indices"].tolist()
+    
+    return bin_to_patches
+
+
+def load_saco_data(dataset_name, results_dir):
+    """Load SaCo analysis results including bin-level data."""
+    results_path = Path(results_dir)
+    
+    # Get class mapping for the dataset
+    from dataset_config import get_dataset_config
+    dataset_config = get_dataset_config(dataset_name)
+    idx_to_class = {i: name for i, name in enumerate(dataset_config.class_names)}
+    
+    # Load bin results file
+    bin_csv = results_path / f"{results_dir.split('/')[-1]}_bin_results.csv"
+    if not bin_csv.exists():
+        # Try to find any bin_results file
+        bin_files = list(results_path.glob("*_bin_results.csv"))
+        if not bin_files:
+            raise FileNotFoundError(f"No bin results file found in {results_path}")
+        bin_csv = bin_files[0]
+    
+    print(f"Loading bin results from {bin_csv}")
+    df_bins = pd.read_csv(bin_csv)
+    
+    # Load classification results for true labels
+    class_csv = results_path / "classification_results_originals_explained.csv"
+    if not class_csv.exists():
+        # Try to find faithfulness analysis as fallback
+        faith_files = list(results_path.glob("analysis_faithfulness_correctness_binned_*.csv"))
+        if faith_files:
+            class_csv = sorted(faith_files)[-1]
+    
+    df_class = pd.read_csv(class_csv) if class_csv.exists() else pd.DataFrame()
+    
+    # Map images to true labels
+    image_to_label = {}
+    if not df_class.empty:
+        if 'filename' in df_class.columns:
+            for _, row in df_class.iterrows():
+                image_to_label[row['filename']] = row.get('true_class', 'unknown')
+        elif 'image_path' in df_class.columns:
+            for _, row in df_class.iterrows():
+                image_to_label[row['image_path']] = row.get('true_label', 'unknown')
+    
+    attr_dir = results_path / "attributions"
+    
+    # Group by image
+    image_data = {}
+    for image_name, group in df_bins.groupby('image_name'):
+        image_stem = Path(image_name).stem
+        
+        # Load raw attributions - MUST be patch-level (196,) not pixel-level (224,224)
+        attr_file = attr_dir / f"{image_stem}_raw_attribution.npy"
+        if not attr_file.exists():
+            continue
+            
+        raw_attrs = np.load(attr_file)
+        
+        # Verify correct shape
+        if raw_attrs.shape != (196,):
+            print(f"Warning: Skipping {image_stem} - wrong attribution shape {raw_attrs.shape}, expected (196,)")
+            continue
+        bin_to_patches = recreate_bin_to_patch_mapping(raw_attrs)
+        
+        # Store bin data with calculated log_ratio
+        bin_data = {}
+        for _, row in group.iterrows():
+            bin_id = row['bin_id']
+            
+            # Calculate log_ratio from attribution and impact
+            epsilon = 1e-10
+            mean_attr = row['mean_attribution']
+            impact = row['confidence_delta_abs']
+            
+            if mean_attr > epsilon:
+                log_ratio = np.log((impact + epsilon) / (mean_attr + epsilon))
+            else:
+                log_ratio = 0.0
+            
+            # Clamp extreme values
+            if not np.isfinite(log_ratio) or abs(log_ratio) > 10:
+                log_ratio = 0.0
+                
+            bin_data[bin_id] = {
+                'log_ratio': log_ratio,
+                'patch_indices': bin_to_patches.get(bin_id, []),
+                'mean_attribution': mean_attr,
+                'confidence_delta': row['confidence_delta']
+            }
+        
+        # Get true label from path structure: .../class_X/...
+        true_label = 'unknown'
+        if 'class_' in image_name:
+            # Extract class_X from path
+            parts = Path(image_name).parts
+            for part in parts:
+                if part.startswith('class_'):
+                    class_idx = int(part.split('_')[1])
+                    true_label = idx_to_class.get(class_idx, f'class_{class_idx}')
+                    break
+        
+        # Fallback to image_to_label if available
+        if true_label == 'unknown' and image_name in image_to_label:
+            true_label = image_to_label[image_name]
+        
+        image_data[image_name] = {
+            'bin_data': bin_data,
+            'true_label': true_label,
+            'raw_attributions': raw_attrs,
+            'saco_score': group.iloc[0]['saco_score'] if 'saco_score' in group.columns else 0.0
+        }
+    
+    return image_data
+
+
+def load_sae(dataset_name, layer_idx):
+    """Load trained SAE for given dataset and layer."""
+    sae_dir = Path(config['sae_base_dir']) / f"sae_{dataset_name}" / f"layer_{layer_idx}"
+    
+    # Find SAE file - look in subdirectories
+    sae_files = list(sae_dir.glob("*/n_images_*.pt"))
+    
+    # Filter out log_feature_sparsity files
+    sae_files = [f for f in sae_files if 'log_feature_sparsity' not in str(f)]
+    
+    if not sae_files:
+        raise FileNotFoundError(f"No SAE found in {sae_dir}")
+    
+    # Use the most recent one if multiple exist
+    sae_path = sorted(sae_files)[-1]
+    print(f"Loading SAE from {sae_path}")
+    
+    sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
+    sae.cuda().eval()
+    return sae
+
+
+def load_or_create_feature_dict(dataset_name, layer_idx):
+    """Load or create feature dictionary."""
+    dict_path = Path(f"data/featuredict_{dataset_name}/layer_{layer_idx}_features.pt")
+    
+    if dict_path.exists():
+        return torch.load(dict_path, weights_only=False)
+    else:
+        dict_path.parent.mkdir(parents=True, exist_ok=True)
+        return {}
+
+
+def save_feature_dict(feature_dict, dataset_name, layer_idx):
+    """Save feature dictionary."""
+    dict_path = Path(f"data/featuredict_{dataset_name}/layer_{layer_idx}_features.pt")
+    dict_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(feature_dict, dict_path)
+    print(f"Saved feature dict to {dict_path}")
+
+
+def analyze_image_features(image_path, image_data, model, sae, layer_idx, device, transform):
+    """Analyze SAE features for a single image."""
+    # Load and process image
+    if Path(image_path).exists():
+        img = Image.open(image_path).convert('RGB')
+    else:
+        # Try in data directory with configured paths
+        img_path = Path(config['image_base_dir']) / f"{config['dataset']}_unified" / config['split'] / image_path
+        if not img_path.exists():
+            return None
+        img = Image.open(img_path).convert('RGB')
+    
+    img_tensor = transform(img).unsqueeze(0).to(device)
+    
+    # Get activations at specified layer
+    with torch.no_grad():
+        resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
+        _, cache = model.run_with_cache(img_tensor, names_filter=[resid_hook_name])
+        resid = cache[resid_hook_name]  # [1, 197, 768]
+        
+        
+        # Get SAE features using encode method
+        _, codes = sae.encode(resid)  # codes shape: [1, 197, d_sae]
+        
+        
+        # Remove batch dimension and CLS token
+        feature_acts = codes[0, 1:]  # [196, d_sae] - patches only, no CLS
+        
+    
+    # Analyze features per patch
+    feature_patch_ratios = {}
+    bin_data = image_data['bin_data']
+    
+    # Find active features (any patch with activation > threshold) - more efficient
+    active_features = (feature_acts > config['activation_threshold']).any(dim=0).nonzero(as_tuple=True)[0]
+    
+    
+    
+    for feat_idx in active_features:
+        feat_activations = feature_acts[:, feat_idx]
+        active_patches = (feat_activations > config['activation_threshold']).nonzero(as_tuple=True)[0]
+        
+        
+        if len(active_patches) < config['min_patches']:
+            continue
+            
+        
+        # Calculate log ratios for active patches
+        log_ratios = []
+        for patch_idx in active_patches:
+            # Convert to regular Python int to avoid numpy comparison issues
+            patch_id = patch_idx.item()
+            
+            
+            # Find which bin contains this patch
+            # Note: patch_id is 0-195 (no CLS), bins might also be 0-195
+            found_in_bin = False
+            for bin_id, bin_info in bin_data.items():
+                if patch_id in bin_info['patch_indices']:
+                    log_ratios.append(bin_info['log_ratio'])
+                    found_in_bin = True
+                    break
+            
+        
+        if log_ratios:
+            # Calculate feature strength as mean of active patches (not max)
+            feature_strength = feat_activations[active_patches].mean().item()
+            
+            feature_patch_ratios[feat_idx.item()] = {
+                'mean_log_ratio': np.mean(log_ratios),
+                'sum_log_ratio': np.sum(log_ratios),  # Important for aggregation
+                'std_log_ratio': np.std(log_ratios),
+                'n_active_patches': len(active_patches),
+                'feature_strength': feature_strength
+            }
+    
+    
+    return feature_patch_ratios
+
+
+def main():
+    # Setup
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dataset_config = get_dataset_config(config['dataset'])
+    
+    print(f"Analyzing {config['dataset']} dataset, layer {config['layer']}")
+    
+    # Load model and SAE
+    model = load_model_for_dataset(dataset_config, device)
+    sae = load_sae(config['dataset'], config['layer'])
+    sae.eval()
+    
+    # Load SaCo data
+    print("Loading SaCo analysis results...")
+    image_data_map = load_saco_data(config['dataset'], config['results_dir'])
+    
+    # Limit images if specified
+    image_list = list(image_data_map.keys())
+    if config['n_images']:
+        image_list = image_list[:config['n_images']]
+    
+    print(f"Processing {len(image_list)} images...")
+    
+    # Load/create feature dictionary
+    feature_dict = load_or_create_feature_dict(config['dataset'], config['layer'])
+    
+    # Setup transform
+    transform = get_processor_for_precached_224_images()
+    
+    # Analyze each image
+    feature_occurrences = defaultdict(list)
+    
+    for image_name in tqdm(image_list, desc="Analyzing images"):
+        try:
+            image_features = analyze_image_features(
+                image_name, 
+                image_data_map[image_name],
+                model, sae, config['layer'], 
+                device, transform
+            )
+            
+            if image_features:
+                image_class = image_data_map[image_name]['true_label']
+                
+                for feat_id, feat_data in image_features.items():
+                    feature_occurrences[feat_id].append({
+                        'image': image_name,
+                        'class': image_class,
+                        'mean_log_ratio': feat_data['mean_log_ratio'],
+                        'sum_log_ratio': feat_data['sum_log_ratio'],  # Important for v2 compatibility
+                        'n_patches': feat_data['n_active_patches'],
+                        'feature_strength': feat_data['feature_strength'],
+                        'std_log_ratio': feat_data['std_log_ratio']
+                    })
+        except Exception as e:
+            print(f"Error processing {image_name}: {e}")
+    
+    # Aggregate results
+    print("\nAggregating feature statistics...")
+    aggregated_features = {}
+    
+    for feat_id, occurrences in feature_occurrences.items():
+        if len(occurrences) >= config['min_occurrences']:
+            mean_ratios = [occ['mean_log_ratio'] for occ in occurrences]
+            
+            # Get class distribution
+            class_counts = {}
+            for occ in occurrences:
+                cls = occ['class']
+                class_counts[cls] = class_counts.get(cls, 0) + 1
+            
+            # Determine dominant class
+            dominant_class = max(class_counts.items(), key=lambda x: x[1])[0] if class_counts else 'unknown'
+            
+            aggregated_features[feat_id] = {
+                'mean_log_ratio': np.mean(mean_ratios),
+                'std_log_ratio': np.std(mean_ratios),
+                'n_occurrences': len(occurrences),
+                'classes': list(set(occ['class'] for occ in occurrences)),
+                'dominant_class': dominant_class,
+                'mean_feature_strength': np.mean([occ['feature_strength'] for occ in occurrences])
+            }
+    
+    # Classify features by ratio (match v2 format)
+    under_attributed = {}  # High impact/low attribution (boost) - positive log ratio
+    over_attributed = {}   # Low impact/high attribution (suppress) - negative log ratio
+    
+    for feat_id, info in aggregated_features.items():
+        ratio = info['mean_log_ratio']
+        if ratio > 0:
+            under_attributed[feat_id] = info
+        else:
+            over_attributed[feat_id] = info
+    
+    # Update and save feature dictionary
+    for feat_id, feat_info in aggregated_features.items():
+        if feat_id not in feature_dict:
+            feature_dict[feat_id] = {}
+        
+        feature_dict[feat_id].update({
+            'mean_log_ratio': feat_info['mean_log_ratio'],
+            'n_occurrences': feat_info['n_occurrences'],
+            'classes': feat_info['classes'],
+            'dataset': config['dataset'],
+            'layer': config['layer']
+        })
+    
+    save_feature_dict(feature_dict, config['dataset'], config['layer'])
+    
+    # Sort features by confidence/importance (match v2)
+    # You can use different metrics: 'mean_log_ratio', 'n_occurrences', etc.
+    sort_metric = 'mean_log_ratio'
+    
+    under_attributed = dict(
+        sorted(under_attributed.items(), 
+               key=lambda x: abs(x[1][sort_metric]), 
+               reverse=True)
+    )
+    
+    over_attributed = dict(
+        sorted(over_attributed.items(),
+               key=lambda x: abs(x[1][sort_metric]),
+               reverse=True)
+    )
+    
+    # Print summary
+    print("\n" + "="*50)
+    print("ANALYSIS SUMMARY")
+    print("="*50)
+    print(f"Total features analyzed: {len(aggregated_features)}")
+    print(f"Under-attributed (boost): {len(under_attributed)} features")
+    print(f"Over-attributed (suppress): {len(over_attributed)} features")
+    
+    # Print top features for each category
+    print("\nTop 5 UNDER-ATTRIBUTED features (high impact, low attribution):")
+    for i, (feat_id, stats) in enumerate(list(under_attributed.items())[:5]):
+        print(f"  {i+1}. Feature {feat_id}: mean_log={stats['mean_log_ratio']:.3f}, "
+              f"n_occ={stats['n_occurrences']}, classes={stats['classes']}")
+    
+    print("\nTop 5 OVER-ATTRIBUTED features (low impact, high attribution):")
+    for i, (feat_id, stats) in enumerate(list(over_attributed.items())[:5]):
+        print(f"  {i+1}. Feature {feat_id}: mean_log={stats['mean_log_ratio']:.3f}, "
+              f"n_occ={stats['n_occurrences']}, classes={stats['classes']}")
+    
+    # Save results in v2 format
+    results = {
+        'results_by_type': {
+            'under_attributed': under_attributed,
+            'over_attributed': over_attributed
+        },
+        'analysis_params': {
+            'layer_idx': config['layer'],
+            'activation_threshold': config['activation_threshold'],
+            'min_patches_per_feature': config['min_patches'],
+            'min_occurrences': config['min_occurrences'],
+            'n_images_processed': len(image_list),
+            'dataset': config['dataset']
+        }
+    }
+    
+    # Save to the correct location for transmm_sfaf.py to find it
+    save_path = Path(f"data/featuredict_{config['dataset']}/layer_{config['layer']}_saco_features.pt")
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(results, save_path)
+    print(f"\nResults saved to {save_path}")
+
+
+if __name__ == "__main__":
+    main()

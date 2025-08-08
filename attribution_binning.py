@@ -215,10 +215,11 @@ def apply_binned_perturbation(
             mean_channels = ImageStat.Stat(original_pil_image).mean
             mean_color_value = int(mean_channels[0])
 
-            # 2. Create a full-size grayscale layer with the mean value
+            # 2. Create a full-size RGB layer with the mean value
             # We create a large mask and then apply it, which is more efficient
             # than creating and pasting many small patches.
-            grayscale_layer = Image.new("L", original_pil_image.size, mean_color_value)
+            # Use RGB mode to match the original image
+            grayscale_layer = Image.new("RGB", original_pil_image.size, (mean_color_value, mean_color_value, mean_color_value))
 
             # 3. Create a perturbed PIL image by pasting the mean value only where the mask is True
             # The mask needs to be converted to a PIL image to be used here.
@@ -229,7 +230,8 @@ def apply_binned_perturbation(
             result_pil.paste(grayscale_layer, (0, 0), mask=pil_mask)
 
             # 4. Preprocess the final perturbed PIL image back to a tensor
-            processor = preprocessing.get_processor_for_precached_224_images()
+            # Use the full processor since result_pil is 256x256, not 224x224
+            processor = preprocessing.get_default_processor(img_size=224)
             perturbed_tensor = processor(result_pil)
             return perturbed_tensor
         else:
@@ -409,7 +411,10 @@ def _get_or_compute_binned_results(
                 result["saco_score"] = saco_score
                 all_bin_results.append(result)
         except Exception as e:
+            import traceback
             print(f"Error processing {original_result.image_path.name}: {e}")
+            if "do not match" in str(e):
+                traceback.print_exc()
             continue
             
     bin_results_df = pd.DataFrame(all_bin_results)
@@ -476,10 +481,15 @@ def run_binned_saco_analysis(
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     
     for name, df_to_save in analysis_results.items():
-        if name == "bin_results":
-            continue
-        
         if isinstance(df_to_save, pd.DataFrame) and not df_to_save.empty:
+            if name == "bin_results":
+                # Save bin results with dataset prefix for saco_feature_analysis
+                dataset_name = config.file.output_dir.name  # Assumes output_dir ends with dataset name
+                save_path = config.file.output_dir / f"{dataset_name}_bin_results.csv"
+                df_to_save.to_csv(save_path, index=False)
+                print(f"Saved bin results to {save_path}")
+            
+            # Also save with timestamp for archival
             save_path = config.file.output_dir / f"analysis_{name}_binned_{timestamp}.csv"
             df_to_save.to_csv(save_path, index=False)
             print(f"Saved {name} to {save_path}")

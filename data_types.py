@@ -123,6 +123,7 @@ class AttributionOutputPaths:
 class ClassificationResult:
     image_path: Path
     prediction: ClassificationPrediction
+    true_label: Optional[str] = None  # The ground truth label
     attribution_paths: Optional[AttributionOutputPaths] = None
 
     def to_dict_for_cache(self) -> Dict[str, Any]:

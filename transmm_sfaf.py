@@ -12,7 +12,7 @@ from vit_prisma.models.weight_conversion import convert_timm_weights
 from vit_prisma.sae import SparseAutoencoder
 
 from config import PipelineConfig
-from vit.model import IDX2CLS
+# Removed hardcoded IDX2CLS import - will use dataset-specific mapping
 from build_boost_mask_improved import build_boost_mask_improved, precache_sorted_features
 
 SAE_CONFIG = {
@@ -39,7 +39,7 @@ SAE_CONFIG = {
     6: {
         "sae_path": "./models/sweep/sae_l6_k64_exp64_lr2e-05/41fa0ab7-vit_covidquex_sae_k_sweep/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_local_l6_alignment_min1_128k64.pt",
-        "saco_dict_path": "./results/saco_features_direct_l6.pt"
+        "saco_dict_path": "data/featuredict_hyperkvasir/layer_6_saco_features.pt"  # New location with correct format
     },
     7: {
         "sae_path": "./models/sweep/sae_l7_k64_exp64_lr2e-05/1a690d9c-vit_covidquex_sae_k_sweep/n_images_49276.pt",
@@ -157,6 +157,7 @@ def transmm_prisma(
     model_prisma: HookedViT,
     input_tensor: torch.Tensor,
     config: PipelineConfig,
+    idx_to_class: Dict[int, str],  # Required parameter - no default
     device: Optional[torch.device] = None,
     img_size: int = 224,
     steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,  # CHANGED: Pass resources in
@@ -227,7 +228,7 @@ def transmm_prisma(
         "logits": logits.detach(),
         "probabilities": probabilities.squeeze().cpu().detach().numpy().tolist(),
         "predicted_class_idx": predicted_class_idx,
-        "predicted_class_label": IDX2CLS[predicted_class_idx]
+        "predicted_class_label": idx_to_class.get(predicted_class_idx, f"class_{predicted_class_idx}")
     }
 
     # -------------- Attribution loop (MODIFIED) --------------
@@ -264,7 +265,7 @@ def transmm_prisma(
                             top_k_boost=15,          # Match improved method (max_boost)
                             min_activation=0.05,     # Match improved method
                             seed=42,  # For reproducibility
-                            debug=True
+                            debug=False
                         )
                     else:
                         # ===== IMPROVED FEATURE-BASED BOOST =====
@@ -274,8 +275,9 @@ def transmm_prisma(
                             sae_codes=codes_for_layer,
                             saco_results=saco_results,
                             predicted_class=predicted_class_idx,
+                            idx_to_class=idx_to_class,
                             device=device,
-                            debug=True
+                            debug=False
                         )
                     
                 else:
@@ -288,11 +290,11 @@ def transmm_prisma(
                         top_k_suppress=10,
                         top_k_boost=8,
                         min_activation=0.05,
-                        debug=True
+                        debug=False
                     )
 
                 if selected_feat_ids:
-                    print(f"Predicted class. {IDX2CLS[predicted_class_idx]}")
+                    print(f"Predicted class. {idx_to_class.get(predicted_class_idx, f'class_{predicted_class_idx}')}")
                     print(f"Layer {i}: Boosting based on {len(selected_feat_ids)} features: {selected_feat_ids}")
                     cam_pos_avg[0, 1:] *= boost_mask.cpu()
                     all_boosted_features[i] = selected_feat_ids
@@ -435,12 +437,22 @@ def generate_attribution_prisma(
     model: HookedSAEViT,
     input_tensor: torch.Tensor,
     config: PipelineConfig,
+    idx_to_class: Dict[int, str],  # Required parameter - no default
     device: Optional[torch.device] = None,
     steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,
     enable_steering: bool = True,
 ) -> Dict[str, Any]:
     """
     Generate attribution with S_f/A_f based steering.
+    
+    Args:
+        model: The hooked SAE ViT model
+        input_tensor: Input image tensor
+        config: Pipeline configuration
+        idx_to_class: Required mapping from class indices to class names
+        device: Device to run on
+        steering_resources: Resources for steering
+        enable_steering: Whether to enable steering
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -453,6 +465,7 @@ def generate_attribution_prisma(
         steering_resources=steering_resources,
         config=config,
         enable_steering=enable_steering,
+        idx_to_class=idx_to_class,
     )
 
     # Structure output
