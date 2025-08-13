@@ -9,6 +9,7 @@ Key insights incorporated:
 """
 
 import torch
+import math
 from typing import Dict, Any, List, Tuple, Optional
 
 
@@ -41,7 +42,7 @@ def precache_sorted_features(
             if log_ratio < min_log_ratio:
                 continue
             
-            score = log_ratio * (n_occ ** 0.5) if use_balanced_score else log_ratio
+            score = log_ratio * math.log(n_occ + 1) if use_balanced_score else log_ratio
             presorted.append((feat_id, stats, score))
         
         presorted.sort(key=lambda x: x[2], reverse=True)
@@ -61,7 +62,7 @@ def precache_sorted_features(
             if log_ratio < min_log_ratio:
                 continue
             
-            score = log_ratio * (n_occ ** 0.5) if use_balanced_score else log_ratio
+            score = log_ratio * math.log(n_occ + 1) if use_balanced_score else log_ratio
             presorted.append((feat_id, stats, score))
         
         presorted.sort(key=lambda x: x[2], reverse=True)
@@ -79,24 +80,27 @@ def build_boost_mask_improved(
     *,
     # Frequency filtering - MUCH WIDER RANGE
     min_occurrences: int = 1,        # Include rarer features
-    max_occurrences: int = 100000,      # Include more common features
+    max_occurrences: int = 10000000,      # Include more common features
     
     # Ratio thresholds - LOWER THRESHOLD
-    min_log_ratio: float = 1.,      # Include more moderate misalignments
+    min_log_ratio: float = 1.5,      # Include more moderate misalignments
     
     # Class-specific behavior (disabled by default for general testing)
     class_aware: bool = False,
     
     # Strength parameters - STRONGER EFFECTS
     suppress_strength: float = 0.2,  # Stronger suppression (lower = stronger)
-    boost_strength: float = 10.0,     # Much stronger boost
+    boost_strength: float = 2.5,     # Much stronger boost
     
     # Selection limits - MORE FEATURES
-    max_suppress: int = 5,          # More suppressions
-    max_boost: int = 8,             # Many more boosts
+    max_suppress: int = 0,          # More suppressions
+    max_boost: int = 10,             # Many more boosts
     
     # Activation threshold - LOWER TO CATCH MORE
-    min_activation: float = 0.05,    # Lower threshold to include more patches
+    min_activation: float = 0.1,    # Lower threshold to include more patches
+    
+    # Top-k filtering for active features
+    topk_active: Optional[int] = None,  # Consider only top-k most active features (None = all active)
     
     # Weighting strategy
     use_balanced_score: bool = True,  # Use mean * sqrt(n_occurrences) for ranking
@@ -146,8 +150,20 @@ def build_boost_mask_improved(
     if over_attributed and actual_max_suppress > 0:
         
         # PRE-COMPUTE active features set for O(1) lookup
-        active_features = (codes > min_activation).any(dim=0).nonzero(as_tuple=True)[0]
-        active_set = set(active_features.cpu().tolist())
+        if topk_active is None:
+            # Use all active features
+            active_features = (codes > min_activation).any(dim=0).nonzero(as_tuple=True)[0]
+            active_set = set(active_features.cpu().tolist())
+        else:
+            # First get top-k most active features by max activation
+            max_acts_per_feature = codes.max(dim=0).values
+            k = min(topk_active, codes.shape[1])
+            top_values, top_indices = torch.topk(max_acts_per_feature, k=k)
+            
+            # Filter by minimum activation threshold
+            threshold_mask = top_values > min_activation
+            active_features = top_indices[threshold_mask]
+            active_set = set(active_features.cpu().tolist())
         
         # Pre-filter and pre-sort features ONCE (can be cached in future)
         if not hasattr(build_boost_mask_improved, '_cached_sorted_over'):
@@ -165,7 +181,7 @@ def build_boost_mask_improved(
                 
                 # Pre-compute score
                 if use_balanced_score:
-                    score = log_ratio * (n_occ ** 0.5)
+                    score = log_ratio * math.log(n_occ + 1)
                 else:
                     score = log_ratio
                 
@@ -214,8 +230,20 @@ def build_boost_mask_improved(
         
         # Reuse active set if already computed, otherwise compute it
         if 'active_set' not in locals():
-            active_features = (codes > min_activation).any(dim=0).nonzero(as_tuple=True)[0]
-            active_set = set(active_features.cpu().tolist())
+            if topk_active is None:
+                # Use all active features
+                active_features = (codes > min_activation).any(dim=0).nonzero(as_tuple=True)[0]
+                active_set = set(active_features.cpu().tolist())
+            else:
+                # First get top-k most active features by max activation
+                max_acts_per_feature = codes.max(dim=0).values
+                k = min(topk_active, codes.shape[1])
+                top_values, top_indices = torch.topk(max_acts_per_feature, k=k)
+                
+                # Filter by minimum activation threshold
+                threshold_mask = top_values > min_activation
+                active_features = top_indices[threshold_mask]
+                active_set = set(active_features.cpu().tolist())
         
         # Pre-filter and pre-sort features ONCE (can be cached in future)
         if not hasattr(build_boost_mask_improved, '_cached_sorted_under'):
@@ -233,7 +261,7 @@ def build_boost_mask_improved(
                 
                 # Pre-compute score
                 if use_balanced_score:
-                    score = log_ratio * (n_occ ** 0.5)
+                    score = log_ratio * math.log(n_occ + 1)
                 else:
                     score = log_ratio
                 
@@ -278,8 +306,13 @@ def build_boost_mask_improved(
     
     if debug:
         total_active = (codes > min_activation).any(dim=0).sum().item()
+        topk_considered = len(active_set) if 'active_set' in locals() else 0
+        if topk_active is None:
+            filter_desc = f"all {topk_considered} active"
+        else:
+            filter_desc = f"top-{topk_active} → {topk_considered} active"
         print(f"Improved mask: {len(selected_features)} features selected "
-              f"(from {total_active} active), "
+              f"(from {filter_desc} out of {total_active} total), "
               f"suppress={suppress_count}, boost={boost_count}")
         print(f"Class strategy: {predicted_class_name} - "
               f"suppress_priority={suppress_priority:.1f}, "

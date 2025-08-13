@@ -230,8 +230,11 @@ def apply_binned_perturbation(
             result_pil.paste(grayscale_layer, (0, 0), mask=pil_mask)
 
             # 4. Preprocess the final perturbed PIL image back to a tensor
-            # Use the full processor since result_pil is 256x256, not 224x224
-            processor = preprocessing.get_default_processor(img_size=224)
+            # Check the size of the result_pil to determine which processor to use
+            if result_pil.size == (224, 224):
+                processor = preprocessing.get_processor_for_precached_224_images()
+            else:
+                processor = preprocessing.get_default_processor(img_size=224)
             perturbed_tensor = processor(result_pil)
             return perturbed_tensor
         else:

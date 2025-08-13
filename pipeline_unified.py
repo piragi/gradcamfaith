@@ -135,7 +135,7 @@ def classify_single_image(
     Classify a single image using the unified system.
     """
     cache_path = io_utils.build_cache_path(
-        config.file.cache_dir, image_path, f"_classification_{dataset_config.name}.json"
+        config.file.cache_dir, image_path, f"_classification_{dataset_config.name}"
     )
     
     # Try to load from cache
@@ -267,7 +267,7 @@ def classify_explain_single_image(
     Classify a single image AND generate explanations using unified system.
     """
     cache_path = io_utils.build_cache_path(
-        config.file.cache_dir, image_path, f"_classification_explained_{dataset_config.name}.json"
+        config.file.cache_dir, image_path, f"_classification_explained_{dataset_config.name}"
     )
     
     # Try to load from cache
@@ -401,6 +401,9 @@ def run_unified_pipeline(
     dataset_config = get_dataset_config(dataset_name)
     print(f"Loading configuration for {dataset_name} dataset")
     print(f"  Classes: {dataset_config.num_classes} - {dataset_config.class_names}")
+    
+    # Ensure all required directories exist
+    io_utils.ensure_directories(config.directories)
     
     # Prepare dataset if needed
     if prepared_data_path is None:

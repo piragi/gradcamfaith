@@ -5,28 +5,32 @@ import config
 from pipeline_unified import run_unified_pipeline
 
 
-def main(pipeline_config: config.PipelineConfig):
-    print(
-        f"Run pipeline with:\nCurrent Mode: {pipeline_config.file.current_mode}, {'Weighted' if pipeline_config.file.weighted else 'Unweighted'}, {'Analysis activated' if pipeline_config.classify.analysis else 'No Analysis'}"
-    )
+def main():
+    datasets = [
+        # ("hyperkvasir", Path("../../gradcamfaithkvasir/gradcamfaith/hyper-kvasir/")),
+        ("covidquex", Path("./lung/"))
+    ]
     
-    # Use unified pipeline with the prepared dev set
-    _ = run_unified_pipeline(
-        config=pipeline_config,
-        dataset_name="hyperkvasir",
-        source_data_path=Path("../../gradcamfaithkvasir/gradcamfaith/hyper-kvasir/"),
-        prepared_data_path=Path(f"./data/hyperkvasir_unified/"),  # Already prepared data
-        force_prepare=False  # Don't re-prepare since dev set is ready
-    )
-
-
-if __name__ == "__main__":
     pipeline_config = config.PipelineConfig()
     pipeline_config.file.use_cached_original = False
     pipeline_config.file.use_cached_perturbed = ""
     pipeline_config.file.current_mode = "val"
     pipeline_config.file.weighted = True
     pipeline_config.classify.analysis = False
-    pipeline_config.classify.data_collection = False  #not pipeline_config.file.weighted
+    pipeline_config.classify.data_collection = False
+    
+    for dataset_name, source_path in datasets:
+        pipeline_config.file.set_dataset(dataset_name)
+        print(f"\nRunning {dataset_name} - Mode: {pipeline_config.file.current_mode}")
+        
+        run_unified_pipeline(
+            config=pipeline_config,
+            dataset_name=dataset_name,
+            source_data_path=source_path,
+            prepared_data_path=Path(f"./data/{dataset_name}_unified/"),
+            force_prepare=False
+        )
 
-    main(pipeline_config)
+
+if __name__ == "__main__":
+    main()

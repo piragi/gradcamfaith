@@ -19,8 +19,8 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 
 # ============ CONFIG ============
 config = {
-    'dataset': 'hyperkvasir',  # 'covidquex' or 'hyperkvasir'
-    'layers': [5, 6],     # which layers to train
+    'dataset': 'covidquex',  # 'covidquex' or 'hyperkvasir'
+    'layers': [6],     # which layers to train
     'k': 64,                    # topk activation
     'expansion_factor': 64,
     'lr': 2e-5,

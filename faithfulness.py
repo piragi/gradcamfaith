@@ -414,7 +414,7 @@ def convert_patch_attribution_to_image(attribution_196, patch_size=16):
 def evaluate_faithfulness_for_results(
     config: PipelineConfig, vit_model: model.VisionTransformer, device: torch.device,
     classification_results: List[ClassificationResult],
-    batch_size: int = 1000
+    batch_size: int = 1024
 ) -> Tuple[Dict[str, Any], np.ndarray]:
     """
     Evaluate faithfulness scores with patch-level attributions.

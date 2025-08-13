@@ -22,18 +22,19 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 
 # ============ CONFIG ============
 config = {
-    'dataset': 'hyperkvasir',  # 'covidquex' or 'hyperkvasir'
+    'dataset': 'covidquex',  # 'covidquex' or 'hyperkvasir'
     'layer': 6,                 # Which layer's SAE to analyze
     'n_images': None,          # None for all, or specific number
-    'activation_threshold': 0.01,  # Min activation to consider feature active (lowered from 0.1)
-    'min_patches': 3,          # Min patches per feature
-    'min_occurrences': 5,      # Min times feature must appear across dataset
+    'activation_threshold': 0.1,  # Min activation to consider feature active
+    'min_patches': 1,          # Min patches per feature
+    'min_occurrences': 1,      # Min times feature must appear across dataset
+    'max_features_per_image': 500,  # Process only top-k features per image (huge speedup!)
     
     # Path configuration
-    'results_dir': 'results/val',  # Where SaCo results are stored
+    'results_dir': './data/covidquex_unified/results/train',  # Where SaCo results are stored
     'sae_base_dir': 'data',        # Base directory for SAE models (data/sae_hyperkvasir/...)
     'image_base_dir': 'data',      # Base directory for images (data/hyperkvasir_unified/...)
-    'split': 'val',                # Which split to analyze: 'train', 'val', or 'test'
+    'split': 'train',                # Which split to analyze: 'train', 'val', or 'test'
 }
 # ================================
 
@@ -127,31 +128,64 @@ def load_saco_data(dataset_name, results_dir):
             continue
         bin_to_patches = recreate_bin_to_patch_mapping(raw_attrs)
         
-        # Store bin data with calculated log_ratio
+        # Normalize attribution to [0, 1] for ratio calculation
+        epsilon = 1e-6
+        attr_min, attr_max = raw_attrs.min(), raw_attrs.max()
+        if attr_max - attr_min > epsilon:
+            norm_attrs = (raw_attrs - attr_min) / (attr_max - attr_min) + epsilon
+        else:
+            norm_attrs = np.ones_like(raw_attrs) * epsilon
+        
+        # Create patch-level data: each patch gets its bin's impact but individual attribution
+        patch_data = {}
+        
+        # First, create bin_data for reference
         bin_data = {}
         for _, row in group.iterrows():
             bin_id = row['bin_id']
+            patch_indices = bin_to_patches.get(bin_id, [])
             
-            # Calculate log_ratio from attribution and impact
-            epsilon = 1e-10
-            mean_attr = row['mean_attribution']
-            impact = row['confidence_delta_abs']
-            
-            if mean_attr > epsilon:
-                log_ratio = np.log((impact + epsilon) / (mean_attr + epsilon))
-            else:
-                log_ratio = 0.0
-            
-            # Clamp extreme values
-            if not np.isfinite(log_ratio) or abs(log_ratio) > 10:
-                log_ratio = 0.0
-                
             bin_data[bin_id] = {
-                'log_ratio': log_ratio,
-                'patch_indices': bin_to_patches.get(bin_id, []),
-                'mean_attribution': mean_attr,
-                'confidence_delta': row['confidence_delta']
+                'patch_indices': patch_indices,
+                'mean_attribution': row['mean_attribution'],
+                'confidence_delta': row['confidence_delta'],
+                'confidence_delta_abs': row['confidence_delta_abs']
             }
+            
+            # Now calculate log_ratio for each patch individually
+            # Use signed impact to properly identify under vs over-attributed
+            impact = row['confidence_delta']  # Positive = helps classification
+            
+            for patch_id in patch_indices:
+                # Use individual patch's normalized attribution
+                patch_norm_attr = norm_attrs[patch_id]
+                
+                # Calculate log ratio considering impact direction
+                if abs(impact) < epsilon:
+                    # Near-zero impact
+                    log_ratio = -5.0 if patch_norm_attr > 0.1 else 0.0
+                elif patch_norm_attr > epsilon:
+                    # Normal case: log(|impact|/attr)
+                    ratio = abs(impact) / patch_norm_attr
+                    log_ratio = np.log(ratio)
+                    # Positive impact with low attribution = under-attributed (positive log ratio)
+                    # Negative impact or low impact = over-attributed (negative log ratio)
+                    if impact < 0:
+                        log_ratio = -log_ratio
+                else:
+                    log_ratio = 0.0
+                
+                # Clamp extreme values
+                if not np.isfinite(log_ratio) or abs(log_ratio) > 10:
+                    log_ratio = np.clip(log_ratio, -10, 10) if np.isfinite(log_ratio) else 0.0
+                
+                patch_data[patch_id] = {
+                    'log_ratio': log_ratio,
+                    'attribution': raw_attrs[patch_id],
+                    'norm_attribution': patch_norm_attr,
+                    'impact': impact,
+                    'bin_id': bin_id
+                }
         
         # Get true label from path structure: .../class_X/...
         true_label = 'unknown'
@@ -170,6 +204,7 @@ def load_saco_data(dataset_name, results_dir):
         
         image_data[image_name] = {
             'bin_data': bin_data,
+            'patch_data': patch_data,  # Add patch-level data
             'true_label': true_label,
             'raw_attributions': raw_attrs,
             'saco_score': group.iloc[0]['saco_score'] if 'saco_score' in group.columns else 0.0
@@ -248,14 +283,21 @@ def analyze_image_features(image_path, image_data, model, sae, layer_idx, device
         feature_acts = codes[0, 1:]  # [196, d_sae] - patches only, no CLS
         
     
-    # Analyze features per patch
+    # Analyze features per patch - OPTIMIZED VERSION
     feature_patch_ratios = {}
-    bin_data = image_data['bin_data']
+    patch_data = image_data['patch_data']  # Use patch-level data
     
-    # Find active features (any patch with activation > threshold) - more efficient
-    active_features = (feature_acts > config['activation_threshold']).any(dim=0).nonzero(as_tuple=True)[0]
+    # OPTIMIZATION: Process only top-k most active features instead of all 49k
+    # Get maximum activation per feature across all patches
+    max_acts_per_feature = feature_acts.max(dim=0).values
     
+    # Get top-k features (much faster than checking all 49k)
+    k = min(config['max_features_per_image'], feature_acts.shape[1])  # Process only top-k features per image
+    top_values, top_indices = torch.topk(max_acts_per_feature, k=k)
     
+    # Filter by threshold
+    threshold_mask = top_values > config['activation_threshold']
+    active_features = top_indices[threshold_mask]
     
     for feat_idx in active_features:
         feat_activations = feature_acts[:, feat_idx]
@@ -266,21 +308,15 @@ def analyze_image_features(image_path, image_data, model, sae, layer_idx, device
             continue
             
         
-        # Calculate log ratios for active patches
+        # Get log ratios for active patches using patch-level data
         log_ratios = []
         for patch_idx in active_patches:
             # Convert to regular Python int to avoid numpy comparison issues
             patch_id = patch_idx.item()
             
-            
-            # Find which bin contains this patch
-            # Note: patch_id is 0-195 (no CLS), bins might also be 0-195
-            found_in_bin = False
-            for bin_id, bin_info in bin_data.items():
-                if patch_id in bin_info['patch_indices']:
-                    log_ratios.append(bin_info['log_ratio'])
-                    found_in_bin = True
-                    break
+            # Get patch-specific log ratio
+            if patch_id in patch_data:
+                log_ratios.append(patch_data[patch_id]['log_ratio'])
             
         
         if log_ratios:
@@ -299,12 +335,14 @@ def analyze_image_features(image_path, image_data, model, sae, layer_idx, device
     return feature_patch_ratios
 
 
+
 def main():
     # Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset_config = get_dataset_config(config['dataset'])
     
     print(f"Analyzing {config['dataset']} dataset, layer {config['layer']}")
+    print(f"Settings: activation_threshold={config['activation_threshold']}, max_features={config['max_features_per_image']}")
     
     # Load model and SAE
     model = load_model_for_dataset(dataset_config, device)

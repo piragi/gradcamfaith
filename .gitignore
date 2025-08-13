@@ -17,4 +17,6 @@ hyper-kvasir_imagefolder/*
 wandb/
 *.pt
 *.txt
+*.pdf
+*.md
 /data

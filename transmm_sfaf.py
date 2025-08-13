@@ -37,7 +37,10 @@ SAE_CONFIG = {
         "dict_path": "./sae_dictionaries/steer_corr_local_l5_alignment_min1_128k64.pt"
     },
     6: {
-        "sae_path": "./models/sweep/sae_l6_k64_exp64_lr2e-05/41fa0ab7-vit_covidquex_sae_k_sweep/n_images_49276.pt",
+        # "sae_path": "data/sae_covidquex/layer_6/b562ac30-vit_unified_sae/n_images_65161.pt",
+        # "dict_path": "./sae_dictionaries/steer_corr_local_l6_alignment_min1_128k64.pt",
+        # "saco_dict_path": "data/featuredict_covidquex/layer_6_saco_features.pt"  # New location with correct format
+        "sae_path": "data/sae_hyperkvasir/layer_6/7767f4dc-vit_unified_sae/n_images_49276.pt",
         "dict_path": "./sae_dictionaries/steer_corr_local_l6_alignment_min1_128k64.pt",
         "saco_dict_path": "data/featuredict_hyperkvasir/layer_6_saco_features.pt"  # New location with correct format
     },

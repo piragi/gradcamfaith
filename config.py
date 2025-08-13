@@ -8,7 +8,8 @@ Modes = Literal["train", "test", "val", "dev"]
 @dataclass
 class FileConfig:
     """Configuration for file paths and I/O operations."""
-    base_pipeline_dir: Path = Path("./results")
+    dataset_name: str = "hyperkvasir"
+    base_pipeline_dir: Path = field(default_factory=lambda: Path("./data/hyperkvasir_unified/results"))
     current_mode: Modes = "test"
     weighted = False
 
@@ -74,6 +75,11 @@ class FileConfig:
             "perturbed": self.perturbed_dir,
             "masks": self.mask_dir
         }
+    
+    def set_dataset(self, dataset_name: str):
+        """Update the dataset name and base pipeline directory."""
+        self.dataset_name = dataset_name
+        self.base_pipeline_dir = Path(f"./data/{dataset_name}_unified/results")
 
 
 @dataclass
@@ -86,52 +92,6 @@ class ClassificationConfig:
     model_type: str = "vit_base_patch16_224"
     num_classes: int = 3
 
-    # Explanation parameters
-    gini_params: Tuple[float, float, float] = (0.65, 8.0, 0.5)
-    adaptive_weighting: Tuple[float, float] = (1.2, 1.7)
-    head_boost_value: float = 200.0
-    # Dict for head-specific boosting per class per layer
-    # {class: {layer: head}}
-    head_boost_factor_per_head_per_class: Dict[int, Dict[int, List[int]]] = field(
-        default_factory=lambda: {
-            0: {
-                8: [1],
-            },
-            2: {},
-            3: {},
-            4: {},
-            5: {},
-        }
-    )
-    token_boost_value: float = 100.0
-    token_boost_factors: Dict[int, Dict[int, Dict[int, List[int]]]] = field(
-        default_factory=lambda: {
-            0: {
-                8: {
-                    1: [8, 64, 7, 99]
-                }
-            },
-            2: {
-                8: {
-                    5: [26, 41, 24, 11, 25]
-                }
-            },
-            3: {},
-            4: {},
-            5: {
-                10: {
-                    1: [14, 1, 0, 70, 71]
-                }
-            }
-        }
-    )
-    class_boost_multipliers = {
-        0: 0.6,  # Moderate (high correlation but still distinct)
-        2: 1.0,  # Keep working approach  
-        # 3: 0.4,  # Low (conflicting strategies)
-        # 4: 0.0,  # Moderate
-        5: 1.2  # High (false multi-strategy, actually coherent)
-    }
     attribution_method: str = "transmm"
     analysis = False
     data_collection = False
@@ -153,12 +113,6 @@ class PerturbationConfig:
 
     # Perturbation method
     method: str = "mean"  # "mean" or "sd"
-
-    # Stable Diffusion parameters
-    strength: float = 0.2
-    prompt: str = "normal healthy tissue"
-    guidance_scale: float = 7.5
-    num_inference_steps: int = 30
 
     # Processing limits
     max_images: Optional[int] = None  # None means process all images
