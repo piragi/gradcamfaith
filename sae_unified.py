@@ -81,6 +81,9 @@ base_config = VisionModelSAERunnerConfig(
     dead_feature_window=20,
 )
 
+# Set the actual dataset size for custom datasets
+base_config.dataset_size = len(train_dataset)
+
 # Train SAE for each layer
 for layer_idx in config['layers']:
     # Clear memory at start of each iteration

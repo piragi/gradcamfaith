@@ -33,4 +33,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-vit-prisma = { path = "../../ViT-Prisma", editable = true }
+vit-prisma = { git = "https://github.com/piragi/ViT-Prisma.git", branch = "main" }

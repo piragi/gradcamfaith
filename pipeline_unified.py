@@ -52,8 +52,15 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device):
     from vit_prisma.models.weight_conversion import convert_timm_weights
     
     # Create model with correct number of classes (don't load ImageNet weights)
-    model = HookedSAEViT.from_pretrained("vit_base_patch16_224", load_pretrained_model=False)
-    model.head = torch.nn.Linear(model.cfg.d_model, dataset_config.num_classes)
+    model = HookedSAEViT.from_pretrained(
+        "vit_base_patch16_224", 
+        load_pretrained_model=False
+    )
+    
+    # Update the config and recreate the head with the correct number of classes
+    model.cfg.n_classes = dataset_config.num_classes
+    from vit_prisma.models.layers.head import Head
+    model.head = Head(model.cfg)
     
     # Load checkpoint if available
     checkpoint_path = Path(dataset_config.model_checkpoint)
