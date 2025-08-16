@@ -18,5 +18,4 @@ wandb/
 *.pt
 *.txt
 *.pdf
-*.md
 /data
