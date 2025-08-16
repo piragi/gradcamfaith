@@ -70,6 +70,9 @@ Based on the project's core objectives of using SAEs to improve faithfulness in 
    - Essential baseline measurement for understanding the attribution-SAE feature gap
    - *Implementation: Spatial correlation analysis between attribution maps and SAE activation patterns*
 
+3.1 **How do some features contribute to faithfulness?** - **CRITICAL**
+   - Figure out the mechanism behind these features and why it improves faithfulness 
+
 ### **Tier 2: Method Validation Questions**
 4. **"What does the method find exactly?"** - **HIGH**
    - Clearly defines the research contribution and expected outcomes

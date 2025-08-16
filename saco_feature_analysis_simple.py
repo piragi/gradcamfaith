@@ -6,6 +6,7 @@ Identifies SAE features corresponding to patches with misaligned attribution vs.
 import logging
 from collections import defaultdict
 from pathlib import Path
+from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 import torch
@@ -254,8 +255,8 @@ def save_feature_dict(feature_dict, dataset_name, layer_idx):
     print(f"Saved feature dict to {dict_path}")
 
 
-def analyze_image_features(image_path, image_data, model, sae, layer_idx, device, transform):
-    """Analyze SAE features for a single image."""
+def get_feature_activations(image_path, model, sae, layer_idx, device, transform):
+    """Get SAE feature activations for a single image."""
     # Load and process image
     if Path(image_path).exists():
         img = Image.open(image_path).convert('RGB')
@@ -274,13 +275,19 @@ def analyze_image_features(image_path, image_data, model, sae, layer_idx, device
         _, cache = model.run_with_cache(img_tensor, names_filter=[resid_hook_name])
         resid = cache[resid_hook_name]  # [1, 197, 768]
         
-        
         # Get SAE features using encode method
         _, codes = sae.encode(resid)  # codes shape: [1, 197, d_sae]
         
-        
         # Remove batch dimension and CLS token
         feature_acts = codes[0, 1:]  # [196, d_sae] - patches only, no CLS
+        
+    return feature_acts
+
+
+def analyze_image_features(feature_acts, image_data):
+    """Analyze SAE features for a single image using pre-computed feature activations."""
+    if feature_acts is None:
+        return None
         
     
     # Analyze features per patch - OPTIMIZED VERSION
@@ -336,6 +343,197 @@ def analyze_image_features(image_path, image_data, model, sae, layer_idx, device
 
 
 
+def save_correlation_results(correlation_results, config):
+    """
+    Save and summarize attribution-SAE correlation results.
+    
+    Args:
+        correlation_results: List of correlation metrics per image
+        config: Configuration dictionary
+    """
+    if not correlation_results:
+        print("No correlation results to save.")
+        return
+    
+    # Convert to DataFrame for easier analysis
+    df_corr = pd.DataFrame(correlation_results)
+    
+    # Save correlation results
+    corr_save_path = Path(f"data/featuredict_{config['dataset']}/layer_{config['layer']}_attribution_sae_correlation.csv")
+    corr_save_path.parent.mkdir(parents=True, exist_ok=True)
+    df_corr.to_csv(corr_save_path, index=False)
+    print(f"Correlation results saved to {corr_save_path}")
+    
+    # Compute and print summary statistics
+    print("\n" + "="*50)
+    print("ATTRIBUTION-SAE CORRELATION SUMMARY")
+    print("="*50)
+    
+    # Average correlations
+    corr_cols = ['pearson_max', 'spearman_max', 'pearson_mean', 'spearman_mean', 'pearson_active_count']
+    for col in corr_cols:
+        if col in df_corr.columns:
+            mean_val = df_corr[col].mean()
+            std_val = df_corr[col].std()
+            pos_ratio = (df_corr[col] > 0).mean()
+            print(f"{col}: {mean_val:.3f} ± {std_val:.3f} (positive: {pos_ratio*100:.1f}%)")
+    
+    # Top-k overlap
+    print("\nTop-k Patch Overlap:")
+    for k in [10, 20, 50]:
+        col = f'top{k}_overlap'
+        if col in df_corr.columns:
+            mean_overlap = df_corr[col].mean()
+            std_overlap = df_corr[col].std()
+            print(f"  Top-{k}: {mean_overlap*100:.1f}% ± {std_overlap*100:.1f}%")
+    
+    # Feature alignment
+    if 'mean_feature_alignment' in df_corr.columns:
+        mean_align = df_corr['mean_feature_alignment'].mean()
+        aligned_ratio = (df_corr['mean_feature_alignment'] > 1.0).mean()
+        print(f"\nFeature Alignment:")
+        print(f"  Mean alignment: {mean_align:.3f}")
+        print(f"  Aligned (>1.0): {aligned_ratio*100:.1f}% of images")
+    
+    # Save summary to JSON
+    summary = {
+        'dataset': config['dataset'],
+        'layer': config['layer'],
+        'n_images': len(df_corr),
+        'correlations': {},
+        'top_k_overlap': {},
+        'feature_alignment': {}
+    }
+    
+    for col in corr_cols:
+        if col in df_corr.columns:
+            summary['correlations'][col] = {
+                'mean': float(df_corr[col].mean()),
+                'std': float(df_corr[col].std()),
+                'positive_ratio': float((df_corr[col] > 0).mean())
+            }
+    
+    for k in [10, 20, 50]:
+        col = f'top{k}_overlap'
+        if col in df_corr.columns:
+            summary['top_k_overlap'][f'top_{k}'] = {
+                'mean': float(df_corr[col].mean()),
+                'std': float(df_corr[col].std())
+            }
+    
+    if 'mean_feature_alignment' in df_corr.columns:
+        summary['feature_alignment'] = {
+            'mean': float(df_corr['mean_feature_alignment'].mean()),
+            'std': float(df_corr['mean_feature_alignment'].std()),
+            'aligned_ratio': float((df_corr['mean_feature_alignment'] > 1.0).mean())
+        }
+    
+    import json
+    summary_path = Path(f"data/featuredict_{config['dataset']}/layer_{config['layer']}_correlation_summary.json")
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+    print(f"\nCorrelation summary saved to {summary_path}")
+    
+    return summary
+
+
+def compute_attribution_sae_correlation(
+    raw_attributions: np.ndarray,
+    feature_acts: torch.Tensor,
+    activation_threshold: float = 0.1
+) -> Dict[str, float]:
+    """
+    Compute correlation metrics between attribution values and SAE activations.
+    
+    Args:
+        raw_attributions: Attribution values per patch [196]
+        feature_acts: SAE feature activations [196, d_sae]
+        activation_threshold: Minimum activation to consider feature active
+        
+    Returns:
+        Dictionary of correlation metrics
+    """
+    from scipy.stats import spearmanr, pearsonr
+    
+    # Convert to numpy
+    sae_acts_np = feature_acts.cpu().numpy()
+    
+    # Aggregate SAE activations across features
+    max_acts_per_patch = sae_acts_np.max(axis=1)  # [196]
+    mean_acts_per_patch = sae_acts_np.mean(axis=1)  # [196]
+    active_features_per_patch = (sae_acts_np > activation_threshold).sum(axis=1)
+    
+    metrics = {}
+    
+    # Pearson correlation (linear relationship)
+    try:
+        pearson_max, p_val_max = pearsonr(raw_attributions, max_acts_per_patch)
+        metrics['pearson_max'] = pearson_max
+        metrics['pearson_max_pval'] = p_val_max
+        
+        pearson_mean, p_val_mean = pearsonr(raw_attributions, mean_acts_per_patch)
+        metrics['pearson_mean'] = pearson_mean
+        metrics['pearson_mean_pval'] = p_val_mean
+        
+        # Spearman correlation (monotonic relationship)
+        spearman_max, sp_val_max = spearmanr(raw_attributions, max_acts_per_patch)
+        metrics['spearman_max'] = spearman_max
+        metrics['spearman_max_pval'] = sp_val_max
+        
+        spearman_mean, sp_val_mean = spearmanr(raw_attributions, mean_acts_per_patch)
+        metrics['spearman_mean'] = spearman_mean
+        metrics['spearman_mean_pval'] = sp_val_mean
+        
+        # Correlation with number of active features
+        pearson_count, p_val_count = pearsonr(raw_attributions, active_features_per_patch)
+        metrics['pearson_active_count'] = pearson_count
+        metrics['pearson_active_count_pval'] = p_val_count
+        
+        # Top-k overlap analysis
+        k_values = [10, 20, 50]
+        for k in k_values:
+            # Top-k patches by attribution
+            top_k_attr = np.argsort(raw_attributions)[-k:]
+            # Top-k patches by SAE activation
+            top_k_sae = np.argsort(max_acts_per_patch)[-k:]
+            
+            # Compute overlap
+            overlap = len(set(top_k_attr) & set(top_k_sae))
+            overlap_ratio = overlap / k
+            metrics[f'top{k}_overlap'] = overlap_ratio
+            
+            # Jaccard similarity
+            jaccard = overlap / len(set(top_k_attr) | set(top_k_sae))
+            metrics[f'top{k}_jaccard'] = jaccard
+        
+        # Feature alignment: Check if important features are in highly attributed patches
+        feature_importance = sae_acts_np.max(axis=0)  # Max activation per feature
+        top_features = np.argsort(feature_importance)[-100:]  # Top 100 features
+        
+        alignment_scores = []
+        for feat_idx in top_features[-20:]:  # Top 20 most important features
+            feat_acts = sae_acts_np[:, feat_idx]
+            active_patches = np.where(feat_acts > activation_threshold)[0]
+            
+            if len(active_patches) > 0:
+                # Average attribution of patches where this feature is active
+                avg_attr = raw_attributions[active_patches].mean()
+                overall_avg = raw_attributions.mean()
+                
+                # Relative attribution (> 1 means feature is in highly attributed areas)
+                relative_attr = avg_attr / (overall_avg + 1e-8)
+                alignment_scores.append(relative_attr)
+        
+        if alignment_scores:
+            metrics['mean_feature_alignment'] = np.mean(alignment_scores)
+            metrics['std_feature_alignment'] = np.std(alignment_scores)
+            
+    except Exception as e:
+        print(f"Error computing correlations: {e}")
+    
+    return metrics
+
+
 def main():
     # Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -368,14 +566,37 @@ def main():
     
     # Analyze each image
     feature_occurrences = defaultdict(list)
+    correlation_results = []  # Store correlation analysis results
     
     for image_name in tqdm(image_list, desc="Analyzing images"):
         try:
-            image_features = analyze_image_features(
+            # Get feature activations once
+            feature_acts = get_feature_activations(
                 image_name, 
-                image_data_map[image_name],
                 model, sae, config['layer'], 
                 device, transform
+            )
+            
+            if feature_acts is None:
+                continue
+            
+            # 1. Compute attribution-SAE correlation
+            raw_attrs = image_data_map[image_name]['raw_attributions']
+            corr_metrics = compute_attribution_sae_correlation(
+                raw_attrs, 
+                feature_acts, 
+                activation_threshold=config['activation_threshold']
+            )
+            
+            if corr_metrics:
+                corr_metrics['image'] = image_name
+                corr_metrics['class'] = image_data_map[image_name]['true_label']
+                correlation_results.append(corr_metrics)
+            
+            # 2. Analyze features for SaCo (using same feature_acts)
+            image_features = analyze_image_features(
+                feature_acts,
+                image_data_map[image_name]
             )
             
             if image_features:
@@ -502,6 +723,9 @@ def main():
     save_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(results, save_path)
     print(f"\nResults saved to {save_path}")
+    
+    # Save and summarize correlation results
+    save_correlation_results(correlation_results, config)
 
 
 if __name__ == "__main__":

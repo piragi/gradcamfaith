@@ -254,45 +254,46 @@ def transmm_prisma(
                 
                 # ===== RANDOM BASELINE BOOST =====
                 if "saco_dict" in resources:
-                    # Toggle between random baseline and SACO-based method
-                    use_random_baseline = False  # Set to False to use SACO method
+                    # Toggle between different methods: 'saco', 'topk_activation', 'random'
+                    boost_method = 'saco'  # Options: 'saco', 'topk_activation', 'random'
                     
-                    if use_random_baseline:
+                    # Always use the unified function with different selection methods
+                    saco_results = resources["saco_dict"]
+                    
+                    if boost_method == 'random':
                         print(f"Using RANDOM BASELINE boosting for layer {i}")
-                        boost_mask, selected_feat_ids = build_boost_mask_random(
-                            sae_codes=codes_for_layer,
-                            device=device,
-                            suppress_strength=0.2,  # Match improved method
-                            boost_strength=5.0,      # Match improved method
-                            top_k_suppress=5,       # Match improved method (max_suppress)
-                            top_k_boost=15,          # Match improved method (max_boost)
-                            min_activation=0.05,     # Match improved method
-                            seed=42,  # For reproducibility
-                            debug=False
-                        )
+                    elif boost_method == 'topk_activation':
+                        print(f"Using TOP-K ACTIVATION boosting for layer {i}")
                     else:
-                        # ===== IMPROVED FEATURE-BASED BOOST =====
                         print(f"Using SACO-BASED boosting for layer {i}")
-                        saco_results = resources["saco_dict"]
-                        boost_mask, selected_feat_ids = build_boost_mask_improved(
-                            sae_codes=codes_for_layer,
-                            saco_results=saco_results,
-                            predicted_class=predicted_class_idx,
-                            idx_to_class=idx_to_class,
-                            device=device,
-                            debug=False
-                        )
+                    
+                    boost_mask, selected_feat_ids = build_boost_mask_improved(
+                        sae_codes=codes_for_layer,
+                        saco_results=saco_results,
+                        predicted_class=predicted_class_idx,
+                        idx_to_class=idx_to_class,
+                        device=device,
+                        selection_method=boost_method,  # Pass the method directly
+                        max_suppress=5 if boost_method == 'random' else 0,  # Only suppress for random
+                        max_boost=15 if boost_method == 'random' else 10,  # More boost for random
+                        random_seed=42,  # For reproducibility
+                        debug=False
+                    )
                     
                 else:
                     print(f"No SaCo dict found for layer {i}, using random baseline")
-                    boost_mask, selected_feat_ids = build_boost_mask_random(
+                    # Create dummy saco_results for the function signature
+                    dummy_saco = {'results_by_type': {}}
+                    boost_mask, selected_feat_ids = build_boost_mask_improved(
                         sae_codes=codes_for_layer,
+                        saco_results=dummy_saco,
+                        predicted_class=predicted_class_idx,
+                        idx_to_class=idx_to_class,
                         device=device,
-                        suppress_strength=0.5,
-                        boost_strength=2.0,
-                        top_k_suppress=10,
-                        top_k_boost=8,
-                        min_activation=0.05,
+                        selection_method='random',
+                        max_suppress=5,
+                        max_boost=10,
+                        random_seed=42,
                         debug=False
                     )
 
@@ -333,107 +334,6 @@ def transmm_prisma(
     gc.collect()
 
     return (prediction_result_dict, attribution_pos_np, raw_patch_map)
-
-
-
-
-@torch.no_grad()
-def build_boost_mask_random(
-    sae_codes: torch.Tensor,
-    device: torch.device,
-    *,
-    suppress_strength: float = 0.5,
-    boost_strength: float = 2.0,
-    min_activation: float = 0.05,
-    top_k_suppress: int = 10,
-    top_k_boost: int = 8,
-    seed: Optional[int] = None,
-    debug: bool = False
-) -> Tuple[torch.Tensor, List[int]]:
-    """
-    Random feature boosting/suppression for baseline comparison.
-    Randomly selects features that are active in the current sample.
-    
-    Args:
-        sae_codes: SAE feature codes [1+T, k]
-        device: Device to run on
-        suppress_strength: Suppression strength (< 1.0)
-        boost_strength: Boost strength (> 1.0)
-        min_activation: Minimum activation threshold
-        top_k_suppress: Number of features to suppress
-        top_k_boost: Number of features to boost
-        seed: Random seed for reproducibility
-        debug: Print debug information
-    
-    Returns:
-        boost_mask: Multiplicative mask for patches
-        selected_features: List of selected feature IDs
-    """
-    codes = sae_codes[0, 1:].to(device)  # Remove CLS token
-    n_patches, n_feats = codes.shape
-    boost_mask = torch.ones(n_patches, device=device)
-    selected_features = []
-    
-    # Set random seed if provided
-    if seed is not None:
-        torch.manual_seed(seed)
-        import random
-        random.seed(seed)
-    
-    # Vectorized: Find all active features in this sample
-    active_mask = (codes > min_activation).any(dim=0)  # [n_feats]
-    active_features = active_mask.nonzero(as_tuple=True)[0]  # Tensor of active feature indices
-    
-    if len(active_features) == 0:
-        if debug:
-            print("No active features found for random boosting")
-        return boost_mask, selected_features
-    
-    # Randomly sample features for suppression and boosting (vectorized)
-    n_suppress = min(top_k_suppress, len(active_features))
-    n_boost = min(top_k_boost, len(active_features))
-    n_total = min(n_suppress + n_boost, len(active_features))
-    
-    if n_total > 0:
-        # Single random permutation for both suppress and boost
-        perm = torch.randperm(len(active_features))[:n_total]
-        selected_feat_indices = active_features[perm]
-        
-        # Split into suppress and boost
-        suppress_indices = selected_feat_indices[:n_suppress] if n_suppress > 0 else torch.tensor([], dtype=torch.long, device=device)
-        boost_indices = selected_feat_indices[n_suppress:n_suppress + n_boost] if n_boost > 0 else torch.tensor([], dtype=torch.long, device=device)
-        
-        # Vectorized suppression
-        if len(suppress_indices) > 0:
-            suppress_activations = codes[:, suppress_indices]  # [n_patches, n_suppress]
-            suppress_masks = suppress_strength + (1.0 - suppress_strength) * (1.0 - suppress_activations.clamp(0, 1))
-            boost_mask *= suppress_masks.prod(dim=1)  # Multiply all suppression effects
-            
-            if debug:
-                for i, feat_id in enumerate(suppress_indices):
-                    n_active = (suppress_activations[:, i] > min_activation).sum().item()
-                    print(f"  SUPPRESS feature {feat_id.item()} (random): active_patches={n_active}")
-        
-        # Vectorized boosting  
-        if len(boost_indices) > 0:
-            boost_activations = codes[:, boost_indices]  # [n_patches, n_boost]
-            boost_masks = 1.0 + boost_activations.clamp(0, 1) * (boost_strength - 1.0)
-            boost_mask *= boost_masks.prod(dim=1)  # Multiply all boost effects
-            
-            if debug:
-                for i, feat_id in enumerate(boost_indices):
-                    n_active = (boost_activations[:, i] > min_activation).sum().item()
-                    print(f"  BOOST feature {feat_id.item()} (random): active_patches={n_active}")
-        
-        # Convert to list for return value
-        selected_features = selected_feat_indices.cpu().tolist()
-    
-    if debug:
-        total_active = len(active_features)
-        print(f"Random mask: {len(selected_features)} total features selected "
-              f"(from {total_active} active features)")
-    
-    return boost_mask, selected_features
 
 
 def generate_attribution_prisma(
