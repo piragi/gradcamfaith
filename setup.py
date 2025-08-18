@@ -147,6 +147,45 @@ def download_covidquex(data_dir: Path, models_dir: Path) -> None:
 
     output_path = cq_models_dir / model_info["name"]
     download_from_gdrive(model_info["id"], output_path, model_info["description"])
+    
+    # Check if the downloaded model is a tar.gz archive and extract if needed
+    if output_path.exists():
+        import shutil
+        
+        # Check if file is a tar/gzip archive
+        try:
+            with open(output_path, 'rb') as f:
+                magic = f.read(2)
+                if magic == b'\x1f\x8b':  # gzip magic number - it's a tar.gz file
+                    print(f"Extracting compressed model archive: {output_path}")
+                    
+                    # First extract the tar.gz file
+                    with tarfile.open(output_path, 'r:gz') as tar:
+                        tar.extractall(cq_models_dir)
+                    
+                    # Now extract model_best.pth.tar
+                    model_tar_path = cq_models_dir / "results_model" / "model_best.pth.tar"
+                    if model_tar_path.exists():
+                        print(f"Extracting model from: {model_tar_path}")
+                        
+                        # Extract the actual model from the .pth.tar file
+                        # The .pth.tar file contains the actual PyTorch model state dict
+                        final_model_path = cq_models_dir / "covidquex_model.pth"
+                        
+                        # Copy the .pth.tar file directly as the model
+                        # (PyTorch can load .pth.tar files directly)
+                        shutil.copy(str(model_tar_path), str(final_model_path))
+                        print(f"Model copied to: {final_model_path}")
+                        
+                        # Clean up - remove the original tar.gz file and extracted directories
+                        output_path.unlink()
+                        results_dir = cq_models_dir / "results_model"
+                        if results_dir.exists():
+                            shutil.rmtree(results_dir)
+                    else:
+                        print(f"Warning: Expected model file not found at {model_tar_path}")
+        except Exception as e:
+            print(f"Warning: Could not check/extract model file: {e}")
 
 
 def print_summary(data_dir: Path, models_dir: Path) -> None:
