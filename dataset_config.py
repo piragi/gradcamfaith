@@ -6,39 +6,40 @@ for dataset-specific settings like class names, transforms, and model configurat
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Any, Optional
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 import torchvision.transforms as transforms
 
 
 @dataclass
 class DatasetConfig:
     """Configuration for a specific dataset."""
-    
+
     name: str  # Dataset identifier
     num_classes: int  # Number of classes
     class_names: List[str]  # Original class names (for display/logging)
     class_to_idx: Dict[str, int]  # Mapping from original names to indices
     idx_to_class: Dict[int, str]  # Reverse mapping
-    
+
     # Model configuration
     model_checkpoint: str  # Path to the trained model
-    
+
     # Data paths (set during runtime)
     prepared_data_path: Optional[Path] = None
-    
+
     # Transform configurations
     img_size: int = 224
     normalize_mean: List[float] = None
     normalize_std: List[float] = None
-    
+
     def __post_init__(self):
         """Set default normalization values if not provided."""
         if self.normalize_mean is None:
             self.normalize_mean = [0.485, 0.456, 0.406]  # ImageNet defaults
         if self.normalize_std is None:
             self.normalize_std = [0.229, 0.224, 0.225]  # ImageNet defaults
-    
+
     def get_transforms(self, split: str = 'test'):
         """Get transforms for a specific split (train/val/test/dev)."""
         if split == 'train':
@@ -64,7 +65,7 @@ COVIDQUEX_CONFIG = DatasetConfig(
     class_names=["COVID-19", "Non-COVID", "Normal"],
     class_to_idx={
         "COVID-19": 0,
-        "Non-COVID": 1, 
+        "Non-COVID": 1,
         "Normal": 2
     },
     idx_to_class={
@@ -72,7 +73,7 @@ COVIDQUEX_CONFIG = DatasetConfig(
         1: "Non-COVID",
         2: "Normal"
     },
-    model_checkpoint="./model/model_best.pth.tar"
+    model_checkpoint="./models/covidquex/covidquex_model.pth"
 )
 
 # HyperKvasir Dataset Configuration
@@ -96,9 +97,8 @@ HYPERKVASIR_CONFIG = DatasetConfig(
         4: "retroflex-stomach",
         5: "z-line"
     },
-    model_checkpoint="./model/vit_b-ImageNet_class_init-frozen_False-dataset_Hyperkvasir_anatomical.pth"
+    model_checkpoint="./models/hyperkvasir/hyperkvasir_vit_model.pth"
 )
-
 
 # Dataset registry for easy access
 DATASET_CONFIGS = {
@@ -122,5 +122,6 @@ def get_dataset_config(dataset_name: str) -> DatasetConfig:
     """
     if dataset_name.lower() not in DATASET_CONFIGS:
         raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(DATASET_CONFIGS.keys())}")
-    
+
     return DATASET_CONFIGS[dataset_name.lower()]
+
