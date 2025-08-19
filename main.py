@@ -67,7 +67,7 @@ def main():
             
             # Run pipeline
             try:
-                results = run_unified_pipeline(
+                results, saco_results = run_unified_pipeline(
                     config=pipeline_config,
                     dataset_name=dataset_name,
                     source_data_path=source_path,
@@ -75,6 +75,11 @@ def main():
                     force_prepare=False
                 )
                 print(f"Completed layer {layer} - processed {len(results)} images")
+                
+                # Update config with full SaCo results and save
+                config_dict['saco_results'] = saco_results
+                with open(exp_output_dir / 'results.json', 'w') as f:
+                    json.dump(config_dict, f, indent=2)
                 
             except Exception as e:
                 print(f"Error with layer {layer}: {e}")

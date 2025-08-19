@@ -497,10 +497,33 @@ def run_unified_pipeline(
     
     # Run attribution analysis
     print("Running attribution analysis...")
-    run_binned_attribution_analysis(config, model, results, device, n_bins=49)
+    saco_analysis = run_binned_attribution_analysis(config, model, results, device, n_bins=49)
+    
+    # Extract SaCo scores (overall and per-class)
+    saco_results = {}
+    if saco_analysis and "faithfulness_correctness" in saco_analysis:
+        fc_df = saco_analysis["faithfulness_correctness"]
+        
+        # Overall statistics
+        saco_results['mean'] = fc_df["saco_score"].mean()
+        saco_results['std'] = fc_df["saco_score"].std()
+        saco_results['n_samples'] = len(fc_df)
+        
+        # Per-class breakdown
+        per_class_stats = fc_df.groupby('true_class')['saco_score'].agg(['mean', 'std', 'count'])
+        saco_results['per_class'] = per_class_stats.to_dict('index')
+        
+        # Also include correctness breakdown
+        correctness_stats = fc_df.groupby('is_correct')['saco_score'].agg(['mean', 'std', 'count'])
+        saco_results['by_correctness'] = correctness_stats.to_dict('index')
+        
+        print(f"Mean SaCo score: {saco_results['mean']:.4f} (std={saco_results['std']:.4f})")
+        print(f"Per-class SaCo scores:")
+        for class_name, stats in saco_results['per_class'].items():
+            print(f"  {class_name}: {stats['mean']:.4f} (std={stats['std']:.4f}, n={stats['count']})")
     
     print("\nPipeline complete!")
-    return results
+    return results, saco_results
 
 
 # Example usage
