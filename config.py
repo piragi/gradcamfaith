@@ -75,7 +75,7 @@ class FileConfig:
             "perturbed": self.perturbed_dir,
             "masks": self.mask_dir
         }
-    
+
     def set_dataset(self, dataset_name: str):
         """Update the dataset name and base pipeline directory."""
         self.dataset_name = dataset_name
@@ -86,38 +86,38 @@ class FileConfig:
 class BoostingConfig:
     """Configuration for SAE-based feature boosting/suppression."""
     # Strength parameters
-    boost_strength: float = 2.5
+    boost_strength: float = 10.
     suppress_strength: float = 0.2
-    
+
     # Selection limits
-    max_boost: int = 10
-    max_suppress: int = 0
-    
+    max_boost: int = 15
+    max_suppress: int = 20
+
     # Frequency filtering
     min_occurrences: int = 1
     max_occurrences: int = 10000000
-    
+
     # Ratio thresholds
-    min_log_ratio: float = 1.5
-    
+    min_log_ratio: float = 1.0
+
     # Activation threshold
     min_activation: float = 0.1
-    
+
     # Top-k filtering
     topk_active: Optional[int] = None
-    
+
     # Weighting strategy
     use_balanced_score: bool = True
-    
+
     # Selection method: 'saco', 'topk_activation', 'random'
     selection_method: str = 'saco'
-    
+
     # Class-aware corrections
     class_aware: bool = False
-    
+
     # Random seed (for reproducibility)
     random_seed: int = 42
-    
+
     # SAE layers to apply steering on
     steering_layers: List[int] = field(default_factory=lambda: [6])
 
@@ -143,7 +143,7 @@ class ClassificationConfig:
 
     # Device configuration
     device: Optional[str] = None  # None will use CUDA if available
-    
+
     # Boosting configuration
     boosting: BoostingConfig = field(default_factory=BoostingConfig)
 
