@@ -83,6 +83,46 @@ class FileConfig:
 
 
 @dataclass
+class BoostingConfig:
+    """Configuration for SAE-based feature boosting/suppression."""
+    # Strength parameters
+    boost_strength: float = 2.5
+    suppress_strength: float = 0.2
+    
+    # Selection limits
+    max_boost: int = 10
+    max_suppress: int = 0
+    
+    # Frequency filtering
+    min_occurrences: int = 1
+    max_occurrences: int = 10000000
+    
+    # Ratio thresholds
+    min_log_ratio: float = 1.5
+    
+    # Activation threshold
+    min_activation: float = 0.1
+    
+    # Top-k filtering
+    topk_active: Optional[int] = None
+    
+    # Weighting strategy
+    use_balanced_score: bool = True
+    
+    # Selection method: 'saco', 'topk_activation', 'random'
+    selection_method: str = 'saco'
+    
+    # Class-aware corrections
+    class_aware: bool = False
+    
+    # Random seed (for reproducibility)
+    random_seed: int = 42
+    
+    # SAE layers to apply steering on
+    steering_layers: List[int] = field(default_factory=lambda: [6])
+
+
+@dataclass
 class ClassificationConfig:
     """Configuration for image classification and explanation."""
     # Preprocessing parameters
@@ -103,6 +143,9 @@ class ClassificationConfig:
 
     # Device configuration
     device: Optional[str] = None  # None will use CUDA if available
+    
+    # Boosting configuration
+    boosting: BoostingConfig = field(default_factory=BoostingConfig)
 
 
 @dataclass

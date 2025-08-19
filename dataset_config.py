@@ -73,7 +73,7 @@ COVIDQUEX_CONFIG = DatasetConfig(
         1: "Non-COVID",
         2: "Normal"
     },
-    model_checkpoint="./models/covidquex/covidquex_model.pth"
+    model_checkpoint="./scratch/models/covidquex/covidquex_model.pth"
 )
 
 # HyperKvasir Dataset Configuration

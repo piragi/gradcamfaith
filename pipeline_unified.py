@@ -447,9 +447,9 @@ def run_unified_pipeline(
     model = load_model_for_dataset(dataset_config, device)
     
     # Load steering resources if needed
-    steering_layers = getattr(config.classify, 'steering_layers', [6])
-    steering_resources = load_steering_resources(steering_layers)
-    print("Steering resources loaded")
+    steering_layers = config.classify.boosting.steering_layers
+    steering_resources = load_steering_resources(steering_layers, dataset_name=dataset_name)
+    print(f"Steering resources loaded for {dataset_name} layers: {steering_layers}")
     
     # Process images from the specified split (mode)
     split_to_use = config.file.current_mode if config.file.current_mode in ['train', 'val', 'test', 'dev'] else 'test'

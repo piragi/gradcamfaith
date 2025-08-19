@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from scipy.stats import pearsonr, spearmanr
 from tqdm import tqdm
 from vit_prisma.sae import SparseAutoencoder
 
@@ -26,21 +25,15 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 
 # ============ CONFIG ============
 config = {
-    'dataset': 'covidquex',  # 'covidquex' or 'hyperkvasir'
-    'layer': 6,  # Which layer's SAE to analyze
+    'datasets': ['covidquex', 'hyperkvasir'],  # List of datasets to analyze
+    'layers': [6],  # List of layers to analyze
     'n_images': None,  # None for all, or specific number
     'activation_threshold': 0.1,  # Min activation to consider feature active
     'min_patches': 1,  # Min patches per feature
     'min_occurrences': 1,  # Min times feature must appear across dataset
-    'max_features_per_image': 512,  # Process only top-k features per image (huge speedup!)
-
-    # NEW: Validation settings
-    'run_validation': True,
-    'n_validation_images': 100,  # Number of images to validate
-    'n_validation_features': 512,  # Top-k features per image to directly ablate
+    'max_features_per_image': 512,  # Process only top-k features per image
 
     # Path configuration
-    'results_dir': './data/covidquex_unified/results/train',  # Where SaCo results are stored
     'sae_base_dir': 'data',  # Base directory for SAE models (data/sae_hyperkvasir/...)
     'image_base_dir': 'data',  # Base directory for images (data/hyperkvasir_unified/...)
     'split': 'train',  # Which split to analyze: 'train', 'val', or 'test'
@@ -145,7 +138,21 @@ def load_saco_data(dataset_name, results_dir):
         # Create patch-level data: each patch gets its bin's impact but individual attribution
         patch_data = {}
 
-        # First, create bin_data for reference
+        # First, collect all impacts for normalization
+        all_impacts = [abs(row['confidence_delta']) for _, row in group.iterrows()]
+        impact_min, impact_max = min(all_impacts), max(all_impacts)
+
+        # Create impact normalization function
+        if impact_max - impact_min > epsilon:
+
+            def normalize_impact(raw_impact):
+                return (abs(raw_impact) - impact_min) / (impact_max - impact_min) + epsilon
+        else:
+            # All impacts are similar, assign equal normalized value
+            def normalize_impact(raw_impact):
+                return 0.5 + epsilon
+
+        # Create bin_data for reference
         bin_data = {}
         for _, row in group.iterrows():
             bin_id = row['bin_id']
@@ -161,27 +168,28 @@ def load_saco_data(dataset_name, results_dir):
             # Now calculate log_ratio for each patch individually
             # Use signed impact to properly identify under vs over-attributed
             impact = row['confidence_delta']  # Positive = helps classification
+            norm_impact = normalize_impact(impact)  # Normalized impact
 
             for patch_id in patch_indices:
                 # Use individual patch's normalized attribution
                 patch_norm_attr = norm_attrs[patch_id]
 
-                # Calculate log ratio considering impact direction
-                if abs(impact) < epsilon:
-                    # Near-zero impact
+                # Calculate log ratio with BOTH normalized values
+                if norm_impact < epsilon:
+                    # Near-zero normalized impact
                     log_ratio = -5.0 if patch_norm_attr > 0.1 else 0.0
-                elif patch_norm_attr > epsilon:
-                    # Normal case: log(|impact|/attr)
-                    ratio = abs(impact) / patch_norm_attr
+                elif patch_norm_attr < epsilon:
+                    # Near-zero normalized attribution but significant impact
+                    log_ratio = 5.0
+                else:
+                    # Both are meaningful, compute ratio
+                    ratio = norm_impact / patch_norm_attr
                     log_ratio = np.log(ratio)
-                    # Positive impact with low attribution = under-attributed (positive log ratio)
-                    # Negative impact or low impact = over-attributed (negative log ratio)
+                    # Adjust sign based on original impact direction
                     if impact < 0:
                         log_ratio = -log_ratio
-                else:
-                    log_ratio = 0.0
 
-                # Clamp extreme values
+                # Clamp extreme values (should be less common now)
                 if not np.isfinite(log_ratio) or abs(log_ratio) > 10:
                     log_ratio = np.clip(log_ratio, -10, 10) if np.isfinite(log_ratio) else 0.0
 
@@ -189,7 +197,8 @@ def load_saco_data(dataset_name, results_dir):
                     'log_ratio': log_ratio,
                     'attribution': raw_attrs[patch_id],
                     'norm_attribution': patch_norm_attr,
-                    'impact': impact,
+                    'impact': impact,  # Keep raw impact for reference
+                    'norm_impact': norm_impact,  # Add normalized impact
                     'bin_id': bin_id
                 }
 
@@ -260,13 +269,13 @@ def save_feature_dict(feature_dict, dataset_name, layer_idx):
     print(f"Saved feature dict to {dict_path}")
 
 
-def load_and_process_image(image_path, transform, device):
+def load_and_process_image(image_path, transform, device, dataset_name):
     """Load and preprocess an image - reusable function."""
     if Path(image_path).exists():
         img = Image.open(image_path).convert('RGB')
     else:
         # Try in data directory with configured paths
-        img_path = Path(config['image_base_dir']) / f"{config['dataset']}_unified" / config['split'] / image_path
+        img_path = Path(config['image_base_dir']) / f"{dataset_name}_unified" / config['split'] / image_path
         if not img_path.exists():
             return None
         img = Image.open(img_path).convert('RGB')
@@ -288,9 +297,9 @@ def get_sae_encoding(img_tensor, model, sae, layer_idx):
     return codes, resid
 
 
-def get_feature_activations(image_path, model, sae, layer_idx, device, transform):
+def get_feature_activations(image_path, model, sae, layer_idx, device, transform, dataset_name):
     """Get SAE feature activations for a single image."""
-    img_tensor = load_and_process_image(image_path, transform, device)
+    img_tensor = load_and_process_image(image_path, transform, device, dataset_name)
     if img_tensor is None:
         return None
 
@@ -302,544 +311,203 @@ def get_feature_activations(image_path, model, sae, layer_idx, device, transform
     return feature_acts
 
 
-def analyze_image_features(feature_acts, image_data, compute_pure_impact=True):
+def get_batch_feature_activations(image_paths, model, sae, layer_idx, device, transform, dataset_name, batch_size=8):
+    """Get SAE feature activations for a batch of images."""
+    valid_images = []
+    valid_paths = []
+    
+    # Load and validate images
+    for image_path in image_paths:
+        img_tensor = load_and_process_image(image_path, transform, device, dataset_name)
+        if img_tensor is not None:
+            valid_images.append(img_tensor)
+            valid_paths.append(image_path)
+    
+    if not valid_images:
+        return {}
+    
+    # Process in batches
+    all_feature_acts = {}
+    
+    for i in range(0, len(valid_images), batch_size):
+        batch_imgs = valid_images[i:i+batch_size]
+        batch_paths = valid_paths[i:i+batch_size]
+        
+        # Stack into batch tensor
+        batch_tensor = torch.cat(batch_imgs, dim=0)  # [batch, 3, 224, 224]
+        
+        with torch.no_grad():
+            resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
+            _, cache = model.run_with_cache(batch_tensor, names_filter=[resid_hook_name])
+            resid = cache[resid_hook_name]  # [batch, 197, 768]
+            
+            # Get SAE features using encode method
+            _, codes = sae.encode(resid)  # codes shape: [batch, 197, d_sae]
+            
+            # Process each image in batch
+            for j, path in enumerate(batch_paths):
+                # Remove CLS token
+                feature_acts = codes[j, 1:]  # [196, d_sae] - patches only, no CLS
+                all_feature_acts[path] = feature_acts
+    
+    return all_feature_acts
+
+
+def analyze_image_features(feature_acts, image_data):
     """
     Analyze SAE features for a single image using pre-computed feature activations.
-    Now includes both attribution-based and pure impact analysis.
+    Vectorized version for better performance.
     """
     if feature_acts is None:
         return None
 
-    # Analyze features per patch - OPTIMIZED VERSION
     feature_analysis = {}
-    patch_data = image_data['patch_data']  # Use patch-level data
-
-    # OPTIMIZATION: Process only top-k most active features instead of all 49k
-    # Get maximum activation per feature across all patches
-    max_acts_per_feature = feature_acts.max(dim=0).values
-
-    # Get top-k features (much faster than checking all 49k)
-    k = min(config['max_features_per_image'], feature_acts.shape[1])  # Process only top-k features per image
-    top_values, top_indices = torch.topk(max_acts_per_feature, k=k)
-
-    # Filter by threshold
-    threshold_mask = top_values > config['activation_threshold']
+    patch_data = image_data['patch_data']
+    
+    # Pre-compute patch data as tensors for vectorized operations
+    n_patches = 196
+    log_ratios_tensor = torch.zeros(n_patches, device=feature_acts.device)
+    impacts_tensor = torch.zeros(n_patches, device=feature_acts.device)
+    valid_mask = torch.zeros(n_patches, dtype=torch.bool, device=feature_acts.device)
+    
+    for patch_id, data in patch_data.items():
+        if patch_id < n_patches:  # Safety check
+            log_ratios_tensor[patch_id] = float(data['log_ratio'])
+            impacts_tensor[patch_id] = float(data['impact'])
+            valid_mask[patch_id] = True
+    
+    # Get top-k features based on TOTAL activation across all patches
+    # Sum the SAE activations across all 196 patches to find most active features overall
+    total_activation_per_feature = feature_acts.sum(dim=0)  # [d_sae]
+    k = min(config['max_features_per_image'], feature_acts.shape[1])
+    
+    # Select top-k features by total activation
+    top_total_acts, top_indices = torch.topk(total_activation_per_feature, k=k)
+    
+    # Optional: filter by threshold (checking if max activation in any patch > threshold)
+    # This ensures features have at least one meaningfully active patch
+    max_acts = feature_acts[:, top_indices].max(dim=0).values
+    threshold_mask = max_acts > config['activation_threshold']
     active_features = top_indices[threshold_mask]
-
-    for feat_idx in active_features:
-        feat_activations = feature_acts[:, feat_idx]
-        active_patches = (feat_activations > config['activation_threshold']).nonzero(as_tuple=True)[0]
-
-        if len(active_patches) < config['min_patches']:
+    
+    if len(active_features) == 0:
+        return feature_analysis
+    
+    # Process all active features at once
+    threshold = config['activation_threshold']
+    min_patches = config['min_patches']
+    
+    # Get activations for all active features at once
+    active_feat_acts = feature_acts[:, active_features]  # [196, n_active_features]
+    
+    # Create masks for active patches per feature
+    active_masks = active_feat_acts > threshold  # [196, n_active_features]
+    
+    # Process each feature
+    for i, feat_idx in enumerate(active_features):
+        feat_mask = active_masks[:, i]  # [196]
+        combined_mask = feat_mask & valid_mask  # Only patches that are active AND have data
+        
+        n_active = combined_mask.sum().item()
+        if n_active < min_patches:
             continue
-
-        # Collect data for active patches
-        log_ratios = []
-        impacts = []
-        activation_weighted_impacts = []
-
-        for patch_idx in active_patches:
-            patch_id = patch_idx.item()
-
-            if patch_id in patch_data:
-                # Attribution-based analysis
-                log_ratios.append(patch_data[patch_id]['log_ratio'])
-
-                # Pure impact analysis
-                if compute_pure_impact:
-                    actual_impact = patch_data[patch_id]['impact']  # confidence_delta
-                    feat_strength = feat_activations[patch_idx].item()
-
-                    impacts.append(actual_impact)
-                    activation_weighted_impacts.append(actual_impact * feat_strength)
-
-        if log_ratios:
-            # Calculate feature strength as mean of active patches
-            feature_strength = feat_activations[active_patches].mean().item()
-            total_activation = feat_activations[active_patches].sum().item()
-
-            feature_analysis[feat_idx.item()] = {
-                # Attribution-based metrics
-                'mean_log_ratio': np.mean(log_ratios),
-                'sum_log_ratio': np.sum(log_ratios),  # Important for aggregation
-                'std_log_ratio': np.std(log_ratios) if len(log_ratios) > 1 else 0,
-
-                # Pure impact metrics
-                'mean_impact': np.mean(impacts) if impacts else None,
-                'weighted_impact':
-                np.sum(activation_weighted_impacts) / total_activation if total_activation > 0 else None,
-                'std_impact': np.std(impacts) if len(impacts) > 1 else 0,
-                'max_impact': np.max(np.abs(impacts)) if impacts else None,
-
-                # Common metrics
-                'n_active_patches': len(active_patches),
-                'feature_strength': feature_strength,
-                'mean_activation': feature_strength,  # Same as feature_strength
-                'max_activation': feat_activations[active_patches].max().item()
-            }
-
+        
+        # Get activations for this feature
+        feat_acts = active_feat_acts[:, i]  # [196]
+        active_feat_acts_masked = feat_acts[combined_mask]
+        
+        # Vectorized computation of metrics
+        active_log_ratios = log_ratios_tensor[combined_mask]
+        active_impacts = impacts_tensor[combined_mask]
+        
+        # Compute weighted impacts
+        activation_weights = active_feat_acts_masked
+        weighted_impacts = active_impacts * activation_weights
+        total_activation = activation_weights.sum().item()
+        
+        feature_analysis[feat_idx.item()] = {
+            # Attribution-based metrics
+            'mean_log_ratio': active_log_ratios.mean().item(),
+            'sum_log_ratio': active_log_ratios.sum().item(),
+            'std_log_ratio': active_log_ratios.std().item() if n_active > 1 else 0,
+            
+            # Pure impact metrics
+            'mean_impact': active_impacts.mean().item(),
+            'weighted_impact': weighted_impacts.sum().item() / total_activation if total_activation > 0 else None,
+            'std_impact': active_impacts.std().item() if n_active > 1 else 0,
+            'max_impact': active_impacts.abs().max().item(),
+            
+            # Common metrics
+            'n_active_patches': n_active,
+            'feature_strength': active_feat_acts_masked.mean().item(),
+            'mean_activation': active_feat_acts_masked.mean().item(),
+            'max_activation': active_feat_acts_masked.max().item()
+        }
+    
     return feature_analysis
 
 
-def batch_direct_feature_ablation(image_path, model, sae, feature_indices, layer_idx, device, transform, batch_size=64):
-    """
-    Directly ablate multiple SAE features and measure their individual impacts.
-    Uses batched processing for efficiency.
-    
-    Args:
-        image_path: Path to image
-        model: The model
-        sae: Sparse autoencoder
-        feature_indices: List of feature indices to ablate
-        layer_idx: Layer where SAE operates
-        device: torch device
-        transform: Image transformation
-    
-    Returns:
-        Dictionary mapping feature_idx to impact on classification
-    """
-    # Load image once
-    img_tensor = load_and_process_image(image_path, transform, device)
-    if img_tensor is None:
-        return {}
-
-    with torch.no_grad():
-        # Get baseline prediction
-        baseline_output = model(img_tensor)
-        baseline_probs = torch.softmax(baseline_output, dim=-1)
-        predicted_class = baseline_output.argmax(dim=-1)
-        baseline_conf = baseline_probs[0, predicted_class].item()
-
-        # Get SAE encoding once
-        codes, resid = get_sae_encoding(img_tensor, model, sae, layer_idx)
-
-        # Process features in batches for efficiency
-        impacts = {}
-
-        for i in range(0, len(feature_indices), batch_size):
-            batch_features = feature_indices[i:i + batch_size]
-            batch_codes = []
-
-            # Create ablated versions for this batch
-            for feat_idx in batch_features:
-                codes_ablated = codes.clone()
-                codes_ablated[:, :, feat_idx] = 0
-                batch_codes.append(codes_ablated)
-
-            # Stack batch
-            batch_codes = torch.cat(batch_codes, dim=0)  # [batch_size, 197, d_sae]
-
-            # Decode all at once
-            batch_reconstructed = sae.decode(batch_codes)
-
-            # Process each ablated version
-            for j, feat_idx in enumerate(batch_features):
-                resid_reconstructed = batch_reconstructed[j:j + 1]
-
-                # Forward pass from this layer using hook
-                def hook_fn(module, input, output):
-                    return resid_reconstructed
-
-                handle = model.blocks[layer_idx].register_forward_hook(hook_fn)
-                try:
-                    ablated_output = model(img_tensor)
-                    ablated_probs = torch.softmax(ablated_output, dim=-1)
-                    ablated_conf = ablated_probs[0, predicted_class].item()
-                finally:
-                    handle.remove()
-
-                # Impact is the change in confidence
-                impacts[feat_idx] = baseline_conf - ablated_conf
-
-    return impacts
-
-
-def validate_bin_method(image_list, image_data_map, model, sae, layer_idx, device, transform, config):
-    """
-    Validate bin-based feature importance against direct feature ablation.
-    Uses batched processing for efficiency.
-    """
-    n_validation = config.get('n_validation_images', 10)
-    n_features = config.get('n_validation_features', 256)
-
-    print(f"\n{'='*60}")
-    print(f"VALIDATION: Comparing bin-based vs. direct feature ablation")
-    print(f"{'='*60}")
-    print(f"Images to validate: {n_validation}")
-    print(f"Features per image: {n_features}")
-
-    validation_results = []
-    validation_images = image_list[:n_validation]
-
-    for img_idx, image_name in enumerate(validation_images):
-        print(f"\n[{img_idx+1}/{n_validation}] Processing {Path(image_name).name}")
-
-        # Get feature activations
-        feature_acts = get_feature_activations(image_name, model, sae, layer_idx, device, transform)
-
-        if feature_acts is None:
-            print(f"  WARNING: Could not get activations, skipping")
-            continue
-
-        # Get feature analysis with pure impact
-        image_features = analyze_image_features(feature_acts, image_data_map[image_name], compute_pure_impact=True)
-
-        if not image_features or len(image_features) < 10:
-            print(f"  WARNING: Not enough features ({len(image_features)}), skipping")
-            continue
-
-        # Select top features by absolute impact
-        top_features = sorted(
-            image_features.items(), key=lambda x: abs(x[1]['mean_impact']) if x[1]['mean_impact'] else 0, reverse=True
-        )[:n_features]
-
-        feature_indices = [f[0] for f in top_features]
-        bin_estimates = {f[0]: f[1]['mean_impact'] for f in top_features}
-
-        print(f"  Selected {len(feature_indices)} features for validation")
-        print(f"  Performing batched ablation...")
-
-        # Batch direct ablation
-        direct_impacts = batch_direct_feature_ablation(
-            image_name, model, sae, feature_indices, layer_idx, device, transform
-        )
-
-        print(f"  Successfully ablated {len(direct_impacts)} features")
-
-        # Compute correlation
-        if len(direct_impacts) >= 10:
-            features = list(direct_impacts.keys())
-            direct_vals = np.array([direct_impacts[f] for f in features])
-            bin_vals = np.array([bin_estimates[f] for f in features])
-
-            # Remove any None values
-            valid_mask = ~np.isnan(bin_vals)
-            if valid_mask.sum() < 10:
-                print(f"  WARNING: Not enough valid comparisons")
-                continue
-
-            direct_vals = direct_vals[valid_mask]
-            bin_vals = bin_vals[valid_mask]
-
-            pearson_r, pearson_p = pearsonr(direct_vals, bin_vals)
-            spearman_r, spearman_p = spearmanr(direct_vals, bin_vals)
-            mae = np.mean(np.abs(direct_vals - bin_vals))
-            sign_agreement = np.mean((direct_vals > 0) == (bin_vals > 0))
-
-            result = {
-                'image': image_name,
-                'n_features': len(direct_vals),
-                'pearson_r': pearson_r,
-                'pearson_p': pearson_p,
-                'spearman_r': spearman_r,
-                'spearman_p': spearman_p,
-                'mae': mae,
-                'sign_agreement': sign_agreement,
-            }
-
-            validation_results.append(result)
-            print(f"  RESULT: Pearson r={pearson_r:.3f}, Spearman r={spearman_r:.3f}")
-
-    # Summary
-    if validation_results:
-        mean_pearson = np.mean([r['pearson_r'] for r in validation_results])
-        mean_spearman = np.mean([r['spearman_r'] for r in validation_results])
-
-        print(f"\n{'='*60}")
-        print(f"VALIDATION SUMMARY")
-        print(f"{'='*60}")
-        print(f"Mean Pearson: {mean_pearson:.3f}")
-        print(f"Mean Spearman: {mean_spearman:.3f}")
-
-        if mean_pearson > 0.7:
-            print("STRONG validation: Bin method accurately estimates importance")
-        elif mean_pearson > 0.5:
-            print("MODERATE validation: Bin method reasonably accurate")
-        else:
-            print("WEAK validation: Consider adjusting method")
-
-    return validation_results
-
-
-def save_correlation_results(correlation_results, config):
-    """
-    Save and summarize attribution-SAE correlation results.
-    
-    Args:
-        correlation_results: List of correlation metrics per image
-        config: Configuration dictionary
-    """
-    if not correlation_results:
-        print("No correlation results to save.")
-        return
-
-    # Convert to DataFrame for easier analysis
-    df_corr = pd.DataFrame(correlation_results)
-
-    # Save correlation results
-    corr_save_path = Path(
-        f"data/featuredict_{config['dataset']}/layer_{config['layer']}_attribution_sae_correlation.csv"
-    )
-    corr_save_path.parent.mkdir(parents=True, exist_ok=True)
-    df_corr.to_csv(corr_save_path, index=False)
-    print(f"Correlation results saved to {corr_save_path}")
-
-    # Compute and print summary statistics
-    print("\n" + "=" * 50)
-    print("ATTRIBUTION-SAE CORRELATION SUMMARY")
-    print("=" * 50)
-
-    # Average correlations
-    corr_cols = ['pearson_max', 'spearman_max', 'pearson_mean', 'spearman_mean', 'pearson_active_count']
-    for col in corr_cols:
-        if col in df_corr.columns:
-            mean_val = df_corr[col].mean()
-            std_val = df_corr[col].std()
-            pos_ratio = (df_corr[col] > 0).mean()
-            print(f"{col}: {mean_val:.3f} ± {std_val:.3f} (positive: {pos_ratio*100:.1f}%)")
-
-    # Top-k overlap
-    print("\nTop-k Patch Overlap:")
-    for k in [10, 20, 50]:
-        col = f'top{k}_overlap'
-        if col in df_corr.columns:
-            mean_overlap = df_corr[col].mean()
-            std_overlap = df_corr[col].std()
-            print(f"  Top-{k}: {mean_overlap*100:.1f}% ± {std_overlap*100:.1f}%")
-
-    # Feature alignment
-    if 'mean_feature_alignment' in df_corr.columns:
-        mean_align = df_corr['mean_feature_alignment'].mean()
-        aligned_ratio = (df_corr['mean_feature_alignment'] > 1.0).mean()
-        print(f"\nFeature Alignment:")
-        print(f"  Mean alignment: {mean_align:.3f}")
-        print(f"  Aligned (>1.0): {aligned_ratio*100:.1f}% of images")
-
-    # Save summary to JSON
-    summary = {
-        'dataset': config['dataset'],
-        'layer': config['layer'],
-        'n_images': len(df_corr),
-        'correlations': {},
-        'top_k_overlap': {},
-        'feature_alignment': {}
-    }
-
-    for col in corr_cols:
-        if col in df_corr.columns:
-            summary['correlations'][col] = {
-                'mean': float(df_corr[col].mean()),
-                'std': float(df_corr[col].std()),
-                'positive_ratio': float((df_corr[col] > 0).mean())
-            }
-
-    for k in [10, 20, 50]:
-        col = f'top{k}_overlap'
-        if col in df_corr.columns:
-            summary['top_k_overlap'][f'top_{k}'] = {
-                'mean': float(df_corr[col].mean()),
-                'std': float(df_corr[col].std())
-            }
-
-    if 'mean_feature_alignment' in df_corr.columns:
-        summary['feature_alignment'] = {
-            'mean': float(df_corr['mean_feature_alignment'].mean()),
-            'std': float(df_corr['mean_feature_alignment'].std()),
-            'aligned_ratio': float((df_corr['mean_feature_alignment'] > 1.0).mean())
-        }
-
-    import json
-    summary_path = Path(f"data/featuredict_{config['dataset']}/layer_{config['layer']}_correlation_summary.json")
-    with open(summary_path, 'w') as f:
-        json.dump(summary, f, indent=2)
-    print(f"\nCorrelation summary saved to {summary_path}")
-
-    return summary
-
-
-def compute_attribution_sae_correlation(
-    raw_attributions: np.ndarray, feature_acts: torch.Tensor, activation_threshold: float = 0.1
-) -> Dict[str, float]:
-    """
-    Compute correlation metrics between attribution values and SAE activations.
-    
-    Args:
-        raw_attributions: Attribution values per patch [196]
-        feature_acts: SAE feature activations [196, d_sae]
-        activation_threshold: Minimum activation to consider feature active
-        
-    Returns:
-        Dictionary of correlation metrics
-    """
-    from scipy.stats import pearsonr, spearmanr
-
-    # Convert to numpy
-    sae_acts_np = feature_acts.cpu().numpy()
-
-    # Aggregate SAE activations across features
-    max_acts_per_patch = sae_acts_np.max(axis=1)  # [196]
-    mean_acts_per_patch = sae_acts_np.mean(axis=1)  # [196]
-    active_features_per_patch = (sae_acts_np > activation_threshold).sum(axis=1)
-
-    metrics = {}
-
-    # Pearson correlation (linear relationship)
-    try:
-        pearson_max, p_val_max = pearsonr(raw_attributions, max_acts_per_patch)
-        metrics['pearson_max'] = pearson_max
-        metrics['pearson_max_pval'] = p_val_max
-
-        pearson_mean, p_val_mean = pearsonr(raw_attributions, mean_acts_per_patch)
-        metrics['pearson_mean'] = pearson_mean
-        metrics['pearson_mean_pval'] = p_val_mean
-
-        # Spearman correlation (monotonic relationship)
-        spearman_max, sp_val_max = spearmanr(raw_attributions, max_acts_per_patch)
-        metrics['spearman_max'] = spearman_max
-        metrics['spearman_max_pval'] = sp_val_max
-
-        spearman_mean, sp_val_mean = spearmanr(raw_attributions, mean_acts_per_patch)
-        metrics['spearman_mean'] = spearman_mean
-        metrics['spearman_mean_pval'] = sp_val_mean
-
-        # Correlation with number of active features
-        pearson_count, p_val_count = pearsonr(raw_attributions, active_features_per_patch)
-        metrics['pearson_active_count'] = pearson_count
-        metrics['pearson_active_count_pval'] = p_val_count
-
-        # Top-k overlap analysis
-        k_values = [10, 20, 50]
-        for k in k_values:
-            # Top-k patches by attribution
-            top_k_attr = np.argsort(raw_attributions)[-k:]
-            # Top-k patches by SAE activation
-            top_k_sae = np.argsort(max_acts_per_patch)[-k:]
-
-            # Compute overlap
-            overlap = len(set(top_k_attr) & set(top_k_sae))
-            overlap_ratio = overlap / k
-            metrics[f'top{k}_overlap'] = overlap_ratio
-
-            # Jaccard similarity
-            jaccard = overlap / len(set(top_k_attr) | set(top_k_sae))
-            metrics[f'top{k}_jaccard'] = jaccard
-
-        # Feature alignment: Check if important features are in highly attributed patches
-        feature_importance = sae_acts_np.max(axis=0)  # Max activation per feature
-        top_features = np.argsort(feature_importance)[-100:]  # Top 100 features
-
-        alignment_scores = []
-        for feat_idx in top_features[-20:]:  # Top 20 most important features
-            feat_acts = sae_acts_np[:, feat_idx]
-            active_patches = np.where(feat_acts > activation_threshold)[0]
-
-            if len(active_patches) > 0:
-                # Average attribution of patches where this feature is active
-                avg_attr = raw_attributions[active_patches].mean()
-                overall_avg = raw_attributions.mean()
-
-                # Relative attribution (> 1 means feature is in highly attributed areas)
-                relative_attr = avg_attr / (overall_avg + 1e-8)
-                alignment_scores.append(relative_attr)
-
-        if alignment_scores:
-            metrics['mean_feature_alignment'] = np.mean(alignment_scores)
-            metrics['std_feature_alignment'] = np.std(alignment_scores)
-
-    except Exception as e:
-        print(f"Error computing correlations: {e}")
-
-    return metrics
-
-
-def main():
-    # Setup
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dataset_config = get_dataset_config(config['dataset'])
-
-    print(f"Analyzing {config['dataset']} dataset, layer {config['layer']}")
-    print(
-        f"Settings: activation_threshold={config['activation_threshold']}, max_features={config['max_features_per_image']}"
-    )
-
-    # Load model and SAE
-    model = load_model_for_dataset(dataset_config, device)
-    sae = load_sae(config['dataset'], config['layer'])
-    sae.eval()
-
-    # Load SaCo data
-    print("Loading SaCo analysis results...")
-    image_data_map = load_saco_data(config['dataset'], config['results_dir'])
-
-    # Limit images if specified
-    image_list = list(image_data_map.keys())
-    if config['n_images']:
-        image_list = image_list[:config['n_images']]
-
-    print(f"Processing {len(image_list)} images...")
-
-    # Load/create feature dictionary
-    feature_dict = load_or_create_feature_dict(config['dataset'], config['layer'])
-
-    # Setup transform
-    transform = get_processor_for_precached_224_images()
-
-    # Analyze each image
+def process_images_batch(image_list, image_data_map, model, sae, layer_idx, device, transform, dataset_name):
+    """Process all images and extract feature occurrences."""
     feature_occurrences = defaultdict(list)
-    correlation_results = []  # Store correlation analysis results
+    batch_size = 32  # Increased since analysis is now faster
+    
+    print(f"Processing images in batches of {batch_size}...")
+    
+    for batch_start in tqdm(range(0, len(image_list), batch_size), desc="Processing batches"):
+        batch_end = min(batch_start + batch_size, len(image_list))
+        batch_images = image_list[batch_start:batch_end]
+        
+        # Get feature activations for entire batch
+        batch_feature_acts = get_batch_feature_activations(
+            batch_images, model, sae, layer_idx, device, transform, dataset_name, 
+            batch_size=min(16, batch_size)  # Sub-batch for memory efficiency
+        )
+        
+        # Analyze each image in the batch
+        for image_name in batch_images:
+            try:
+                if image_name not in batch_feature_acts:
+                    continue
+                    
+                feature_acts = batch_feature_acts[image_name]
+                
+                # Analyze features for SaCo
+                image_features = analyze_image_features(
+                    feature_acts, image_data_map[image_name]
+                )
 
-    for image_name in tqdm(image_list, desc="Analyzing images"):
-        try:
-            # Get feature activations once
-            feature_acts = get_feature_activations(image_name, model, sae, config['layer'], device, transform)
+                if image_features:
+                    image_class = image_data_map[image_name]['true_label']
 
-            if feature_acts is None:
-                continue
+                    for feat_id, feat_data in image_features.items():
+                        feature_occurrences[feat_id].append({
+                            'image': image_name,
+                            'class': image_class,
+                            'mean_log_ratio': feat_data['mean_log_ratio'],
+                            'sum_log_ratio': feat_data['sum_log_ratio'],
+                            'n_patches': feat_data['n_active_patches'],
+                            'feature_strength': feat_data['feature_strength'],
+                            'std_log_ratio': feat_data['std_log_ratio'],
+                            'mean_impact': feat_data['mean_impact'],
+                            'weighted_impact': feat_data['weighted_impact'],
+                            'std_impact': feat_data['std_impact'],
+                            'max_impact': feat_data['max_impact']
+                        })
+            except Exception as e:
+                print(f"Error processing {image_name}: {e}")
+        
+        # Clear GPU cache after each batch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    return feature_occurrences
 
-            # 1. Compute attribution-SAE correlation
-            raw_attrs = image_data_map[image_name]['raw_attributions']
-            corr_metrics = compute_attribution_sae_correlation(
-                raw_attrs, feature_acts, activation_threshold=config['activation_threshold']
-            )
 
-            if corr_metrics:
-                corr_metrics['image'] = image_name
-                corr_metrics['class'] = image_data_map[image_name]['true_label']
-                correlation_results.append(corr_metrics)
-
-            # 2. Analyze features for SaCo (using same feature_acts)
-            # Now includes both attribution-based and pure impact metrics
-            image_features = analyze_image_features(
-                feature_acts,
-                image_data_map[image_name],
-                compute_pure_impact=True  # Enable pure impact computation
-            )
-
-            if image_features:
-                image_class = image_data_map[image_name]['true_label']
-
-                for feat_id, feat_data in image_features.items():
-                    feature_occurrences[feat_id].append({
-                        'image': image_name,
-                        'class': image_class,
-                        'mean_log_ratio': feat_data['mean_log_ratio'],
-                        'sum_log_ratio': feat_data['sum_log_ratio'],  # Important for v2 compatibility
-                        'n_patches': feat_data['n_active_patches'],
-                        'feature_strength': feat_data['feature_strength'],
-                        'std_log_ratio': feat_data['std_log_ratio'],
-                        # NEW: Pure impact metrics
-                        'mean_impact': feat_data['mean_impact'],
-                        'weighted_impact': feat_data['weighted_impact'],
-                        'std_impact': feat_data['std_impact'],
-                        'max_impact': feat_data['max_impact']
-                    })
-        except Exception as e:
-            print(f"Error processing {image_name}: {e}")
-
-    # Aggregate results
-    print("\nAggregating feature statistics...")
+def aggregate_feature_statistics(feature_occurrences):
+    """Aggregate feature occurrences into statistics."""
     aggregated_features = {}
-
+    
     for feat_id, occurrences in feature_occurrences.items():
         if len(occurrences) >= config['min_occurrences']:
             mean_ratios = [occ['mean_log_ratio'] for occ in occurrences]
@@ -864,19 +532,35 @@ def main():
                 'dominant_class': dominant_class,
                 'mean_feature_strength': np.mean([occ['feature_strength'] for occ in occurrences])
             }
+    
+    return aggregated_features
 
-    # Classify features by ratio (match v2 format)
+
+def classify_features(aggregated_features):
+    """Classify features into under/over-attributed categories."""
     under_attributed = {}  # High impact/low attribution (boost) - positive log ratio
     over_attributed = {}  # Low impact/high attribution (suppress) - negative log ratio
-
+    
     for feat_id, info in aggregated_features.items():
         ratio = info['mean_log_ratio']
         if ratio > 0:
             under_attributed[feat_id] = info
         else:
             over_attributed[feat_id] = info
+    
+    # Sort by mean_log_ratio
+    sort_metric = 'mean_log_ratio'
+    under_attributed = dict(sorted(under_attributed.items(), key=lambda x: abs(x[1][sort_metric]), reverse=True))
+    over_attributed = dict(sorted(over_attributed.items(), key=lambda x: abs(x[1][sort_metric]), reverse=True))
+    
+    return under_attributed, over_attributed
 
+
+def save_results(aggregated_features, under_attributed, over_attributed, dataset_name, layer_idx):
+    """Save analysis results and print summary."""
     # Update and save feature dictionary
+    feature_dict = load_or_create_feature_dict(dataset_name, layer_idx)
+    
     for feat_id, feat_info in aggregated_features.items():
         if feat_id not in feature_dict:
             feature_dict[feat_id] = {}
@@ -885,29 +569,21 @@ def main():
             'mean_log_ratio': feat_info['mean_log_ratio'],
             'n_occurrences': feat_info['n_occurrences'],
             'classes': feat_info['classes'],
-            'dataset': config['dataset'],
-            'layer': config['layer']
+            'dataset': dataset_name,
+            'layer': layer_idx
         })
 
-    save_feature_dict(feature_dict, config['dataset'], config['layer'])
-
-    # Sort features by confidence/importance (match v2)
-    # You can use different metrics: 'mean_log_ratio', 'n_occurrences', etc.
-    sort_metric = 'mean_log_ratio'
-
-    under_attributed = dict(sorted(under_attributed.items(), key=lambda x: abs(x[1][sort_metric]), reverse=True))
-
-    over_attributed = dict(sorted(over_attributed.items(), key=lambda x: abs(x[1][sort_metric]), reverse=True))
-
+    save_feature_dict(feature_dict, dataset_name, layer_idx)
+    
     # Print summary
     print("\n" + "=" * 50)
-    print("ANALYSIS SUMMARY")
+    print(f"ANALYSIS SUMMARY - {dataset_name} Layer {layer_idx}")
     print("=" * 50)
     print(f"Total features analyzed: {len(aggregated_features)}")
     print(f"Under-attributed (boost): {len(under_attributed)} features")
     print(f"Over-attributed (suppress): {len(over_attributed)} features")
 
-    # Print top features for each category WITH IMPACT INFO
+    # Print top features
     print("\nTop 5 UNDER-ATTRIBUTED features (high impact, low attribution):")
     for i, (feat_id, stats) in enumerate(list(under_attributed.items())[:5]):
         impact_str = f"impact={stats['mean_impact']:.4f}, " if stats.get('mean_impact') is not None else ""
@@ -923,7 +599,7 @@ def main():
             f"  {i+1}. Feature {feat_id}: {impact_str}log_ratio={stats['mean_log_ratio']:.3f}, "
             f"n_occ={stats['n_occurrences']}, classes={stats['classes']}"
         )
-
+    
     # Save results in v2 format
     results = {
         'results_by_type': {
@@ -931,37 +607,86 @@ def main():
             'over_attributed': over_attributed
         },
         'analysis_params': {
-            'layer_idx': config['layer'],
+            'layer_idx': layer_idx,
             'activation_threshold': config['activation_threshold'],
             'min_patches_per_feature': config['min_patches'],
             'min_occurrences': config['min_occurrences'],
-            'n_images_processed': len(image_list),
-            'dataset': config['dataset']
+            'n_images_processed': len(aggregated_features),
+            'dataset': dataset_name
         }
     }
 
-    # Run validation if requested
-    if config.get('run_validation', False):
-        validation_results = validate_bin_method(
-            image_list, image_data_map, model, sae, config['layer'], device, transform, config
-        )
-
-        # Add validation summary to results
-        if validation_results:
-            results['validation'] = {
-                'mean_pearson': float(np.mean([r['pearson_r'] for r in validation_results])),
-                'mean_spearman': float(np.mean([r['spearman_r'] for r in validation_results])),
-                'n_validated': len(validation_results)
-            }
-
-    # Save to the correct location for transmm_sfaf.py to find it
-    save_path = Path(f"data/featuredict_{config['dataset']}/layer_{config['layer']}_saco_features.pt")
+    save_path = Path(f"data/featuredict_{dataset_name}/layer_{layer_idx}_saco_features.pt")
     save_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(results, save_path)
     print(f"\nResults saved to {save_path}")
 
-    # Save and summarize correlation results
-    save_correlation_results(correlation_results, config)
+
+def process_dataset_layer(dataset_name, layer_idx, device):
+    """Process a single dataset-layer combination."""
+    print(f"\n{'='*80}")
+    print(f"Processing: Dataset={dataset_name}, Layer={layer_idx}")
+    print(f"{'='*80}\n")
+    
+    dataset_config = get_dataset_config(dataset_name)
+    
+    print(f"Analyzing {dataset_name} dataset, layer {layer_idx}")
+    print(f"Settings: activation_threshold={config['activation_threshold']}, max_features={config['max_features_per_image']}")
+
+    # Load model and SAE
+    model = load_model_for_dataset(dataset_config, device)
+    sae = load_sae(dataset_name, layer_idx)
+    sae.eval()
+
+    # Load SaCo data
+    results_dir = f'./data/{dataset_name}_unified/results/train'
+    print(f"Loading SaCo analysis results from {results_dir}...")
+    image_data_map = load_saco_data(dataset_name, results_dir)
+
+    # Limit images if specified
+    image_list = list(image_data_map.keys())
+    if config['n_images']:
+        image_list = image_list[:config['n_images']]
+
+    print(f"Processing {len(image_list)} images...")
+
+    # Setup transform
+    transform = get_processor_for_precached_224_images()
+
+    # Process images
+    feature_occurrences = process_images_batch(
+        image_list, image_data_map, model, sae, layer_idx, device, transform, dataset_name
+    )
+
+    # Aggregate and classify features
+    print("\nAggregating feature statistics...")
+    aggregated_features = aggregate_feature_statistics(feature_occurrences)
+    under_attributed, over_attributed = classify_features(aggregated_features)
+
+    # Save results
+    save_results(aggregated_features, under_attributed, over_attributed, dataset_name, layer_idx)
+    
+    # Clean up
+    del model, sae
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    import gc
+    gc.collect()
+
+
+def main():
+    """Main entry point - coordinates processing of all datasets and layers."""
+    # Setup
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Process each dataset and layer combination
+    for dataset_name in config['datasets']:
+        for layer_idx in config['layers']:
+            process_dataset_layer(dataset_name, layer_idx, device)
+    
+    print(f"\n{'='*80}")
+    print("All datasets and layers processed successfully!")
+    print(f"{'='*80}")
 
 
 if __name__ == "__main__":

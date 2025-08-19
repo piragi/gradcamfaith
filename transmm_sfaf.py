@@ -12,64 +12,7 @@ from vit_prisma.models.weight_conversion import convert_timm_weights
 from vit_prisma.sae import SparseAutoencoder
 
 from config import PipelineConfig
-# Removed hardcoded IDX2CLS import - will use dataset-specific mapping
 from build_boost_mask_improved import build_boost_mask_improved, precache_sorted_features
-
-SAE_CONFIG = {
-    1: {
-        "sae_path": "models/sweep/sae_l1_k128_exp64_lr0.0002/48a0f474-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/sfaf_stealth_l2_alignment_min1_128k64.pt"
-    },
-    2: {
-        "sae_path": "./models/sweep/sae_l2_k64_exp64_lr2e-05/92bcc2fc-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_l2_alignment_min1_128k64.pt"
-    },
-    3: {
-        "sae_path": "./models/sweep/sae_l3_k64_exp64_lr2e-05/99defb16-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_l3_alignment_min1_128k64.pt"
-    },
-    4: {
-        "sae_path": "./models/sweep/sae_l4_k64_exp64_lr2e-05/24d1b962-vit_covidquex_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_l4_alignment_min1_128k64.pt"
-    },
-    5: {
-        "sae_path": "./models/sweep/sae_l5_k64_exp64_lr2e-05/d9216a1a-vit_covidquex_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_local_l5_alignment_min1_128k64.pt"
-    },
-    6: {
-        # "sae_path": "data/sae_covidquex/layer_6/b562ac30-vit_unified_sae/n_images_65161.pt",
-        # "dict_path": "./sae_dictionaries/steer_corr_local_l6_alignment_min1_128k64.pt",
-        # "saco_dict_path": "data/featuredict_covidquex/layer_6_saco_features.pt"  # New location with correct format
-        "sae_path": "data/sae_hyperkvasir/layer_6/7767f4dc-vit_unified_sae/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_local_l6_alignment_min1_128k64.pt",
-        "saco_dict_path": "data/featuredict_hyperkvasir/layer_6_saco_features.pt"  # New location with correct format
-    },
-    7: {
-        "sae_path": "./models/sweep/sae_l7_k64_exp64_lr2e-05/1a690d9c-vit_covidquex_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_local_l7_alignment_min1_64k64.pt",
-        "saco_dict_path": "./results/saco_features_direct_l7.pt"
-        # "saco_dict_path": "./results/refiltered_saco_features_min_occ_30.pt"
-        # "saco_dict_path": "./results/saco_problematic_features_bins_l7.pt"
-
-    },
-    8: {
-        "sae_path": "./models/sweep/sae_l8_k64_exp64_lr2e-05/e23b1351-vit_covidquex_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_local_l8_alignment_min1_128k64.pt",
-        "saco_dict_path": "./results/saco_features_direct_l8.pt"
-    },
-    9: {
-        "sae_path": "./models/sweep/sae_l9_k64_exp64_lr2e-05/9058e0a1-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_local_l9_alignment_min1_128k64.pt"
-    },
-    10: {
-        "sae_path": "./models/sweep/sae_l10_k64_exp64_lr2e-05/d25db388-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_l10_alignment_min1_128k64.pt"
-    },
-    11: {
-        "sae_path": "models/sweep/sae_l11_k128_exp64_lr0.0002/a29c74a6-vit_medical_sae_k_sweep/n_images_49276.pt",
-        "dict_path": "./sae_dictionaries/steer_corr_l11_alignment_min1_128k64.pt"
-    },
-}
 
 
 def load_models():
@@ -95,47 +38,57 @@ def load_models():
     return model
 
 
-def load_steering_resources(layers: List[int]) -> Dict[int, Dict[str, Any]]:
-    """Loads SAEs and S_f/A_f dictionaries for the specified layers from SAE_CONFIG."""
+def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict[int, Dict[str, Any]]:
+    """
+    Loads SAEs and S_f/A_f dictionaries for the specified layers.
+    Dynamically finds SAE and feature dict paths based on dataset and layer.
+    
+    Args:
+        layers: List of layer indices to load
+        dataset_name: Name of the dataset ('covidquex' or 'hyperkvasir')
+    """
     resources = {}
+    
     for layer_idx in layers:
-        if layer_idx not in SAE_CONFIG:
-            print(f"Warning: No configuration found for layer {layer_idx}. Skipping.")
-            continue
-
-        config = SAE_CONFIG[layer_idx]
-        sae_path = Path(config["sae_path"])
-        dict_path = Path(config["dict_path"])
-
-        if not sae_path.exists():
-            print(f"Warning: SAE file not found for layer {layer_idx} at {sae_path}. Skipping.")
-            continue
-
         try:
+            # Find SAE path dynamically
+            sae_dir = Path("data") / f"sae_{dataset_name}" / f"layer_{layer_idx}"
+            sae_files = list(sae_dir.glob("*/n_images_*.pt"))
+            # Filter out log_feature_sparsity files
+            sae_files = [f for f in sae_files if 'log_feature_sparsity' not in str(f)]
+            
+            if not sae_files:
+                print(f"Warning: No SAE found for {dataset_name} layer {layer_idx} in {sae_dir}")
+                continue
+            
+            # Use the most recent SAE file
+            sae_path = sorted(sae_files)[-1]
+            print(f"Loading SAE from {sae_path}")
+            
             sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
             sae.cuda().eval()
-
+            
             resources[layer_idx] = {"sae": sae}
             
-            # Load SaCo dictionary if available
-            if "saco_dict_path" in config:
-                saco_dict_path = Path(config["saco_dict_path"])
-                if saco_dict_path.exists():
-                    saco_results = torch.load(saco_dict_path, weights_only=False)
-                    resources[layer_idx]["saco_dict"] = saco_results  # Load once, store in memory
-                    print(f"Loaded SaCo dictionary for layer {layer_idx}: {saco_dict_path}")
-                    
-                    # Pre-cache sorted features for performance
-                    try:
-                        precache_sorted_features(saco_results)
-                    except Exception as e:
-                        print(f"Warning: Could not pre-cache features: {e}")
-                else:
-                    print(f"Warning: SaCo dict path specified but file not found: {saco_dict_path}")
-            
+            # Load SaCo feature dictionary
+            saco_dict_path = Path(f"data/featuredict_{dataset_name}/layer_{layer_idx}_saco_features.pt")
+            if saco_dict_path.exists():
+                saco_results = torch.load(saco_dict_path, weights_only=False)
+                resources[layer_idx]["saco_dict"] = saco_results
+                print(f"Loaded SaCo dictionary for {dataset_name} layer {layer_idx}")
+                
+                # Pre-cache sorted features for performance
+                try:
+                    precache_sorted_features(saco_results)
+                except Exception as e:
+                    print(f"Warning: Could not pre-cache features: {e}")
+            else:
+                print(f"ERROR: SaCo dict not found at {saco_dict_path}")
+                print(f"Please run saco_feature_analysis_simple.py first to generate feature dictionaries")
+                
         except Exception as e:
-            print(f"Error loading resources for layer {layer_idx}: {e}")
-
+            print(f"Error loading resources for {dataset_name} layer {layer_idx}: {e}")
+    
     return resources
 
 
@@ -254,18 +207,12 @@ def transmm_prisma(
                 
                 # ===== RANDOM BASELINE BOOST =====
                 if "saco_dict" in resources:
-                    # Toggle between different methods: 'saco', 'topk_activation', 'random'
-                    boost_method = 'saco'  # Options: 'saco', 'topk_activation', 'random'
-                    
-                    # Always use the unified function with different selection methods
                     saco_results = resources["saco_dict"]
                     
-                    if boost_method == 'random':
-                        print(f"Using RANDOM BASELINE boosting for layer {i}")
-                    elif boost_method == 'topk_activation':
-                        print(f"Using TOP-K ACTIVATION boosting for layer {i}")
-                    else:
-                        print(f"Using SACO-BASED boosting for layer {i}")
+                    # Get boosting parameters from config
+                    boosting_config = config.classify.boosting
+                    
+                    print(f"Using {boosting_config.selection_method.upper()} boosting for layer {i}")
                     
                     boost_mask, selected_feat_ids = build_boost_mask_improved(
                         sae_codes=codes_for_layer,
@@ -273,29 +220,25 @@ def transmm_prisma(
                         predicted_class=predicted_class_idx,
                         idx_to_class=idx_to_class,
                         device=device,
-                        selection_method=boost_method,  # Pass the method directly
-                        max_suppress=5 if boost_method == 'random' else 0,  # Only suppress for random
-                        max_boost=15 if boost_method == 'random' else 10,  # More boost for random
-                        random_seed=42,  # For reproducibility
+                        selection_method=boosting_config.selection_method,
+                        boost_strength=boosting_config.boost_strength,
+                        suppress_strength=boosting_config.suppress_strength,
+                        max_boost=boosting_config.max_boost,
+                        max_suppress=boosting_config.max_suppress,
+                        min_occurrences=boosting_config.min_occurrences,
+                        max_occurrences=boosting_config.max_occurrences,
+                        min_log_ratio=boosting_config.min_log_ratio,
+                        min_activation=boosting_config.min_activation,
+                        topk_active=boosting_config.topk_active,
+                        use_balanced_score=boosting_config.use_balanced_score,
+                        class_aware=boosting_config.class_aware,
+                        random_seed=boosting_config.random_seed,
                         debug=False
                     )
                     
                 else:
-                    print(f"No SaCo dict found for layer {i}, using random baseline")
-                    # Create dummy saco_results for the function signature
-                    dummy_saco = {'results_by_type': {}}
-                    boost_mask, selected_feat_ids = build_boost_mask_improved(
-                        sae_codes=codes_for_layer,
-                        saco_results=dummy_saco,
-                        predicted_class=predicted_class_idx,
-                        idx_to_class=idx_to_class,
-                        device=device,
-                        selection_method='random',
-                        max_suppress=5,
-                        max_boost=10,
-                        random_seed=42,
-                        debug=False
-                    )
+                    print(f"ERROR: No SaCo dict found for layer {i} - skipping steering")
+                    continue  # Skip this layer if no SaCo dict available
 
                 if selected_feat_ids:
                     print(f"Predicted class. {idx_to_class.get(predicted_class_idx, f'class_{predicted_class_idx}')}")
