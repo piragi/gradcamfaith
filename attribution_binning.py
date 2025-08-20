@@ -7,19 +7,24 @@ This implements the binning approach as described in the SaCo paper:
 - Calculate SaCo based on bin comparisons
 """
 
-import numpy as np
-import torch
-from typing import Dict, List, Tuple, Any
 from dataclasses import dataclass
-from tqdm import tqdm
-import pandas as pd
 from datetime import datetime
+from typing import Any, Dict, List, Tuple
 
-from data_types import ClassificationResult
-import vit.preprocessing as preprocessing
+import numpy as np
+import pandas as pd
+import torch
+from tqdm import tqdm
+
 import analysis
+import vit.preprocessing as preprocessing
+from data_types import ClassificationResult
 
-def batched_model_inference(model_instance, image_batch: torch.Tensor, device: torch.device, batch_size: int = 32) -> List[Dict]:
+
+def batched_model_inference(model_instance,
+                            image_batch: torch.Tensor,
+                            device: torch.device,
+                            batch_size: int = 32) -> List[Dict]:
     """Run model inference on a batch of images efficiently."""
     model_instance.eval()
     all_predictions = []
@@ -42,6 +47,55 @@ def batched_model_inference(model_instance, image_batch: torch.Tensor, device: t
 
     return all_predictions
 
+
+def calculate_saco_vectorized_with_bias(attributions: np.ndarray,
+                                        confidence_impacts: np.ndarray) -> Tuple[float, np.ndarray]:
+    """
+    Simplified: Only return overall SaCo and attribution bias per bin.
+    """
+    n = len(attributions)
+    if n < 2:
+        return 0.0, np.zeros(n)
+
+    # Create all pairwise differences
+    attr_diffs = attributions[:, None] - attributions[None, :]
+    impact_diffs = confidence_impacts[:, None] - confidence_impacts[None, :]
+
+    # Upper triangular mask (unique comparisons only)
+    upper_tri_mask = np.triu(np.ones((n, n), dtype=bool), k=1)
+
+    # Identify violations
+    violations = (impact_diffs * attr_diffs < 0) & upper_tri_mask
+
+    # Weight violations by attribution difference
+    violation_weights = violations * attr_diffs  # Signed weights!
+
+    # Attribution bias:
+    # Negative when bin i is over-attributed (has violations as higher-attr bin)
+    # Positive when bin j is under-attributed (has violations as lower-attr bin)
+    bin_attribution_bias = np.zeros(n)
+
+    # Sum contributions
+    # Row sum: when bin is first element (higher attribution in violation = over-attributed)
+    bin_attribution_bias -= np.sum(violation_weights, axis=1)
+
+    # Column sum: when bin is second element (lower attribution in violation = under-attributed)
+    bin_attribution_bias += np.sum(violation_weights, axis=0)
+
+    # Calculate overall SaCo for reference
+    is_faithful = ~violations & upper_tri_mask
+    weights = np.where(is_faithful, attr_diffs, -attr_diffs)
+    weights_upper = np.where(upper_tri_mask, weights, 0)
+    total_abs_weight = np.sum(np.abs(weights_upper))
+    overall_saco = np.sum(weights_upper) / total_abs_weight if total_abs_weight > 0 else 0.0
+
+    # Normalize bias by total weight
+    if total_abs_weight > 0:
+        bin_attribution_bias = bin_attribution_bias / total_abs_weight
+
+    return overall_saco, bin_attribution_bias
+
+
 def calculate_saco_vectorized(attributions: np.ndarray, confidence_impacts: np.ndarray) -> float:
     """
     Vectorized SaCo calculation - eliminates O(n²) nested loops.
@@ -56,30 +110,31 @@ def calculate_saco_vectorized(attributions: np.ndarray, confidence_impacts: np.n
     n = len(attributions)
     if n < 2:
         return 0.0
-    
+
     # Create all pairwise differences using broadcasting
     attr_diffs = attributions[:, None] - attributions[None, :]  # [n, n]
     impact_diffs = confidence_impacts[:, None] - confidence_impacts[None, :]  # [n, n]
-    
+
     # Only consider upper triangular part (i < j comparisons)
     upper_tri_mask = np.triu(np.ones((n, n), dtype=bool), k=1)
-    
+
     # Extract upper triangular values
     attr_diffs_tri = attr_diffs[upper_tri_mask]  # [n*(n-1)/2]
     impact_diffs_tri = impact_diffs[upper_tri_mask]  # [n*(n-1)/2]
-    
+
     # Calculate faithfulness: impact_i >= impact_j (since we're looking at i < j)
     is_faithful = impact_diffs_tri >= 0
-    
+
     # Calculate weights
     weights = np.where(is_faithful, attr_diffs_tri, -attr_diffs_tri)
-    
+
     # Calculate SaCo score
     total_weight = np.sum(np.abs(weights))
     if total_weight > 0:
         return np.sum(weights) / total_weight
     else:
         return 0.0
+
 
 @dataclass
 class BinInfo:
@@ -117,7 +172,7 @@ def create_attribution_bins_from_patches(
 
     # Sort patch indices based on their attribution values (descending)
     sorted_patch_indices = np.argsort(raw_attributions)[::-1]
-    
+
     # Split the sorted indices into n_bins of roughly equal size
     binned_indices = np.array_split(sorted_patch_indices, n_bins)
 
@@ -130,11 +185,8 @@ def create_attribution_bins_from_patches(
         if len(patch_indices) == 0:
             continue
         bin_attributions = raw_attributions[patch_indices]
-        temp_bins.append({
-            "indices": patch_indices,
-            "attributions": bin_attributions
-        })
-    
+        temp_bins.append({"indices": patch_indices, "attributions": bin_attributions})
+
     # Sort bins by their mean attribution value to assign IDs consistently
     # (lowest attribution bin gets id 0)
     temp_bins.sort(key=lambda b: np.mean(b['attributions']))
@@ -142,24 +194,23 @@ def create_attribution_bins_from_patches(
     for bin_id, b_data in enumerate(temp_bins):
         patch_indices = b_data['indices']
         bin_attributions = b_data['attributions']
-        
+
         bin_info = BinInfo(
             bin_id=bin_id,
             min_value=float(np.min(bin_attributions)),
             max_value=float(np.max(bin_attributions)),
             patch_indices=patch_indices,
             mean_attribution=float(np.mean(bin_attributions)),
-            total_attribution=float(np.sum(bin_attributions)), # This is s(Gi) from the paper
+            total_attribution=float(np.sum(bin_attributions)),  # This is s(Gi) from the paper
             n_patches=len(patch_indices)
         )
         bins.append(bin_info)
-    
+
     return bins
 
+
 def create_spatial_mask_for_bin(
-    bin_info: BinInfo,
-    image_size: Tuple[int, int] = (224, 224),
-    patch_size: int = 16
+    bin_info: BinInfo, image_size: Tuple[int, int] = (224, 224), patch_size: int = 16
 ) -> torch.Tensor:
     """
     Create a spatial mask for all patches in a bin.
@@ -174,23 +225,23 @@ def create_spatial_mask_for_bin(
     """
     height, width = image_size
     mask = torch.zeros((height, width), dtype=torch.bool)
-    
+
     # Each patch index corresponds to a position in the 14x14 grid
     grid_size = 14  # 224 / 16 = 14
-    
+
     for patch_idx in bin_info.patch_indices:
         # Convert linear index to grid position
         row = patch_idx // grid_size
         col = patch_idx % grid_size
-        
+
         # Convert to pixel coordinates
         y_start = row * patch_size
         y_end = min(y_start + patch_size, height)
         x_start = col * patch_size
         x_end = min(x_start + patch_size, width)
-        
+
         mask[y_start:y_end, x_start:x_end] = True
-    
+
     return mask
 
 
@@ -209,8 +260,9 @@ def apply_binned_perturbation(
         if original_pil_image is not None:
             # Use consistent grayscale perturbation method
             from PIL import Image, ImageStat
-            import vit.preprocessing as preprocessing # Make sure this import is available
-            
+
+            import vit.preprocessing as preprocessing  # Make sure this import is available
+
             # 1. Calculate mean, but take only the first channel for grayscale value
             mean_channels = ImageStat.Stat(original_pil_image).mean
             mean_color_value = int(mean_channels[0])
@@ -219,13 +271,15 @@ def apply_binned_perturbation(
             # We create a large mask and then apply it, which is more efficient
             # than creating and pasting many small patches.
             # Use RGB mode to match the original image
-            grayscale_layer = Image.new("RGB", original_pil_image.size, (mean_color_value, mean_color_value, mean_color_value))
+            grayscale_layer = Image.new(
+                "RGB", original_pil_image.size, (mean_color_value, mean_color_value, mean_color_value)
+            )
 
             # 3. Create a perturbed PIL image by pasting the mean value only where the mask is True
             # The mask needs to be converted to a PIL image to be used here.
             # The bin_mask is a Tensor, so we convert it.
             pil_mask = Image.fromarray(bin_mask.numpy().astype('uint8') * 255, mode='L')
-            
+
             result_pil = original_pil_image.copy()
             result_pil.paste(grayscale_layer, (0, 0), mask=pil_mask)
 
@@ -240,13 +294,14 @@ def apply_binned_perturbation(
         else:
             # Fallback tensor-only logic (this part will likely not be used but is good to have)
             perturbed = original_tensor.clone()
-            mean_value = original_tensor[0].mean().item() # Grayscale-like mean from first channel
+            mean_value = original_tensor[0].mean().item()  # Grayscale-like mean from first channel
             for c in range(original_tensor.shape[0]):
                 perturbed[c][bin_mask] = mean_value
             return perturbed
 
     # Default case if method is not "mean"
     return original_tensor.clone()
+
 
 def calculate_binned_saco_for_image(
     original_result: ClassificationResult,
@@ -267,55 +322,53 @@ def calculate_binned_saco_for_image(
         Tuple of (saco_score, bin_results, patch_results)
     """
     image_path = original_result.image_path
-    
+
     # Load image and attribution
     original_pil, original_tensor = preprocessing.preprocess_image(
         str(image_path), img_size=config.classify.target_size[0]
     )
-    
+
     # Load raw attribution (196 values, one per patch)
     raw_attribution_path = original_result.attribution_paths.raw_attribution_path
     raw_attributions = np.load(raw_attribution_path)  # Shape: (196,)
-    
+
     # Create bins based on attribution values
     bins = create_attribution_bins_from_patches(raw_attributions, n_bins)
-    
+
     if debug and "dev_0aec60bd" in str(image_path):
-        print(f"\nBINNED DEBUG - Image: {image_path.name}")
+        print(f"\\nBINNED DEBUG - Image: {image_path.name}")
         print(f"Number of bins created: {len(bins)}")
         print(f"Raw attributions shape: {raw_attributions.shape}")
         print(f"Attribution range: [{raw_attributions.min():.4f}, {raw_attributions.max():.4f}]")
-    
+
     # Apply perturbations for each bin
     perturbed_tensors = []
     valid_bins = []
-    
+
     for bin_info in bins:
         # Create spatial mask for this bin
         mask = create_spatial_mask_for_bin(bin_info)
-        
+
         # Apply perturbation
-        perturbed = apply_binned_perturbation(
-            original_tensor, mask, config.perturb.method, original_pil
-        )
-        
+        perturbed = apply_binned_perturbation(original_tensor, mask, config.perturb.method, original_pil)
+
         perturbed_tensors.append(perturbed)
         valid_bins.append(bin_info)
-    
+
     # Batch inference
     if not perturbed_tensors:
-        return 0.0, []
-    
+        return 0.0, [], []
+
     batch_tensor = torch.stack(perturbed_tensors)
     predictions = batched_model_inference(vit_model, batch_tensor, device, batch_size=len(batch_tensor))
-    
+
     # Calculate results
     bin_results = []
     original_pred = original_result.prediction
-    
+
     for bin_info, pred in zip(valid_bins, predictions):
         confidence_impact = pred["confidence"] - original_pred.confidence
-        
+
         result = {
             "bin_id": bin_info.bin_id,
             "mean_attribution": bin_info.mean_attribution,
@@ -326,50 +379,40 @@ def calculate_binned_saco_for_image(
             "class_changed": (pred["predicted_class_idx"] != original_pred.predicted_class_idx)
         }
         bin_results.append(result)
-    
-    # Sort by mean attribution (descending)
+
+    # Sort by total attribution (descending) for consistent ordering
     bin_results.sort(key=lambda x: x["total_attribution"], reverse=True)
-    
-    # Calculate bin-level SaCo scores (individual score per bin)
+
+    # Calculate SaCo and bin attribution bias (SINGLE CALL)
     if len(bin_results) >= 2:
         attributions = np.array([r["total_attribution"] for r in bin_results])
         impacts = np.array([r["confidence_delta_abs"] for r in bin_results])
-        bin_ids = np.array([r["bin_id"] for r in bin_results])
-        
-        # Calculate bin-level SaCo score using vectorized approach  
-        bin_saco_score = calculate_saco_vectorized(attributions, impacts)
-        
-        # Add bin-level SaCo scores to results (same score for all bins in this image)
-        for result in bin_results:
-            result["bin_saco_score"] = bin_saco_score
+
+        # Single call to get both image SaCo and bin bias
+        saco_score, bin_attribution_bias = calculate_saco_vectorized_with_bias(attributions, impacts)
+
+        # Add bin-specific attribution bias to results
+        for i, result in enumerate(bin_results):
+            bias = bin_attribution_bias[i]
+            result["bin_attribution_bias"] = float(bias)
     else:
-        # If only one bin, SaCo score is 0
+        # If only one bin, no pairwise comparisons possible
+        saco_score = 0.0
         for result in bin_results:
-            result["bin_saco_score"] = 0.0
-    
-    # Extract arrays for overall image SaCo calculation
-    attributions = np.array([r["total_attribution"] for r in bin_results])
-    impacts = np.array([r["confidence_delta_abs"] for r in bin_results])
-    
+            result["bin_attribution_bias"] = 0.0
+            result["action"] = "none"
+            result["misalignment_type"] = "undefined"
+            result["misalignment_strength"] = 0.0
+
     if debug and "dev_0aec60bd" in str(image_path):
         print(f"BINNED - Number of bins: {len(bin_results)}")
-        print(f"BINNED - Attributions[:5]: {attributions[:5]}")
-        print(f"BINNED - Impacts[:5]: {impacts[:5]}")
-        print(f"BINNED - Attribution sum: {np.sum(attributions):.4f}")
-        print(f"BINNED - Impact sum: {np.sum(impacts):.4f}")
-    
-    # Calculate overall image SaCo score using the same function as patch-wise
-    saco_score = calculate_saco_vectorized(attributions, impacts)
-    
+        print(f"BINNED - Overall SaCo: {saco_score:.4f}")
+        print(f"BINNED - Bin biases[:5]: {[r['bin_attribution_bias'] for r in bin_results[:5]]}")
+
     # Generate patch-level results if requested (for compatibility with saco_feature_analysis.py)
+    # TODO: remove patch_results
     patch_results = []
-    if include_patch_level:
-        # For patch-level compatibility, we need to calculate individual patch SaCo scores
-        # This requires creating perturbations for each of the 196 patches individually
-        patch_results = calculate_patch_level_saco(
-            original_result, vit_model, config, device, raw_attributions
-        )
-    
+
     return saco_score, bin_results, patch_results
 
 
@@ -403,7 +446,7 @@ def _get_or_compute_binned_results(
     # --- COMPUTE FROM SCRATCH ---
     print(f"Computing binned SaCo results for {len(original_results)} images...")
     all_bin_results = []
-    
+
     for original_result in tqdm(original_results, desc=f"Processing with {n_bins} bins"):
         try:
             saco_score, bin_results, _ = calculate_binned_saco_for_image(
@@ -419,7 +462,7 @@ def _get_or_compute_binned_results(
             if "do not match" in str(e):
                 traceback.print_exc()
             continue
-            
+
     bin_results_df = pd.DataFrame(all_bin_results)
 
     return bin_results_df
@@ -443,10 +486,14 @@ def run_binned_saco_analysis(
         A dictionary with analysis results as DataFrames.
     """
     print(f"=== BINNED SACO ANALYSIS (n_bins={n_bins}) ===")
-    
+
     # 1. Get data by either loading from cache or computing (and saving).
     bin_results_df = _get_or_compute_binned_results(
-        config, original_results, vit_model, device, n_bins,
+        config,
+        original_results,
+        vit_model,
+        device,
+        n_bins,
     )
 
     if bin_results_df.empty:
@@ -456,20 +503,22 @@ def run_binned_saco_analysis(
     # --- START OF ANALYSIS SECTION ---
     print("\n--- Performing post-hoc analysis on results ---")
     analysis_results = {"bin_results": bin_results_df}
-    
+
     # 2. Derive SaCo scores DataFrame
     saco_df = bin_results_df[['image_name', 'saco_score']].drop_duplicates().reset_index(drop=True)
     analysis_results["saco_scores"] = saco_df
-    
+
     # 3. Faithfulness vs Correctness Analysis
     saco_scores_map = pd.Series(saco_df.saco_score.values, index=saco_df.image_name).to_dict()
     faithfulness_df = analysis.analyze_faithfulness_vs_correctness_from_objects(saco_scores_map, original_results)
     analysis_results["faithfulness_correctness"] = faithfulness_df
-    
+
     # 4. Key Attribution Patterns Analysis
-    patterns_df = analysis.analyze_key_attribution_patterns(analysis_results["faithfulness_correctness"], vit_model, config)
+    patterns_df = analysis.analyze_key_attribution_patterns(
+        analysis_results["faithfulness_correctness"], vit_model, config
+    )
     analysis_results["attribution_patterns"] = patterns_df
-    
+
     # 5. Summary statistics
     if not saco_df.empty:
         avg_saco = saco_df['saco_score'].mean()
@@ -479,10 +528,10 @@ def run_binned_saco_analysis(
         print(f"  Number of bins: {n_bins}")
         print(f"  Average SaCo: {avg_saco:.4f}")
         print(f"  Std SaCo: {std_saco:.4f}")
-    
+
     print("\nSaving derived analysis files...")
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    
+
     for name, df_to_save in analysis_results.items():
         if isinstance(df_to_save, pd.DataFrame) and not df_to_save.empty:
             if name == "bin_results":
@@ -491,7 +540,7 @@ def run_binned_saco_analysis(
                 save_path = config.file.output_dir / f"{dataset_name}_bin_results.csv"
                 df_to_save.to_csv(save_path, index=False)
                 print(f"Saved bin results to {save_path}")
-            
+
             # Also save with timestamp for archival
             save_path = config.file.output_dir / f"analysis_{name}_binned_{timestamp}.csv"
             df_to_save.to_csv(save_path, index=False)
@@ -499,6 +548,7 @@ def run_binned_saco_analysis(
 
     print("=== BINNED SACO ANALYSIS COMPLETE ===")
     return analysis_results
+
 
 # For easy integration with your pipeline, add this wrapper function:
 def run_binned_attribution_analysis(
@@ -513,9 +563,7 @@ def run_binned_attribution_analysis(
     """
     vit_model.to(device)
     vit_model.eval()
-    
+
     # Run binned analysis
-    results = run_binned_saco_analysis(
-        config, original_results, vit_model, device, n_bins
-    )
-    return results    
+    results = run_binned_saco_analysis(config, original_results, vit_model, device, n_bins)
+    return results
