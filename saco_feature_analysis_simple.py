@@ -26,12 +26,12 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 # ============ CONFIG ============
 config = {
     'datasets': ['covidquex', 'hyperkvasir'],  # List of datasets to analyze
-    'layers': [6],  # List of layers to analyze
+    'layers': [4, 5, 6, 7, 8, 9, 10],  # List of layers to analyze
     'n_images': None,  # None for all, or specific number
     'activation_threshold': 0.1,  # Min activation to consider feature active
     'min_patches': 1,  # Min patches per feature
     'min_occurrences': 1,  # Min times feature must appear across dataset
-    'max_features_per_image': 512,  # Process only top-k features per image
+    'max_features_per_image': 64,  # Process only top-k features per image
 
     # Path configuration
     'sae_base_dir': 'data',  # Base directory for SAE models (data/sae_hyperkvasir/...)
@@ -127,33 +127,28 @@ def load_saco_data(dataset_name, results_dir):
             continue
         bin_to_patches = recreate_bin_to_patch_mapping(raw_attrs)
 
+        # Define proper normalization function
+        def normalize_fn(x):
+            """Normalize array to [0, 1] with proper epsilon handling."""
+            x_min, x_max = np.min(x), np.max(x)
+            if (x_max - x_min) > 1e-8:
+                return (x - x_min) / (x_max - x_min + 1e-8)
+            else:
+                return x  # Keep original if no variation
+
         # Normalize attribution to [0, 1] for ratio calculation
-        epsilon = 1e-6
-        attr_min, attr_max = raw_attrs.min(), raw_attrs.max()
-        if attr_max - attr_min > epsilon:
-            norm_attrs = (raw_attrs - attr_min) / (attr_max - attr_min) + epsilon
-        else:
-            norm_attrs = np.ones_like(raw_attrs) * epsilon
+        # norm_attrs = normalize_fn(raw_attrs)
 
         # Create patch-level data: each patch gets its bin's impact but individual attribution
         patch_data = {}
 
-        # First, collect all impacts for normalization
-        all_impacts = [abs(row['confidence_delta']) for _, row in group.iterrows()]
-        impact_min, impact_max = min(all_impacts), max(all_impacts)
-
-        # Create impact normalization function
-        if impact_max - impact_min > epsilon:
-
-            def normalize_impact(raw_impact):
-                return (abs(raw_impact) - impact_min) / (impact_max - impact_min) + epsilon
-        else:
-            # All impacts are similar, assign equal normalized value
-            def normalize_impact(raw_impact):
-                return 0.5 + epsilon
+        # Collect all impacts for normalization (use absolute values)
+        all_impacts = np.array([abs(row['confidence_delta']) for _, row in group.iterrows()])
+        # norm_impacts_array = normalize_fn(all_impacts)
 
         # Create bin_data for reference
         bin_data = {}
+        bin_idx = 0
         for _, row in group.iterrows():
             bin_id = row['bin_id']
             patch_indices = bin_to_patches.get(bin_id, [])
@@ -165,40 +160,35 @@ def load_saco_data(dataset_name, results_dir):
                 'confidence_delta_abs': row['confidence_delta_abs']
             }
 
-            # Now calculate log_ratio for each patch individually
-            # Use signed impact to properly identify under vs over-attributed
-            impact = row['confidence_delta']  # Positive = helps classification
-            norm_impact = normalize_impact(impact)  # Normalized impact
+            # Get normalized impact for this bin
+            impact_raw = row['confidence_delta']  # Signed value
+            impact_abs = abs(impact_raw)  # Absolute value for normalization
+            norm_impact = all_impacts[bin_idx]  # Use pre-normalized value
+            bin_idx += 1
 
             for patch_id in patch_indices:
                 # Use individual patch's normalized attribution
-                patch_norm_attr = norm_attrs[patch_id]
+                patch_norm_attr = raw_attrs[patch_id]
 
-                # Calculate log ratio with BOTH normalized values
-                if norm_impact < epsilon:
-                    # Near-zero normalized impact
-                    log_ratio = -5.0 if patch_norm_attr > 0.1 else 0.0
-                elif patch_norm_attr < epsilon:
-                    # Near-zero normalized attribution but significant impact
-                    log_ratio = 5.0
-                else:
-                    # Both are meaningful, compute ratio
-                    ratio = norm_impact / patch_norm_attr
-                    log_ratio = np.log(ratio)
-                    # Adjust sign based on original impact direction
-                    if impact < 0:
-                        log_ratio = -log_ratio
+                # Calculate log ratio with proper epsilon handling
+                epsilon = 1e-8
+                ratio = (norm_impact + epsilon) / (patch_norm_attr + epsilon)
+                log_ratio = np.log(ratio)
 
-                # Clamp extreme values (should be less common now)
-                if not np.isfinite(log_ratio) or abs(log_ratio) > 10:
-                    log_ratio = np.clip(log_ratio, -10, 10) if np.isfinite(log_ratio) else 0.0
+                # Adjust sign based on original impact direction
+                # Negative impact means removing patches hurts classification (they were helpful)
+                if impact_raw < 0:
+                    log_ratio = -log_ratio
+
+                # Clamp extreme values to prevent outliers
+                log_ratio = np.clip(log_ratio, -50, 50)
 
                 patch_data[patch_id] = {
                     'log_ratio': log_ratio,
                     'attribution': raw_attrs[patch_id],
                     'norm_attribution': patch_norm_attr,
-                    'impact': impact,  # Keep raw impact for reference
-                    'norm_impact': norm_impact,  # Add normalized impact
+                    'impact': impact_raw,  # Keep raw impact for reference
+                    'norm_impact': norm_impact,  # Normalized absolute impact
                     'bin_id': bin_id
                 }
 
@@ -315,41 +305,41 @@ def get_batch_feature_activations(image_paths, model, sae, layer_idx, device, tr
     """Get SAE feature activations for a batch of images."""
     valid_images = []
     valid_paths = []
-    
+
     # Load and validate images
     for image_path in image_paths:
         img_tensor = load_and_process_image(image_path, transform, device, dataset_name)
         if img_tensor is not None:
             valid_images.append(img_tensor)
             valid_paths.append(image_path)
-    
+
     if not valid_images:
         return {}
-    
+
     # Process in batches
     all_feature_acts = {}
-    
+
     for i in range(0, len(valid_images), batch_size):
-        batch_imgs = valid_images[i:i+batch_size]
-        batch_paths = valid_paths[i:i+batch_size]
-        
+        batch_imgs = valid_images[i:i + batch_size]
+        batch_paths = valid_paths[i:i + batch_size]
+
         # Stack into batch tensor
         batch_tensor = torch.cat(batch_imgs, dim=0)  # [batch, 3, 224, 224]
-        
+
         with torch.no_grad():
             resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
             _, cache = model.run_with_cache(batch_tensor, names_filter=[resid_hook_name])
             resid = cache[resid_hook_name]  # [batch, 197, 768]
-            
+
             # Get SAE features using encode method
             _, codes = sae.encode(resid)  # codes shape: [batch, 197, d_sae]
-            
+
             # Process each image in batch
             for j, path in enumerate(batch_paths):
                 # Remove CLS token
                 feature_acts = codes[j, 1:]  # [196, d_sae] - patches only, no CLS
                 all_feature_acts[path] = feature_acts
-    
+
     return all_feature_acts
 
 
@@ -363,87 +353,85 @@ def analyze_image_features(feature_acts, image_data):
 
     feature_analysis = {}
     patch_data = image_data['patch_data']
-    
+
     # Pre-compute patch data as tensors for vectorized operations
     n_patches = 196
     log_ratios_tensor = torch.zeros(n_patches, device=feature_acts.device)
     impacts_tensor = torch.zeros(n_patches, device=feature_acts.device)
     valid_mask = torch.zeros(n_patches, dtype=torch.bool, device=feature_acts.device)
-    
+
     for patch_id, data in patch_data.items():
         if patch_id < n_patches:  # Safety check
             log_ratios_tensor[patch_id] = float(data['log_ratio'])
             impacts_tensor[patch_id] = float(data['impact'])
             valid_mask[patch_id] = True
-    
-    # Get top-k features based on TOTAL activation across all patches
-    # Sum the SAE activations across all 196 patches to find most active features overall
-    total_activation_per_feature = feature_acts.sum(dim=0)  # [d_sae]
+
+    # Get top-k features based on MAX activation across all patches
+    # Take the maximum SAE activation across all 196 patches to find most active features
+    max_activation_per_feature = feature_acts.max(dim=0).values  # [d_sae]
     k = min(config['max_features_per_image'], feature_acts.shape[1])
-    
-    # Select top-k features by total activation
-    top_total_acts, top_indices = torch.topk(total_activation_per_feature, k=k)
-    
-    # Optional: filter by threshold (checking if max activation in any patch > threshold)
-    # This ensures features have at least one meaningfully active patch
-    max_acts = feature_acts[:, top_indices].max(dim=0).values
-    threshold_mask = max_acts > config['activation_threshold']
+
+    # Select top-k features by maximum activation
+    top_max_acts, top_indices = torch.topk(max_activation_per_feature, k=k)
+
+    # Filter by threshold
+    threshold_mask = top_max_acts > config['activation_threshold']
     active_features = top_indices[threshold_mask]
-    
+
     if len(active_features) == 0:
         return feature_analysis
-    
+
     # Process all active features at once
     threshold = config['activation_threshold']
     min_patches = config['min_patches']
-    
+
     # Get activations for all active features at once
     active_feat_acts = feature_acts[:, active_features]  # [196, n_active_features]
-    
+
     # Create masks for active patches per feature
     active_masks = active_feat_acts > threshold  # [196, n_active_features]
-    
+
     # Process each feature
     for i, feat_idx in enumerate(active_features):
         feat_mask = active_masks[:, i]  # [196]
         combined_mask = feat_mask & valid_mask  # Only patches that are active AND have data
-        
+
         n_active = combined_mask.sum().item()
         if n_active < min_patches:
             continue
-        
+
         # Get activations for this feature
         feat_acts = active_feat_acts[:, i]  # [196]
         active_feat_acts_masked = feat_acts[combined_mask]
-        
+
         # Vectorized computation of metrics
         active_log_ratios = log_ratios_tensor[combined_mask]
         active_impacts = impacts_tensor[combined_mask]
-        
+
         # Compute weighted impacts
         activation_weights = active_feat_acts_masked
         weighted_impacts = active_impacts * activation_weights
         total_activation = activation_weights.sum().item()
-        
+
         feature_analysis[feat_idx.item()] = {
             # Attribution-based metrics
             'mean_log_ratio': active_log_ratios.mean().item(),
             'sum_log_ratio': active_log_ratios.sum().item(),
             'std_log_ratio': active_log_ratios.std().item() if n_active > 1 else 0,
-            
+
             # Pure impact metrics
             'mean_impact': active_impacts.mean().item(),
             'weighted_impact': weighted_impacts.sum().item() / total_activation if total_activation > 0 else None,
             'std_impact': active_impacts.std().item() if n_active > 1 else 0,
             'max_impact': active_impacts.abs().max().item(),
-            
+
             # Common metrics
             'n_active_patches': n_active,
             'feature_strength': active_feat_acts_masked.mean().item(),
             'mean_activation': active_feat_acts_masked.mean().item(),
             'max_activation': active_feat_acts_masked.max().item()
         }
-    
+
     return feature_analysis
 
 
@@ -451,31 +439,35 @@ def process_images_batch(image_list, image_data_map, model, sae, layer_idx, devi
     """Process all images and extract feature occurrences."""
     feature_occurrences = defaultdict(list)
     batch_size = 32  # Increased since analysis is now faster
-    
+
     print(f"Processing images in batches of {batch_size}...")
-    
+
     for batch_start in tqdm(range(0, len(image_list), batch_size), desc="Processing batches"):
         batch_end = min(batch_start + batch_size, len(image_list))
         batch_images = image_list[batch_start:batch_end]
-        
+
         # Get feature activations for entire batch
         batch_feature_acts = get_batch_feature_activations(
-            batch_images, model, sae, layer_idx, device, transform, dataset_name, 
+            batch_images,
+            model,
+            sae,
+            layer_idx,
+            device,
+            transform,
+            dataset_name,
             batch_size=min(16, batch_size)  # Sub-batch for memory efficiency
         )
-        
+
         # Analyze each image in the batch
         for image_name in batch_images:
             try:
                 if image_name not in batch_feature_acts:
                     continue
-                    
+
                 feature_acts = batch_feature_acts[image_name]
-                
+
                 # Analyze features for SaCo
-                image_features = analyze_image_features(
-                    feature_acts, image_data_map[image_name]
-                )
+                image_features = analyze_image_features(feature_acts, image_data_map[image_name])
 
                 if image_features:
                     image_class = image_data_map[image_name]['true_label']
@@ -496,18 +488,18 @@ def process_images_batch(image_list, image_data_map, model, sae, layer_idx, devi
                         })
             except Exception as e:
                 print(f"Error processing {image_name}: {e}")
-        
+
         # Clear GPU cache after each batch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    
+
     return feature_occurrences
 
 
 def aggregate_feature_statistics(feature_occurrences):
     """Aggregate feature occurrences into statistics."""
     aggregated_features = {}
-    
+
     for feat_id, occurrences in feature_occurrences.items():
         if len(occurrences) >= config['min_occurrences']:
             mean_ratios = [occ['mean_log_ratio'] for occ in occurrences]
@@ -532,7 +524,7 @@ def aggregate_feature_statistics(feature_occurrences):
                 'dominant_class': dominant_class,
                 'mean_feature_strength': np.mean([occ['feature_strength'] for occ in occurrences])
             }
-    
+
     return aggregated_features
 
 
@@ -540,19 +532,19 @@ def classify_features(aggregated_features):
     """Classify features into under/over-attributed categories."""
     under_attributed = {}  # High impact/low attribution (boost) - positive log ratio
     over_attributed = {}  # Low impact/high attribution (suppress) - negative log ratio
-    
+
     for feat_id, info in aggregated_features.items():
         ratio = info['mean_log_ratio']
         if ratio > 0:
             under_attributed[feat_id] = info
         else:
             over_attributed[feat_id] = info
-    
+
     # Sort by mean_log_ratio
     sort_metric = 'mean_log_ratio'
     under_attributed = dict(sorted(under_attributed.items(), key=lambda x: abs(x[1][sort_metric]), reverse=True))
     over_attributed = dict(sorted(over_attributed.items(), key=lambda x: abs(x[1][sort_metric]), reverse=True))
-    
+
     return under_attributed, over_attributed
 
 
@@ -560,7 +552,7 @@ def save_results(aggregated_features, under_attributed, over_attributed, dataset
     """Save analysis results and print summary."""
     # Update and save feature dictionary
     feature_dict = load_or_create_feature_dict(dataset_name, layer_idx)
-    
+
     for feat_id, feat_info in aggregated_features.items():
         if feat_id not in feature_dict:
             feature_dict[feat_id] = {}
@@ -574,7 +566,7 @@ def save_results(aggregated_features, under_attributed, over_attributed, dataset
         })
 
     save_feature_dict(feature_dict, dataset_name, layer_idx)
-    
+
     # Print summary
     print("\n" + "=" * 50)
     print(f"ANALYSIS SUMMARY - {dataset_name} Layer {layer_idx}")
@@ -599,7 +591,7 @@ def save_results(aggregated_features, under_attributed, over_attributed, dataset
             f"  {i+1}. Feature {feat_id}: {impact_str}log_ratio={stats['mean_log_ratio']:.3f}, "
             f"n_occ={stats['n_occurrences']}, classes={stats['classes']}"
         )
-    
+
     # Save results in v2 format
     results = {
         'results_by_type': {
@@ -627,11 +619,13 @@ def process_dataset_layer(dataset_name, layer_idx, device):
     print(f"\n{'='*80}")
     print(f"Processing: Dataset={dataset_name}, Layer={layer_idx}")
     print(f"{'='*80}\n")
-    
+
     dataset_config = get_dataset_config(dataset_name)
-    
+
     print(f"Analyzing {dataset_name} dataset, layer {layer_idx}")
-    print(f"Settings: activation_threshold={config['activation_threshold']}, max_features={config['max_features_per_image']}")
+    print(
+        f"Settings: activation_threshold={config['activation_threshold']}, max_features={config['max_features_per_image']}"
+    )
 
     # Load model and SAE
     model = load_model_for_dataset(dataset_config, device)
@@ -665,7 +659,7 @@ def process_dataset_layer(dataset_name, layer_idx, device):
 
     # Save results
     save_results(aggregated_features, under_attributed, over_attributed, dataset_name, layer_idx)
-    
+
     # Clean up
     del model, sae
     if torch.cuda.is_available():
@@ -678,12 +672,12 @@ def main():
     """Main entry point - coordinates processing of all datasets and layers."""
     # Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     # Process each dataset and layer combination
     for dataset_name in config['datasets']:
         for layer_idx in config['layers']:
             process_dataset_layer(dataset_name, layer_idx, device)
-    
+
     print(f"\n{'='*80}")
     print("All datasets and layers processed successfully!")
     print(f"{'='*80}")
