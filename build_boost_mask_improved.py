@@ -3,9 +3,13 @@ Improved Boosting Strategy Based on Analysis Findings
 
 Key insights incorporated:
 1. Focus on 10-100 occurrence features (best signal-to-noise)
-2. Only boost/suppress features with |log ratio| >= 1.5
+2. Only boost/suppress features with |bin bias| >= 1.5
 3. Class-aware corrections (COVID over-attributed, Non-COVID under-attributed)
 4. Balance frequency and impact in selection
+
+Note: The field 'mean_log_ratio' now contains bin_attribution_bias values:
+- Positive values = under-attributed (need boost)
+- Negative values = over-attributed (need suppression)
 """
 
 import math
@@ -59,9 +63,9 @@ def get_sorted_saco_features(
         cache_attr: Attribute name for caching (e.g., '_cached_sorted_over')
         min_occurrences: Minimum feature occurrences
         max_occurrences: Maximum feature occurrences
-        min_log_ratio: Minimum log ratio threshold
+        min_log_ratio: Minimum bin bias threshold (now using bin_attribution_bias)
         use_balanced_score: Whether to use balanced scoring
-        use_abs_ratio: Whether to use absolute value of log ratio
+        use_abs_ratio: Whether to use absolute value of bin bias
         
     Returns:
         List of (feat_id, stats, score) tuples sorted by score
@@ -131,14 +135,14 @@ def apply_modulation(
 
         # Get ratio magnitude for adaptive strength
         if mode == 'boost':
-            ratio_magnitude = stats.get('mean_log_ratio', 0)
-            # Adaptive boost based on log ratio magnitude
+            ratio_magnitude = stats.get('mean_log_ratio', 0)  # Now contains bin_attribution_bias
+            # Adaptive boost based on bin bias magnitude
             adaptive_strength = 1.0 + (strength - 1.0) * (0.5 + 0.5 * min(ratio_magnitude / 2.0, 1.0))
             # Apply boost
             patch_modulation = 1.0 + feat_activations.clamp(0, 1) * (adaptive_strength - 1.0)
         else:  # suppress
-            ratio_magnitude = abs(stats.get('mean_log_ratio', 0))
-            # Adaptive suppression based on log ratio magnitude
+            ratio_magnitude = abs(stats.get('mean_log_ratio', 0))  # Now contains bin_attribution_bias
+            # Adaptive suppression based on bin bias magnitude
             adaptive_strength = strength * (0.5 + 0.5 * min(ratio_magnitude / 2.0, 1.0))
             # Apply suppression
             patch_modulation = 1.0 - feat_activations.clamp(0, 1) * (1.0 - adaptive_strength)

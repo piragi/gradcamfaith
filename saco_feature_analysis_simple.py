@@ -157,39 +157,24 @@ def load_saco_data(dataset_name, results_dir):
                 'patch_indices': patch_indices,
                 'mean_attribution': row['mean_attribution'],
                 'confidence_delta': row['confidence_delta'],
-                'confidence_delta_abs': row['confidence_delta_abs']
+                'confidence_delta_abs': row['confidence_delta_abs'],
+                'bin_attribution_bias': row.get('bin_attribution_bias', 0.0)  # Get bin bias score
             }
 
-            # Get normalized impact for this bin
-            impact_raw = row['confidence_delta']  # Signed value
-            impact_abs = abs(impact_raw)  # Absolute value for normalization
-            norm_impact = all_impacts[bin_idx]  # Use pre-normalized value
-            bin_idx += 1
-
+            # Get bin attribution bias - this replaces log_ratio calculation
+            bin_bias = row.get('bin_attribution_bias', 0.0)
+            impact_raw = row['confidence_delta']  # Keep for reference
+            
+            # Assign the same bin bias to all patches in this bin
             for patch_id in patch_indices:
-                # Use individual patch's normalized attribution
-                patch_norm_attr = raw_attrs[patch_id]
-
-                # Calculate log ratio with proper epsilon handling
-                epsilon = 1e-8
-                ratio = (norm_impact + epsilon) / (patch_norm_attr + epsilon)
-                log_ratio = np.log(ratio)
-
-                # Adjust sign based on original impact direction
-                # Negative impact means removing patches hurts classification (they were helpful)
-                if impact_raw < 0:
-                    log_ratio = -log_ratio
-
-                # Clamp extreme values to prevent outliers
-                log_ratio = np.clip(log_ratio, -50, 50)
-
                 patch_data[patch_id] = {
-                    'log_ratio': log_ratio,
+                    'log_ratio': bin_bias,  # Use bin_attribution_bias instead of log_ratio
                     'attribution': raw_attrs[patch_id],
-                    'norm_attribution': patch_norm_attr,
+                    'norm_attribution': raw_attrs[patch_id],  # Keep original attribution
                     'impact': impact_raw,  # Keep raw impact for reference
-                    'norm_impact': norm_impact,  # Normalized absolute impact
-                    'bin_id': bin_id
+                    'norm_impact': abs(impact_raw),  # Use absolute impact
+                    'bin_id': bin_id,
+                    'bin_attribution_bias': bin_bias  # Also store explicitly
                 }
 
         # Get true label from path structure: .../class_X/...
@@ -414,8 +399,8 @@ def analyze_image_features(feature_acts, image_data):
         total_activation = activation_weights.sum().item()
 
         feature_analysis[feat_idx.item()] = {
-            # Attribution-based metrics
-            'mean_log_ratio': active_log_ratios.mean().item(),
+            # Bin bias metrics (positive = under-attributed, negative = over-attributed)
+            'mean_log_ratio': active_log_ratios.mean().item(),  # Now using bin_attribution_bias
             'sum_log_ratio': active_log_ratios.sum().item(),
             'std_log_ratio': active_log_ratios.std().item() if n_active > 1 else 0,
 
@@ -576,19 +561,19 @@ def save_results(aggregated_features, under_attributed, over_attributed, dataset
     print(f"Over-attributed (suppress): {len(over_attributed)} features")
 
     # Print top features
-    print("\nTop 5 UNDER-ATTRIBUTED features (high impact, low attribution):")
+    print("\nTop 5 UNDER-ATTRIBUTED features (positive bias, need boost):")
     for i, (feat_id, stats) in enumerate(list(under_attributed.items())[:5]):
         impact_str = f"impact={stats['mean_impact']:.4f}, " if stats.get('mean_impact') is not None else ""
         print(
-            f"  {i+1}. Feature {feat_id}: {impact_str}log_ratio={stats['mean_log_ratio']:.3f}, "
+            f"  {i+1}. Feature {feat_id}: {impact_str}bin_bias={stats['mean_log_ratio']:.3f}, "
             f"n_occ={stats['n_occurrences']}, classes={stats['classes']}"
         )
 
-    print("\nTop 5 OVER-ATTRIBUTED features (low impact, high attribution):")
+    print("\nTop 5 OVER-ATTRIBUTED features (negative bias, need suppression):")
     for i, (feat_id, stats) in enumerate(list(over_attributed.items())[:5]):
         impact_str = f"impact={stats['mean_impact']:.4f}, " if stats.get('mean_impact') is not None else ""
         print(
-            f"  {i+1}. Feature {feat_id}: {impact_str}log_ratio={stats['mean_log_ratio']:.3f}, "
+            f"  {i+1}. Feature {feat_id}: {impact_str}bin_bias={stats['mean_log_ratio']:.3f}, "
             f"n_occ={stats['n_occurrences']}, classes={stats['classes']}"
         )
 
