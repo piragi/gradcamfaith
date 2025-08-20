@@ -15,6 +15,10 @@ def main():
 
     # Layers to test
     layers_to_test = [6]
+    
+    # Subset settings
+    subset_size = 100  # Set to None to use all images
+    random_seed = 42  # For reproducibility
 
     # Output directory for all experiments
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -72,7 +76,9 @@ def main():
                     dataset_name=dataset_name,
                     source_data_path=source_path,
                     prepared_data_path=Path(f"./data/{dataset_name}_unified/"),
-                    force_prepare=False
+                    force_prepare=False,
+                    subset_size=subset_size,
+                    random_seed=random_seed
                 )
                 print(f"Completed layer {layer} - processed {len(results)} images")
 

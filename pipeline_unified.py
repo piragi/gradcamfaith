@@ -384,7 +384,9 @@ def run_unified_pipeline(
     source_data_path: Path,
     prepared_data_path: Optional[Path] = None,
     device: Optional[torch.device] = None,
-    force_prepare: bool = False
+    force_prepare: bool = False,
+    subset_size: Optional[int] = None,
+    random_seed: Optional[int] = None
 ) -> List[ClassificationResult]:
     """
     Run the unified pipeline for any supported dataset.
@@ -396,6 +398,8 @@ def run_unified_pipeline(
         prepared_data_path: Path for prepared data (default: ./data/{dataset_name}_unified)
         device: Device to use
         force_prepare: Force re-preparation of dataset
+        subset_size: If specified, only use this many random images
+        random_seed: Random seed for reproducible subset selection
         
     Returns:
         List of classification results
@@ -458,7 +462,15 @@ def run_unified_pipeline(
     # Get both image paths and their true labels
     image_data = [(Path(img_path), label_idx) for img_path, label_idx in split_dataset.samples]
     
-    print(f"\nProcessing {len(image_data)} {split_to_use} images")
+    # Apply subset if requested
+    if subset_size is not None and subset_size < len(image_data):
+        import random
+        if random_seed is not None:
+            random.seed(random_seed)
+        image_data = random.sample(image_data, subset_size)
+        print(f"\nProcessing {len(image_data)} randomly selected {split_to_use} images (subset of {len(split_dataset.samples)})")
+    else:
+        print(f"\nProcessing {len(image_data)} {split_to_use} images")
     
     # Classify and explain
     results = []
