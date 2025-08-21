@@ -53,7 +53,8 @@ def get_sorted_saco_features(
     max_occurrences: int,
     min_log_ratio: float,
     use_balanced_score: bool,
-    use_abs_ratio: bool = True
+    use_abs_ratio: bool = True,
+    debug: bool = True
 ) -> List[Tuple[int, Dict, float]]:
     """
     Get sorted features from SaCo results with caching.
@@ -66,24 +67,40 @@ def get_sorted_saco_features(
         min_log_ratio: Minimum bin bias threshold (now using bin_attribution_bias)
         use_balanced_score: Whether to use balanced scoring
         use_abs_ratio: Whether to use absolute value of bin bias
+        debug: Whether to print debug information
         
     Returns:
         List of (feat_id, stats, score) tuples sorted by score
     """
     # Check cache first
     if hasattr(build_boost_mask_improved, cache_attr):
-        return getattr(build_boost_mask_improved, cache_attr)
+        cached = getattr(build_boost_mask_improved, cache_attr)
+        if debug:
+            print(f"  Using cached {cache_attr}: {len(cached)} features")
+        return cached
+
+    if debug:
+        print(f"\n  Building sorted features for {cache_attr}:")
+        print(f"    Total features in dict: {len(features_dict)}")
+        print(f"    Filters: occurrences=[{min_occurrences}, {max_occurrences}], min_bias={min_log_ratio}")
 
     # Build and cache sorted list
     presorted = []
+    filtered_reasons = {'occ_low': 0, 'occ_high': 0, 'ratio_low': 0}
+
     for feat_id, stats in features_dict.items():
         n_occ = stats.get('n_occurrences', 0)
         log_ratio = abs(stats.get('mean_log_ratio', 0)) if use_abs_ratio else stats.get('mean_log_ratio', 0)
 
-        # Apply filters
-        if n_occ < min_occurrences or n_occ > max_occurrences:
+        # Apply filters with tracking
+        if n_occ < min_occurrences:
+            filtered_reasons['occ_low'] += 1
+            continue
+        if n_occ > max_occurrences:
+            filtered_reasons['occ_high'] += 1
             continue
         if log_ratio < min_log_ratio:
+            filtered_reasons['ratio_low'] += 1
             continue
 
         # Compute score
@@ -96,6 +113,17 @@ def get_sorted_saco_features(
 
     # Sort by score
     presorted.sort(key=lambda x: x[2], reverse=True)
+
+    if debug:
+        print(f"    Filtered out: {filtered_reasons}")
+        print(f"    Remaining features: {len(presorted)}")
+        if presorted:
+            print(f"    Top 3 features:")
+            for i, (fid, stats, score) in enumerate(presorted[:3]):
+                print(
+                    f"      {i+1}. Feature {fid}: bias={stats.get('mean_log_ratio', 0):.3f}, "
+                    f"occ={stats.get('n_occurrences', 0)}, score={score:.3f}"
+                )
 
     # Cache for future use
     setattr(build_boost_mask_improved, cache_attr, presorted)
@@ -113,14 +141,14 @@ def apply_modulation(
     debug: bool = False
 ) -> Tuple[torch.Tensor, List[int]]:
     """
-    Apply boost or suppress modulation to features.
+    Apply boost or suppress modulation to features with CONSTANT strength.
     
     Args:
         codes: SAE codes [n_patches, n_feats]
         boost_mask: Current boost mask to modify
         features: List of (feat_id, stats, score) tuples
         mode: 'boost' or 'suppress'
-        strength: Base strength for modulation
+        strength: Constant strength for modulation (no adaptation)
         min_activation: Minimum activation threshold
         debug: Whether to print debug info
         
@@ -133,29 +161,28 @@ def apply_modulation(
         feat_activations = codes[:, feat_id]
         active_mask = feat_activations > min_activation
 
-        # Get ratio magnitude for adaptive strength
+        # Use CONSTANT strength - no adaptation based on bias magnitude
         if mode == 'boost':
-            ratio_magnitude = stats.get('mean_log_ratio', 0)  # Now contains bin_attribution_bias
-            # Adaptive boost based on bin bias magnitude
-            adaptive_strength = 1.0 + (strength - 1.0) * (0.5 + 0.5 * min(ratio_magnitude / 2.0, 1.0))
-            # Apply boost
-            patch_modulation = 1.0 + feat_activations.clamp(0, 1) * (adaptive_strength - 1.0)
+            # Apply constant boost to patches where feature is active
+            # For active patches, multiply by strength directly
+            patch_modulation = torch.ones_like(feat_activations)
+            patch_modulation[active_mask] = strength
         else:  # suppress
-            ratio_magnitude = abs(stats.get('mean_log_ratio', 0))  # Now contains bin_attribution_bias
-            # Adaptive suppression based on bin bias magnitude
-            adaptive_strength = strength * (0.5 + 0.5 * min(ratio_magnitude / 2.0, 1.0))
-            # Apply suppression
-            patch_modulation = 1.0 - feat_activations.clamp(0, 1) * (1.0 - adaptive_strength)
+            # Apply constant suppression to patches where feature is active
+            # For active patches, divide by strength (or multiply by 1/strength)
+            patch_modulation = torch.ones_like(feat_activations)
+            patch_modulation[active_mask] = 1.0 / strength if strength > 0 else 0.1
 
         boost_mask *= patch_modulation
         selected_features.append(feat_id)
 
         if debug:
             n_active = active_mask.sum().item()
+            actual_strength = strength if mode == 'boost' else (1.0 / strength if strength > 0 else 0.1)
             print(
-                f"  {mode.upper()} {feat_id}: ratio={stats.get('mean_log_ratio', 0):.2f}, "
+                f"  {mode.upper()} {feat_id}: ratio={stats.get('mean_log_ratio', 0):.4f}, "
                 f"occ={stats.get('n_occurrences', 0)}, class={stats.get('dominant_class', 'unknown')}, "
-                f"strength={adaptive_strength:.2f}, patches={n_active}"
+                f"constant_strength={actual_strength:.2f}, patches={n_active}"
             )
 
     return boost_mask, selected_features
@@ -267,7 +294,8 @@ def select_saco_features(
     min_log_ratio: float,
     use_balanced_score: bool,
     suppress_priority: float = 1.0,
-    boost_priority: float = 1.0
+    boost_priority: float = 1.0,
+    debug: bool = True
 ) -> Tuple[List[Tuple[int, Dict, float]], List[Tuple[int, Dict, float]]]:
     """
     Select features based on SaCo analysis.
@@ -278,12 +306,22 @@ def select_saco_features(
     n_feats = codes.shape[1]
     results_by_type = saco_results.get('results_by_type', {})
 
+    if debug:
+        print(f"\n=== SELECT SACO FEATURES DEBUG ===")
+        print(f"Active features in current sample: {len(active_set)}")
+        print(f"Max suppress: {max_suppress}, Max boost: {max_boost}")
+        print(f"SAE feature dimension: {n_feats}")
+
     suppress_features = []
     boost_features = []
 
     # Process over-attributed features (suppress)
     if max_suppress > 0:
         over_attributed = results_by_type.get('over_attributed', {})
+        if debug:
+            print(f"\nProcessing OVER-ATTRIBUTED features for suppression:")
+            print(f"  Total over-attributed features available: {len(over_attributed)}")
+
         if over_attributed:
             sorted_features = get_sorted_saco_features(
                 over_attributed,
@@ -292,21 +330,37 @@ def select_saco_features(
                 max_occurrences,
                 min_log_ratio,
                 use_balanced_score,
-                use_abs_ratio=True
+                use_abs_ratio=True,
+                debug=debug
             )
+
+            # Track filtering
+            not_active = 0
+            out_of_bounds = 0
 
             # Filter by active features
             for feat_id, stats, score in sorted_features:
                 if feat_id >= n_feats:
+                    out_of_bounds += 1
                     continue
                 if feat_id in active_set:
                     suppress_features.append((feat_id, stats, score * suppress_priority))
                     if len(suppress_features) >= max_suppress:
                         break
+                else:
+                    not_active += 1
+
+            if debug:
+                print(f"  Filter results: {not_active} not active, {out_of_bounds} out of bounds")
+                print(f"  Selected {len(suppress_features)} features for suppression")
 
     # Process under-attributed features (boost)
     if max_boost > 0:
         under_attributed = results_by_type.get('under_attributed', {})
+        if debug:
+            print(f"\nProcessing UNDER-ATTRIBUTED features for boosting:")
+            print(f"  Total under-attributed features available: {len(under_attributed)}")
+
         if under_attributed:
             sorted_features = get_sorted_saco_features(
                 under_attributed,
@@ -315,26 +369,41 @@ def select_saco_features(
                 max_occurrences,
                 min_log_ratio,
                 use_balanced_score,
-                use_abs_ratio=False
+                use_abs_ratio=False,
+                debug=debug
             )
+
+            # Track filtering
+            not_active = 0
+            out_of_bounds = 0
 
             # Filter by active features
             for feat_id, stats, score in sorted_features:
                 if feat_id >= n_feats:
+                    out_of_bounds += 1
                     continue
                 if feat_id in active_set:
                     boost_features.append((feat_id, stats, score * boost_priority))
                     if len(boost_features) >= max_boost:
                         break
+                else:
+                    not_active += 1
+
+            if debug:
+                print(f"  Filter results: {not_active} not active, {out_of_bounds} out of bounds")
+                print(f"  Selected {len(boost_features)} features for boosting")
+
+    if debug:
+        print(f"\nFINAL: {len(suppress_features)} suppress, {len(boost_features)} boost")
 
     return suppress_features, boost_features
 
 
 def precache_sorted_features(
     saco_results: Dict[str, Any],
-    min_occurrences: int = 1,
+    min_occurrences: int = 10,
     max_occurrences: int = 100000,
-    min_log_ratio: float = 1.,
+    min_log_ratio: float = 0.,
     use_balanced_score: bool = True
 ):
     """
@@ -391,7 +460,7 @@ def build_boost_mask_improved(
     max_occurrences: int = 10000000,
 
     # Ratio thresholds
-    min_log_ratio: float = 1.5,
+    min_log_ratio: float = 0.,
 
     # Class-specific behavior
     class_aware: bool = False,

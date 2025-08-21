@@ -1,5 +1,6 @@
 import copy
 import gc
+import logging
 import os
 from pathlib import Path
 
@@ -8,23 +9,22 @@ import torchvision
 from vit_prisma.models.base_vit import HookedSAEViT
 from vit_prisma.sae import VisionSAETrainer
 from vit_prisma.sae.config import VisionModelSAERunnerConfig
-import wandb
 
+import wandb
 from dataset_config import get_dataset_config
 from pipeline_unified import load_model_for_dataset
-import logging
 
 # Suppress PIL debug logging
 logging.getLogger('PIL').setLevel(logging.WARNING)
 
 # ============ CONFIG ============
 config = {
-    'datasets': ['covidquex', 'hyperkvasir'],  # list of datasets to train on
-    'layers': [6],     # which layers to train
-    'k': 64,                    # topk activation
-    'expansion_factor': 64,
-    'lr': 2e-5,
-    'epochs': 3,
+    'datasets': ['covidquex'],  # list of datasets to train on
+    'layers': [6],  # which layers to train
+    'k': 64,  # topk activation
+    'expansion_factor': 128,
+    'lr': 1e-5,
+    'epochs': 5,
     'batch_size': 4096,
     'wandb_project': 'vit_unified_sae',
     'log_to_wandb': True,
@@ -36,7 +36,7 @@ for dataset_name in config['datasets']:
     print(f"\n{'='*60}")
     print(f"Processing dataset: {dataset_name}")
     print(f"{'='*60}\n")
-    
+
     # Load dataset config
     dataset_config = get_dataset_config(dataset_name)
     print(f"Training SAEs for {dataset_config.name} dataset")
@@ -141,7 +141,7 @@ for dataset_name in config['datasets']:
             gc.collect()
 
     print(f"\nAll SAEs trained and saved in data/sae_{dataset_name}/")
-    
+
     # Clean up model before next dataset
     del hooked_model
     if torch.cuda.is_available():

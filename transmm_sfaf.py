@@ -11,8 +11,8 @@ from vit_prisma.models.base_vit import HookedSAEViT
 from vit_prisma.models.weight_conversion import convert_timm_weights
 from vit_prisma.sae import SparseAutoencoder
 
+from build_boost_mask_improved import (build_boost_mask_improved, precache_sorted_features)
 from config import PipelineConfig
-from build_boost_mask_improved import build_boost_mask_improved, precache_sorted_features
 
 
 def load_models():
@@ -21,9 +21,7 @@ def load_models():
     model = HookedSAEViT.from_pretrained("vit_base_patch16_224")
     model.head = torch.nn.Linear(model.cfg.d_model, 3)
 
-    checkpoint = torch.load(
-        "./model/model_best.pth.tar"
-    )
+    checkpoint = torch.load("./model/model_best.pth.tar")
     state_dict = checkpoint['state_dict'].copy()
 
     if 'lin_head.weight' in state_dict:
@@ -48,7 +46,7 @@ def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict
         dataset_name: Name of the dataset ('covidquex' or 'hyperkvasir')
     """
     resources = {}
-    
+
     for layer_idx in layers:
         try:
             # Find SAE path dynamically
@@ -56,27 +54,27 @@ def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict
             sae_files = list(sae_dir.glob("*/n_images_*.pt"))
             # Filter out log_feature_sparsity files
             sae_files = [f for f in sae_files if 'log_feature_sparsity' not in str(f)]
-            
+
             if not sae_files:
                 print(f"Warning: No SAE found for {dataset_name} layer {layer_idx} in {sae_dir}")
                 continue
-            
+
             # Use the most recent SAE file
             sae_path = sorted(sae_files)[-1]
             print(f"Loading SAE from {sae_path}")
-            
+
             sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
             sae.cuda().eval()
-            
+
             resources[layer_idx] = {"sae": sae}
-            
+
             # Load SaCo feature dictionary
             saco_dict_path = Path(f"data/featuredict_{dataset_name}/layer_{layer_idx}_saco_features.pt")
             if saco_dict_path.exists():
                 saco_results = torch.load(saco_dict_path, weights_only=False)
                 resources[layer_idx]["saco_dict"] = saco_results
                 print(f"Loaded SaCo dictionary for {dataset_name} layer {layer_idx}")
-                
+
                 # Pre-cache sorted features for performance
                 try:
                     precache_sorted_features(saco_results)
@@ -85,10 +83,10 @@ def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict
             else:
                 print(f"ERROR: SaCo dict not found at {saco_dict_path}")
                 print(f"Please run saco_feature_analysis_simple.py first to generate feature dictionaries")
-                
+
         except Exception as e:
             print(f"Error loading resources for {dataset_name} layer {layer_idx}: {e}")
-    
+
     return resources
 
 
@@ -199,21 +197,21 @@ def transmm_prisma(
         cam_pos_avg = avg_heads(cam, grad)
 
         if i in active_steering_layers:
-            print(f"--- Applying steering for layer {i} ---")
+            # print(f"--- Applying steering for layer {i} ---")
             resources = steering_resources[i]
             codes_for_layer = sae_codes.get(i)
 
             if codes_for_layer is not None:
-                
+
                 # ===== RANDOM BASELINE BOOST =====
                 if "saco_dict" in resources:
                     saco_results = resources["saco_dict"]
-                    
+
                     # Get boosting parameters from config
                     boosting_config = config.classify.boosting
-                    
-                    print(f"Using {boosting_config.selection_method.upper()} boosting for layer {i}")
-                    
+
+                    # print(f"Using {boosting_config.selection_method.upper()} boosting for layer {i}")
+
                     boost_mask, selected_feat_ids = build_boost_mask_improved(
                         sae_codes=codes_for_layer,
                         saco_results=saco_results,
@@ -235,7 +233,7 @@ def transmm_prisma(
                         random_seed=boosting_config.random_seed,
                         debug=False
                     )
-                    
+
                 else:
                     print(f"ERROR: No SaCo dict found for layer {i} - skipping steering")
                     continue  # Skip this layer if no SaCo dict available

@@ -85,20 +85,20 @@ class FileConfig:
 @dataclass
 class BoostingConfig:
     """Configuration for SAE-based feature boosting/suppression."""
-    # Strength parameters
-    boost_strength: float = 10.
-    suppress_strength: float = 0.2
+    # Strength parameters (constant multipliers, no adaptation)
+    boost_strength: float = 5.0  # Multiply attribution by this for boost features
+    suppress_strength: float = 5.0  # Divide attribution by this for suppress features
 
     # Selection limits
-    max_boost: int = 15
-    max_suppress: int = 20
+    max_boost: int = 10
+    max_suppress: int = 10
 
     # Frequency filtering
     min_occurrences: int = 1
     max_occurrences: int = 10000000
 
     # Ratio thresholds
-    min_log_ratio: float = 1.0
+    min_log_ratio: float = 0.
 
     # Activation threshold
     min_activation: float = 0.1

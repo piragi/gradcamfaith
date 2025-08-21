@@ -25,13 +25,13 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 
 # ============ CONFIG ============
 config = {
-    'datasets': ['covidquex', 'hyperkvasir'],  # List of datasets to analyze
-    'layers': [4, 5, 6, 7, 8, 9, 10],  # List of layers to analyze
+    'datasets': ['covidquex'],  # List of datasets to analyze
+    'layers': [6],  # List of layers to analyze
     'n_images': None,  # None for all, or specific number
     'activation_threshold': 0.1,  # Min activation to consider feature active
     'min_patches': 1,  # Min patches per feature
     'min_occurrences': 1,  # Min times feature must appear across dataset
-    'max_features_per_image': 64,  # Process only top-k features per image
+    'max_features_per_image': 128,  # Process only top-k features per image
 
     # Path configuration
     'sae_base_dir': 'data',  # Base directory for SAE models (data/sae_hyperkvasir/...)
@@ -164,7 +164,7 @@ def load_saco_data(dataset_name, results_dir):
             # Get bin attribution bias - this replaces log_ratio calculation
             bin_bias = row.get('bin_attribution_bias', 0.0)
             impact_raw = row['confidence_delta']  # Keep for reference
-            
+
             # Assign the same bin bias to all patches in this bin
             for patch_id in patch_indices:
                 patch_data[patch_id] = {
@@ -208,7 +208,7 @@ def load_sae(dataset_name, layer_idx):
     sae_dir = Path(config['sae_base_dir']) / f"sae_{dataset_name}" / f"layer_{layer_idx}"
 
     # Find SAE file - look in subdirectories
-    sae_files = list(sae_dir.glob("*/n_images_*.pt"))
+    sae_files = list(sae_dir.glob("*/n_images_108575.pt"))
 
     # Filter out log_feature_sparsity files
     sae_files = [f for f in sae_files if 'log_feature_sparsity' not in str(f)]
