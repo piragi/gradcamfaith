@@ -1,6 +1,6 @@
 # model.py
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -129,6 +129,112 @@ def get_prediction(
             class_map.get(i, f"Class {i}"): probs[i].item()
             for i in range(len(probs))
         }
+    }
+
+
+def load_clip_model(
+    model_name: str = "openai/clip-vit-base-patch16",
+    device: Optional[torch.device] = None,
+    cache_dir: Optional[str] = None
+) -> Tuple[Any, Any]:  # Returns (model, processor)
+    """
+    Load CLIP model and processor for zero-shot classification.
+    
+    Args:
+        model_name: Name of the CLIP model to load from Hugging Face
+        device: Device to load model on
+        cache_dir: Optional cache directory for model weights
+        
+    Returns:
+        Tuple of (model, processor)
+    """
+    try:
+        from transformers import CLIPModel, CLIPProcessor
+    except ImportError:
+        raise ImportError(
+            "transformers library is required for CLIP. "
+            "Install with: pip install transformers"
+        )
+    
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    print(f"Loading CLIP model: {model_name}")
+    
+    # Load model and processor
+    model = CLIPModel.from_pretrained(
+        model_name,
+        cache_dir=cache_dir
+    ).to(device)
+    
+    processor = CLIPProcessor.from_pretrained(
+        model_name,
+        cache_dir=cache_dir
+    )
+    
+    model.eval()
+    print(f"✅ CLIP model loaded successfully on {device}")
+    
+    return model, processor
+
+
+def get_clip_prediction(
+    model: Any,  # CLIPModel
+    processor: Any,  # CLIPProcessor
+    image: Any,  # PIL Image or tensor
+    text_prompts: Optional[List[str]] = None,
+    device: Optional[torch.device] = None
+) -> Dict[str, Any]:
+    """
+    Get prediction from CLIP model for an image.
+    
+    Args:
+        model: CLIP model
+        processor: CLIP processor
+        image: Input image (PIL Image or preprocessed tensor)
+        text_prompts: List of text descriptions for each class
+        device: Device to run inference on
+        
+    Returns:
+        Dictionary with prediction details similar to get_prediction
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if text_prompts is None:
+        # Default prompts for waterbirds
+        text_prompts = ["a landbird", "a waterbird"]
+    
+    # Process inputs
+    inputs = processor(
+        text=text_prompts,
+        images=image,
+        return_tensors="pt",
+        padding=True
+    )
+    
+    # Move to device
+    inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+              for k, v in inputs.items()}
+    
+    # Get predictions
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits_per_image[0]  # Shape: [num_classes]
+        probs = F.softmax(logits, dim=0)
+    
+    pred_class_idx = probs.argmax().item()
+    
+    return {
+        "logits": logits,
+        "probabilities": probs,
+        "predicted_class_idx": pred_class_idx,
+        "predicted_class_label": text_prompts[pred_class_idx],
+        "all_probabilities": {
+            text_prompts[i]: probs[i].item()
+            for i in range(len(text_prompts))
+        },
+        "text_prompts": text_prompts
     }
 
 

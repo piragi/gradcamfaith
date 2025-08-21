@@ -131,6 +131,11 @@ class ClassificationConfig:
     # Model parameters
     model_type: str = "vit_base_patch16_224"
     num_classes: int = 3
+    
+    # CLIP-specific parameters
+    use_clip: bool = False
+    clip_model_name: str = "openai/clip-vit-base-patch16"
+    clip_text_prompts: Optional[List[str]] = None  # If None, uses dataset defaults
 
     attribution_method: str = "transmm"
     analysis = False

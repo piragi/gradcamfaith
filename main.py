@@ -9,15 +9,17 @@ from pipeline_unified import run_unified_pipeline
 
 def main():
     datasets = [
-        ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
-        # ("covidquex", Path("./data/covidquex/data/"))
+        # ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
+        # ("covidquex", Path("./data/covidquex/data/")),
+        # ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
+        ("oxford_pets", Path("./data/oxford_pets"))
     ]
 
     # Layers to test
     layers_to_test = [6]
-    
+
     # Subset settings
-    subset_size = 100  # Set to None to use all images
+    subset_size = 50  # Set to None to use all images
     random_seed = 42  # For reproducibility
 
     # Output directory for all experiments
@@ -37,11 +39,22 @@ def main():
             pipeline_config = config.PipelineConfig()
             pipeline_config.file.use_cached_original = False
             pipeline_config.file.use_cached_perturbed = ""
-            pipeline_config.file.current_mode = "val"
-            pipeline_config.file.weighted = True
+            pipeline_config.file.current_mode = "train"  # Changed to train as requested
+            pipeline_config.file.weighted = False  # Changed to False as requested
             pipeline_config.classify.analysis = False
             pipeline_config.classify.data_collection = False
             pipeline_config.file.set_dataset(dataset_name)
+
+            # Enable CLIP for waterbirds and oxford_pets
+            if dataset_name in ["waterbirds", "oxford_pets"]:
+                pipeline_config.classify.use_clip = True
+                pipeline_config.classify.clip_model_name = "openai/clip-vit-base-patch16"
+
+                # Set appropriate prompts
+                if dataset_name == "waterbirds":
+                    pipeline_config.classify.clip_text_prompts = ["a terrestrial bird", "an aquatic bird"]
+                elif dataset_name == "oxford_pets":
+                    pipeline_config.classify.clip_text_prompts = ["a cat", "a dog"]
 
             # Set boosting parameters - only changing the layer
             pipeline_config.classify.boosting.steering_layers = [layer]
@@ -50,7 +63,7 @@ def main():
             exp_name = f"{dataset_name}_layer{layer}"
             exp_output_dir = output_base_dir / exp_name
             exp_output_dir.mkdir(parents=True, exist_ok=True)
-            pipeline_config.file.base_pipeline_dir = exp_output_dir
+            pipeline_config.file.base_pipeline_dir = Path(f"./data/{dataset_name}_unified/results")  # exp_output_dir
 
             # Save config for this run
             config_dict = {

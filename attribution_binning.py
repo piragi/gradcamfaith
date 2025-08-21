@@ -267,23 +267,33 @@ def apply_binned_perturbation(
             mean_channels = ImageStat.Stat(original_pil_image).mean
             mean_color_value = int(mean_channels[0])
 
-            # 2. Create a full-size RGB layer with the mean value
+            # 2. Ensure the original image is in RGB mode
+            if original_pil_image.mode != 'RGB':
+                original_pil_image = original_pil_image.convert('RGB')
+            
+            # 3. Create a full-size RGB layer with the mean value
             # We create a large mask and then apply it, which is more efficient
             # than creating and pasting many small patches.
-            # Use RGB mode to match the original image
             grayscale_layer = Image.new(
                 "RGB", original_pil_image.size, (mean_color_value, mean_color_value, mean_color_value)
             )
 
-            # 3. Create a perturbed PIL image by pasting the mean value only where the mask is True
+            # 4. Create a perturbed PIL image by pasting the mean value only where the mask is True
             # The mask needs to be converted to a PIL image to be used here.
             # The bin_mask is a Tensor, so we convert it.
-            pil_mask = Image.fromarray(bin_mask.numpy().astype('uint8') * 255, mode='L')
+            # Ensure the mask has the same size as the image
+            if bin_mask.shape != (original_pil_image.height, original_pil_image.width):
+                # Resize the mask to match the image size
+                mask_array = bin_mask.numpy().astype('uint8') * 255
+                pil_mask = Image.fromarray(mask_array, mode='L')
+                pil_mask = pil_mask.resize(original_pil_image.size, Image.NEAREST)
+            else:
+                pil_mask = Image.fromarray(bin_mask.numpy().astype('uint8') * 255, mode='L')
 
             result_pil = original_pil_image.copy()
             result_pil.paste(grayscale_layer, (0, 0), mask=pil_mask)
 
-            # 4. Preprocess the final perturbed PIL image back to a tensor
+            # 5. Preprocess the final perturbed PIL image back to a tensor
             # Check the size of the result_pil to determine which processor to use
             if result_pil.size == (224, 224):
                 processor = preprocessing.get_processor_for_precached_224_images()

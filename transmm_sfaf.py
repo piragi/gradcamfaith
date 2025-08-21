@@ -117,6 +117,7 @@ def transmm_prisma(
     steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,  # CHANGED: Pass resources in
     enable_steering: bool = True,
     steering_strength: float = 1.5,
+    clip_classifier: Optional[Any] = None,  # Optional CLIP classifier
 ) -> Tuple[Dict[str, Any], np.ndarray, Dict[str, Any]]:
     """
     TransMM with S_f/A_f based patch boosting on multiple layers.
@@ -143,8 +144,10 @@ def transmm_prisma(
     def save_activation_hook(tensor: torch.Tensor, hook: Any):
         activations[hook.name] = tensor.detach()
 
-    def save_gradient_hook(tensor: torch.Tensor, hook: Any):
-        gradients[hook.name + "_grad"] = tensor.detach().clone()
+    def save_gradient_hook(grad: torch.Tensor, hook: Any):
+        # Backward hook receives gradient as first argument
+        if grad is not None:
+            gradients[hook.name + "_grad"] = grad.detach().clone()
 
     fwd_hooks = [(name, save_activation_hook) for name in attn_hook_names]
     bwd_hooks = [(name, save_gradient_hook) for name in attn_hook_names]
@@ -167,24 +170,40 @@ def transmm_prisma(
             resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
             fwd_hooks.append((resid_hook_name, make_resid_hook(layer_idx)))
 
-    # Forward and backward pass (unchanged)
+    # Forward and backward pass (modified for CLIP)
     with model_prisma.hooks(fwd_hooks=fwd_hooks, bwd_hooks=bwd_hooks):
-        logits = model_prisma(input_tensor)
-        probabilities = F.softmax(logits, dim=-1)
-        predicted_class_idx = torch.argmax(probabilities, dim=-1).item()
-        one_hot = torch.zeros((1, logits.size(-1)), dtype=torch.float32, device=device)
+        if clip_classifier is not None:
+            # CLIP classification path
+            # Use CLIP classifier to get logits (with gradients enabled)
+            clip_result = clip_classifier.forward(input_tensor, requires_grad=True)
+            logits = clip_result["logits"]
+            probabilities = clip_result["probabilities"]
+            predicted_class_idx = clip_result["predicted_class_idx"]
+        else:
+            # Regular ViT classification path
+            logits = model_prisma(input_tensor)
+            probabilities = F.softmax(logits, dim=-1)
+            predicted_class_idx = torch.argmax(probabilities, dim=-1).item()
+        
+        # Create one-hot for gradient computation
+        num_classes = logits.size(-1)
+        one_hot = torch.zeros((1, num_classes), dtype=torch.float32, device=device)
         one_hot[0, predicted_class_idx] = 1
         one_hot.requires_grad_(True)
         loss = torch.sum(one_hot * logits)
-        loss.backward()
+        loss.backward(retain_graph=True)  # Use retain_graph for CLIP
 
     prediction_result_dict = {
         "logits": logits.detach(),
-        "probabilities": probabilities.squeeze().cpu().detach().numpy().tolist(),
+        "probabilities": probabilities.squeeze().cpu().detach().numpy().tolist() if isinstance(probabilities, torch.Tensor) else probabilities,
         "predicted_class_idx": predicted_class_idx,
         "predicted_class_label": idx_to_class.get(predicted_class_idx, f"class_{predicted_class_idx}")
     }
 
+    # Check if gradients were captured (for debugging)
+    if not gradients:
+        raise RuntimeError("No gradients captured! Check backward hook implementation.")
+    
     # -------------- Attribution loop (MODIFIED) --------------
     num_tokens = activations[attn_hook_names[0]].shape[-1]
     R_pos = torch.eye(num_tokens, num_tokens, device='cpu')
@@ -192,7 +211,7 @@ def transmm_prisma(
 
     for i in range(model_prisma.cfg.n_layers):
         hname = f"blocks.{i}.attn.hook_pattern"
-        grad = gradients[hname + "_grad"]
+        grad = gradients[hname + "_grad"]  # No fallback - we need real gradients
         cam = activations[hname]
         cam_pos_avg = avg_heads(cam, grad)
 
@@ -285,6 +304,7 @@ def generate_attribution_prisma(
     device: Optional[torch.device] = None,
     steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,
     enable_steering: bool = True,
+    clip_classifier: Optional[Any] = None,  # Optional CLIP classifier wrapper
 ) -> Dict[str, Any]:
     """
     Generate attribution with S_f/A_f based steering.
@@ -310,6 +330,7 @@ def generate_attribution_prisma(
         config=config,
         enable_steering=enable_steering,
         idx_to_class=idx_to_class,
+        clip_classifier=clip_classifier,
     )
 
     # Structure output

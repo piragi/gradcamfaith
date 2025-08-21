@@ -112,6 +112,93 @@ def download_hyperkvasir(data_dir: Path, models_dir: Path) -> None:
     download_from_gdrive(model_info["id"], output_path, model_info["description"])
 
 
+def download_oxford_pets(data_dir: Path, models_dir: Path) -> None:
+    """Download Oxford-IIIT Pet dataset."""
+    print("\nDownloading Oxford-IIIT Pet...")
+
+    # Create oxford_pets subdirectories
+    op_data_dir = data_dir / "oxford_pets"
+    op_models_dir = models_dir / "oxford_pets"
+    op_data_dir.mkdir(exist_ok=True, parents=True)
+    op_models_dir.mkdir(exist_ok=True, parents=True)
+
+    # URLs for the dataset
+    images_url = "https://www.robots.ox.ac.uk/~vgg/data/pets/data/images.tar.gz"
+    annotations_url = "https://www.robots.ox.ac.uk/~vgg/data/pets/data/annotations.tar.gz"
+
+    # Download images
+    images_path = op_data_dir / "images.tar.gz"
+    if not images_path.exists():
+        print(f"Downloading images from {images_url}")
+        try:
+            subprocess.run(["wget", "-O", str(images_path), images_url], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            download_with_progress(images_url, images_path)
+
+    # Extract images
+    images_dir = op_data_dir / "images"
+    if not images_dir.exists():
+        print("Extracting images...")
+        extract_tar_gz(images_path, op_data_dir)
+
+    # Download annotations
+    annotations_path = op_data_dir / "annotations.tar.gz"
+    if not annotations_path.exists():
+        print(f"Downloading annotations from {annotations_url}")
+        try:
+            subprocess.run(["wget", "-O", str(annotations_path), annotations_url], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            download_with_progress(annotations_url, annotations_path)
+
+    # Extract annotations
+    annotations_dir = op_data_dir / "annotations"
+    if not annotations_dir.exists():
+        print("Extracting annotations...")
+        extract_tar_gz(annotations_path, op_data_dir)
+
+    print(f"Oxford-IIIT Pet dataset downloaded to {op_data_dir}")
+
+
+def download_waterbirds(data_dir: Path, models_dir: Path) -> None:
+    """Download Waterbirds dataset."""
+    print("\nDownloading Waterbirds...")
+
+    # Create waterbirds subdirectories
+    wb_data_dir = data_dir / "waterbirds"
+    wb_models_dir = models_dir / "waterbirds"
+    wb_data_dir.mkdir(exist_ok=True, parents=True)
+    wb_models_dir.mkdir(exist_ok=True, parents=True)
+
+    # Download Waterbirds dataset
+    # The dataset is available from the group_DRO repository
+    dataset_url = "https://nlp.stanford.edu/data/dro/waterbird_complete95_forest2water2.tar.gz"
+    dataset_path = wb_data_dir / "waterbird_complete95_forest2water2.tar.gz"
+
+    if not dataset_path.exists():
+        print(f"Downloading Waterbirds dataset from {dataset_url}")
+        try:
+            # Try wget first (faster for large files)
+            subprocess.run(["wget", "-O", str(dataset_path), dataset_url], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # Fallback to requests if wget is not available
+            download_with_progress(dataset_url, dataset_path)
+
+    # Extract dataset
+    extracted_dir = wb_data_dir / "waterbird_complete95_forest2water2"
+    if not extracted_dir.exists():
+        print("Extracting Waterbirds dataset...")
+        extract_tar_gz(dataset_path, wb_data_dir)
+        print(f"Dataset extracted to {extracted_dir}")
+
+    # Download CLIP model (will be cached by transformers library)
+    # We don't need to download it manually, but we'll check if transformers is installed
+    try:
+        import transformers
+        print("✓ Transformers library available for CLIP model loading")
+    except ImportError:
+        print("⚠ Warning: transformers library not installed. Install with: pip install transformers")
+
+
 def download_covidquex(data_dir: Path, models_dir: Path) -> None:
     """Download CovidQueX dataset and model."""
     print("\nDownloading CovidQueX...")
@@ -147,36 +234,36 @@ def download_covidquex(data_dir: Path, models_dir: Path) -> None:
 
     output_path = cq_models_dir / model_info["name"]
     download_from_gdrive(model_info["id"], output_path, model_info["description"])
-    
+
     # Check if the downloaded model is a tar.gz archive and extract if needed
     if output_path.exists():
         import shutil
-        
+
         # Check if file is a tar/gzip archive
         try:
             with open(output_path, 'rb') as f:
                 magic = f.read(2)
                 if magic == b'\x1f\x8b':  # gzip magic number - it's a tar.gz file
                     print(f"Extracting compressed model archive: {output_path}")
-                    
+
                     # First extract the tar.gz file
                     with tarfile.open(output_path, 'r:gz') as tar:
                         tar.extractall(cq_models_dir)
-                    
+
                     # Now extract model_best.pth.tar
                     model_tar_path = cq_models_dir / "results_model" / "model_best.pth.tar"
                     if model_tar_path.exists():
                         print(f"Extracting model from: {model_tar_path}")
-                        
+
                         # Extract the actual model from the .pth.tar file
                         # The .pth.tar file contains the actual PyTorch model state dict
                         final_model_path = cq_models_dir / "covidquex_model.pth"
-                        
+
                         # Copy the .pth.tar file directly as the model
                         # (PyTorch can load .pth.tar files directly)
                         shutil.copy(str(model_tar_path), str(final_model_path))
                         print(f"Model copied to: {final_model_path}")
-                        
+
                         # Clean up - remove the original tar.gz file and extracted directories
                         output_path.unlink()
                         results_dir = cq_models_dir / "results_model"
@@ -206,24 +293,32 @@ def print_summary(data_dir: Path, models_dir: Path) -> None:
 def main():
     """Main function to orchestrate all downloads."""
     # Create main directories
-    data_dir = Path("./scratch/data")
-    models_dir = Path("./scratch/models")
+    data_dir = Path("./data")
+    models_dir = Path("./models")
     data_dir.mkdir(exist_ok=True)
     models_dir.mkdir(exist_ok=True)
 
-    print("Medical Dataset & Model Setup")
+    print("Dataset & Model Setup")
+    print("=" * 50)
 
     try:
         # Download Hyperkvasir
-        download_hyperkvasir(data_dir, models_dir)
+        # download_hyperkvasir(data_dir, models_dir)
 
         # Download CovidQueX
-        download_covidquex(data_dir, models_dir)
+        # download_covidquex(data_dir, models_dir)
+
+        # Download Waterbirds
+        # download_waterbirds(data_dir, models_dir)
+
+        # Download Oxford-IIIT Pet
+        download_oxford_pets(data_dir, models_dir)
 
         # Print summary
         print_summary(data_dir, models_dir)
 
         print("\nSetup completed successfully.")
+        print("\nNote: CLIP model will be automatically downloaded on first use.")
 
     except KeyboardInterrupt:
         print("\nDownload interrupted by user")

@@ -73,7 +73,7 @@ COVIDQUEX_CONFIG = DatasetConfig(
         1: "Non-COVID",
         2: "Normal"
     },
-    model_checkpoint="./scratch/models/covidquex/covidquex_model.pth"
+    model_checkpoint="./models/covidquex/covidquex_model.pth"
 )
 
 # HyperKvasir Dataset Configuration
@@ -100,10 +100,44 @@ HYPERKVASIR_CONFIG = DatasetConfig(
     model_checkpoint="./models/hyperkvasir/hyperkvasir_vit_model.pth"
 )
 
+# Waterbirds Dataset Configuration
+WATERBIRDS_CONFIG = DatasetConfig(
+    name="waterbirds",
+    num_classes=2,
+    class_names=["landbird", "waterbird"],
+    class_to_idx={
+        "landbird": 0,
+        "waterbird": 1
+    },
+    idx_to_class={
+        0: "landbird",
+        1: "waterbird"
+    },
+    model_checkpoint=""  # Will use CLIP, no checkpoint needed
+)
+
+# Oxford-IIIT Pet Dataset Configuration (Binary: Cat vs Dog)
+OXFORD_PETS_CONFIG = DatasetConfig(
+    name="oxford_pets",
+    num_classes=2,
+    class_names=["cat", "dog"],
+    class_to_idx={
+        "cat": 0,
+        "dog": 1
+    },
+    idx_to_class={
+        0: "cat",
+        1: "dog"
+    },
+    model_checkpoint=""  # Will use CLIP, no checkpoint needed
+)
+
 # Dataset registry for easy access
 DATASET_CONFIGS = {
     "covidquex": COVIDQUEX_CONFIG,
     "hyperkvasir": HYPERKVASIR_CONFIG,
+    "waterbirds": WATERBIRDS_CONFIG,
+    "oxford_pets": OXFORD_PETS_CONFIG,
 }
 
 
@@ -124,4 +158,3 @@ def get_dataset_config(dataset_name: str) -> DatasetConfig:
         raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(DATASET_CONFIGS.keys())}")
 
     return DATASET_CONFIGS[dataset_name.lower()]
-
