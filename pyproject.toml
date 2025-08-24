@@ -10,6 +10,7 @@ dependencies = [
     "diffusers>=0.32.2",
     "einops>=0.8.1",
     "gdown>=5.2.0",
+    "huggingface-hub>=0.34.4",
     "ipykernel>=6.29.5",
     "ipywidgets>=8.1.7",
     "joblib>=1.5.1",
@@ -20,6 +21,7 @@ dependencies = [
     "opencv-python>=4.11.0.86",
     "pandas>=2.2.3",
     "pillow>=11.1.0",
+    "pytest>=8.4.1",
     "quantus @ git+https://github.com/understandable-machine-intelligence-lab/Quantus.git@b36dd26",
     "scikit-image>=0.25.2",
     "scikit-learn>=1.6.1",
@@ -35,3 +37,11 @@ dependencies = [
 
 [tool.uv.sources]
 vit-prisma = { git = "https://github.com/piragi/ViT-Prisma.git", branch = "main" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+markers = [
+    "unit: Unit tests for individual components",
+    "integration: Integration tests for full pipeline"
+]

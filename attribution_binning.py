@@ -5,11 +5,18 @@ This implements the binning approach as described in the SaCo paper:
 - Group patches by attribution value ranges (not spatial location)
 - Perturb all patches within each attribution bin together
 - Calculate SaCo based on bin comparisons
+
+Refactored for better testability with separated concerns:
+- Loading: Load image and attributions from files
+- Binning: Create bins from attribution values
+- Perturbation: Apply perturbations to bins
+- Impact calculation: Measure confidence changes
+- SaCo calculation: Compute the faithfulness score
 """
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -57,7 +64,7 @@ def calculate_saco_vectorized_with_bias(attributions: np.ndarray,
     if n < 2:
         return 0.0, np.zeros(n)
 
-    # Create all pairwise differences
+    # Create all pairwise differences using broadcasting
     attr_diffs = attributions[:, None] - attributions[None, :]
     impact_diffs = confidence_impacts[:, None] - confidence_impacts[None, :]
 
@@ -96,72 +103,32 @@ def calculate_saco_vectorized_with_bias(attributions: np.ndarray,
     return overall_saco, bin_attribution_bias
 
 
-def calculate_saco_vectorized(attributions: np.ndarray, confidence_impacts: np.ndarray) -> float:
-    """
-    Vectorized SaCo calculation - eliminates O(n²) nested loops.
-    
-    Args:
-        attributions: Array of attribution values per patch (already sorted descending)
-        confidence_impacts: Array of confidence impact values per patch
-        
-    Returns:
-        SaCo score
-    """
-    n = len(attributions)
-    if n < 2:
-        return 0.0
-
-    # Create all pairwise differences using broadcasting
-    attr_diffs = attributions[:, None] - attributions[None, :]  # [n, n]
-    impact_diffs = confidence_impacts[:, None] - confidence_impacts[None, :]  # [n, n]
-
-    # Only consider upper triangular part (i < j comparisons)
-    upper_tri_mask = np.triu(np.ones((n, n), dtype=bool), k=1)
-
-    # Extract upper triangular values
-    attr_diffs_tri = attr_diffs[upper_tri_mask]  # [n*(n-1)/2]
-    impact_diffs_tri = impact_diffs[upper_tri_mask]  # [n*(n-1)/2]
-
-    # Calculate faithfulness: impact_i >= impact_j (since we're looking at i < j)
-    is_faithful = impact_diffs_tri >= 0
-
-    # Calculate weights
-    weights = np.where(is_faithful, attr_diffs_tri, -attr_diffs_tri)
-
-    # Calculate SaCo score
-    total_weight = np.sum(np.abs(weights))
-    if total_weight > 0:
-        return np.sum(weights) / total_weight
-    else:
-        return 0.0
-
-
 @dataclass
 class BinInfo:
     """Information about an attribution bin"""
     bin_id: int
     min_value: float
     max_value: float
-    patch_indices: List[int]  # Which of the 196 patches belong to this bin
+    patch_indices: List[int]  # Which patches belong to this bin (196 for B-16, 49 for B-32)
     mean_attribution: float
     total_attribution: float
     n_patches: int
 
 
 def create_attribution_bins_from_patches(
-    raw_attributions: np.ndarray,  # Shape: (196,)
+    raw_attributions: np.ndarray,  # Shape: (n_patches,) - 196 for B-16, 49 for B-32
     n_bins: int = 20
 ) -> List[BinInfo]:
     """
     Create bins based on attribution value ranges, ensuring equal sizes.
     
-    This groups the 196 patches into n_bins based on their attribution values.
+    This groups the patches into n_bins based on their attribution values.
     It sorts the patches by attribution and divides them into equal-sized chunks,
     which is a more direct implementation of the SaCo paper's description of
     "equally sized pixel subsets".
     
     Args:
-        raw_attributions: Array of 196 attribution values (one per ViT patch)
+        raw_attributions: Array of attribution values (one per ViT patch)
         n_bins: Number of bins to create
         
     Returns:
@@ -210,7 +177,7 @@ def create_attribution_bins_from_patches(
 
 
 def create_spatial_mask_for_bin(
-    bin_info: BinInfo, image_size: Tuple[int, int] = (224, 224), patch_size: int = 16
+    bin_info: BinInfo, image_size: Tuple[int, int] = (224, 224), patch_size: int = 32
 ) -> torch.Tensor:
     """
     Create a spatial mask for all patches in a bin.
@@ -218,7 +185,7 @@ def create_spatial_mask_for_bin(
     Args:
         bin_info: Information about the bin
         image_size: Size of the image (height, width)
-        patch_size: Size of each ViT patch (16x16 for standard ViT)
+        patch_size: Size of each ViT patch (16 for B-16, 32 for B-32)
         
     Returns:
         Boolean mask of shape (H, W)
@@ -226,8 +193,8 @@ def create_spatial_mask_for_bin(
     height, width = image_size
     mask = torch.zeros((height, width), dtype=torch.bool)
 
-    # Each patch index corresponds to a position in the 14x14 grid
-    grid_size = 14  # 224 / 16 = 14
+    # Each patch index corresponds to a position in the grid
+    grid_size = image_size[0] // patch_size  # 14 for B-16, 7 for B-32
 
     for patch_idx in bin_info.patch_indices:
         # Convert linear index to grid position
@@ -270,7 +237,7 @@ def apply_binned_perturbation(
             # 2. Ensure the original image is in RGB mode
             if original_pil_image.mode != 'RGB':
                 original_pil_image = original_pil_image.convert('RGB')
-            
+
             # 3. Create a full-size RGB layer with the mean value
             # We create a large mask and then apply it, which is more efficient
             # than creating and pasting many small patches.
@@ -295,6 +262,7 @@ def apply_binned_perturbation(
 
             # 5. Preprocess the final perturbed PIL image back to a tensor
             # Check the size of the result_pil to determine which processor to use
+            # TODO: does the image need to be preprocessed or is it already preprocessed? I.e. does normalization apply twice introduce bugs?
             if result_pil.size == (224, 224):
                 processor = preprocessing.get_processor_for_precached_224_images()
             else:
@@ -313,6 +281,164 @@ def apply_binned_perturbation(
     return original_tensor.clone()
 
 
+# ============= DATA CONTAINERS FOR SEPARATED CONCERNS =============
+
+
+@dataclass
+class ImageData:
+    """Container for loaded image data."""
+    pil_image: Any
+    tensor: torch.Tensor
+    raw_attributions: np.ndarray
+    original_confidence: float
+    original_class_idx: int
+
+
+@dataclass
+class BinnedPerturbationData:
+    """Container for perturbation data."""
+    bins: List[BinInfo]
+    perturbed_tensors: List[torch.Tensor]
+
+
+@dataclass
+class BinImpactResult:
+    """Results from measuring bin impacts."""
+    bin_results: List[Dict]
+    saco_score: float
+    bin_biases: np.ndarray
+
+
+# ============= SEPARATED CONCERN FUNCTIONS =============
+
+
+def load_image_and_attributions(classification_result: ClassificationResult, target_size: int = 224) -> ImageData:
+    """
+    Load image and attribution data from files.
+    
+    Separated concern: File I/O and data loading
+    """
+    # Load image
+    image_path = classification_result.image_path
+    pil_image, tensor = preprocessing.preprocess_image(str(image_path), img_size=target_size)
+
+    # Load attributions
+    attr_path = classification_result.attribution_paths.raw_attribution_path
+    if attr_path is None:
+        raise ValueError(f"No attribution path for {image_path}")
+    raw_attributions = np.load(attr_path)
+
+    # Get original prediction info
+    original_pred = classification_result.prediction
+
+    return ImageData(
+        pil_image=pil_image,
+        tensor=tensor,
+        raw_attributions=raw_attributions,
+        original_confidence=original_pred.confidence,
+        original_class_idx=original_pred.predicted_class_idx
+    )
+
+
+def create_binned_perturbations(
+    image_data: ImageData,
+    n_bins: int,
+    perturbation_method: str = "mean",
+    patch_size: int = 32
+) -> BinnedPerturbationData:
+    """
+    Create bins and apply perturbations.
+    
+    Separated concern: Binning and perturbation logic
+    """
+    # Create bins from attributions
+    bins = create_attribution_bins_from_patches(image_data.raw_attributions, n_bins)
+
+    # Apply perturbations for each bin
+    perturbed_tensors = []
+    for bin_info in bins:
+        # Create spatial mask
+        mask = create_spatial_mask_for_bin(bin_info, patch_size=patch_size)
+
+        # Apply perturbation
+        perturbed = apply_binned_perturbation(image_data.tensor, mask, perturbation_method, image_data.pil_image)
+        perturbed_tensors.append(perturbed)
+
+    return BinnedPerturbationData(bins=bins, perturbed_tensors=perturbed_tensors)
+
+
+def measure_bin_impacts(
+    perturbation_data: BinnedPerturbationData,
+    image_data: ImageData,
+    model: Any,
+    device: torch.device,
+    batch_size: int = 32
+) -> List[Dict]:
+    """
+    Measure the impact of each bin on model confidence.
+    
+    Separated concern: Model inference and impact measurement
+    """
+    if not perturbation_data.perturbed_tensors:
+        return []
+
+    # Batch inference
+    batch_tensor = torch.stack(perturbation_data.perturbed_tensors)
+    predictions = batched_model_inference(model, batch_tensor, device, batch_size=len(batch_tensor))
+
+    # Calculate impacts for each bin
+    bin_results = []
+    for bin_info, pred in zip(perturbation_data.bins, predictions):
+        # Paper formula: ∇pred = p(ŷ|original) - p(ŷ|perturbed)
+        confidence_impact = image_data.original_confidence - pred["confidence"]
+
+        result = {
+            "bin_id": bin_info.bin_id,
+            "mean_attribution": bin_info.mean_attribution,
+            "total_attribution": bin_info.total_attribution,
+            "n_patches": bin_info.n_patches,
+            "confidence_delta": confidence_impact,
+            "confidence_delta_abs": abs(confidence_impact),
+            "class_changed": (pred["predicted_class_idx"] != image_data.original_class_idx)
+        }
+        bin_results.append(result)
+
+    return bin_results
+
+
+def compute_saco_from_impacts(bin_results: List[Dict], compute_bias: bool = True) -> BinImpactResult:
+    """
+    Compute SaCo score from bin impact results.
+    
+    Separated concern: SaCo calculation
+    """
+    if len(bin_results) < 2:
+        # Cannot compute SaCo with less than 2 bins
+        saco_score = 0.0
+        bin_biases = np.zeros(len(bin_results))
+
+        # Add default values
+        for result in bin_results:
+            result["bin_attribution_bias"] = 0.0
+    else:
+        # Sort by total attribution for consistent ordering
+        bin_results.sort(key=lambda x: x["total_attribution"], reverse=True)
+
+        # Extract arrays for SaCo calculation
+        attributions = np.array([r["total_attribution"] for r in bin_results])
+        impacts = np.array([r["confidence_delta"] for r in bin_results])  # Signed!
+
+        # Calculate SaCo and bias
+        saco_score, bin_biases = calculate_saco_vectorized_with_bias(attributions, impacts)
+
+        # Add bias to results if requested
+        if compute_bias:
+            for i, result in enumerate(bin_results):
+                result["bin_attribution_bias"] = float(bin_biases[i])
+
+    return BinImpactResult(bin_results=bin_results, saco_score=saco_score, bin_biases=bin_biases)
+
+
 def calculate_binned_saco_for_image(
     original_result: ClassificationResult,
     vit_model,
@@ -325,105 +451,48 @@ def calculate_binned_saco_for_image(
     """
     Calculate SaCo score using attribution binning for a single image.
     
+    This function orchestrates the separated concern functions for better testability.
+    
     Args:
+        original_result: Classification result with attribution paths
+        vit_model: The model to use for inference
+        config: Configuration object
+        device: Device to run inference on
+        n_bins: Number of bins to create
+        debug: Whether to print debug information
         include_patch_level: If True, also generate patch-level SaCo scores for compatibility
     
     Returns:
         Tuple of (saco_score, bin_results, patch_results)
     """
-    image_path = original_result.image_path
+    try:
+        # Step 1: Load image and attributions
+        image_data = load_image_and_attributions(original_result, target_size=config.classify.target_size[0])
 
-    # Load image and attribution
-    original_pil, original_tensor = preprocessing.preprocess_image(
-        str(image_path), img_size=config.classify.target_size[0]
-    )
+        # Step 2: Create bins and apply perturbations
+        # TODO: Determine patch_size from model architecture (16 for B-16, 32 for B-32)
+        # TODO: should be automatic
+        patch_size = 16  # Default for B-32
+        perturbation_data = create_binned_perturbations(
+            image_data, n_bins, perturbation_method=config.perturb.method, patch_size=patch_size
+        )
 
-    # Load raw attribution (196 values, one per patch)
-    raw_attribution_path = original_result.attribution_paths.raw_attribution_path
-    raw_attributions = np.load(raw_attribution_path)  # Shape: (196,)
+        # Step 3: Measure impacts through model inference
+        vit_model.eval()
+        bin_results = measure_bin_impacts(perturbation_data, image_data, vit_model, device, batch_size=32)
 
-    # Create bins based on attribution values
-    bins = create_attribution_bins_from_patches(raw_attributions, n_bins)
+        # Step 4: Compute SaCo score and biases
+        impact_result = compute_saco_from_impacts(bin_results, compute_bias=True)
 
-    if debug and "dev_0aec60bd" in str(image_path):
-        print(f"\\nBINNED DEBUG - Image: {image_path.name}")
-        print(f"Number of bins created: {len(bins)}")
-        print(f"Raw attributions shape: {raw_attributions.shape}")
-        print(f"Attribution range: [{raw_attributions.min():.4f}, {raw_attributions.max():.4f}]")
+        # Empty patch results for compatibility
+        # TODO: Remove this when patch-level analysis is fully deprecated
+        patch_results = []
 
-    # Apply perturbations for each bin
-    perturbed_tensors = []
-    valid_bins = []
+        return impact_result.saco_score, impact_result.bin_results, patch_results
 
-    for bin_info in bins:
-        # Create spatial mask for this bin
-        mask = create_spatial_mask_for_bin(bin_info)
-
-        # Apply perturbation
-        perturbed = apply_binned_perturbation(original_tensor, mask, config.perturb.method, original_pil)
-
-        perturbed_tensors.append(perturbed)
-        valid_bins.append(bin_info)
-
-    # Batch inference
-    if not perturbed_tensors:
-        return 0.0, [], []
-
-    batch_tensor = torch.stack(perturbed_tensors)
-    predictions = batched_model_inference(vit_model, batch_tensor, device, batch_size=len(batch_tensor))
-
-    # Calculate results
-    bin_results = []
-    original_pred = original_result.prediction
-
-    for bin_info, pred in zip(valid_bins, predictions):
-        confidence_impact = pred["confidence"] - original_pred.confidence
-
-        result = {
-            "bin_id": bin_info.bin_id,
-            "mean_attribution": bin_info.mean_attribution,
-            "total_attribution": bin_info.total_attribution,
-            "n_patches": bin_info.n_patches,
-            "confidence_delta": confidence_impact,
-            "confidence_delta_abs": abs(confidence_impact),
-            "class_changed": (pred["predicted_class_idx"] != original_pred.predicted_class_idx)
-        }
-        bin_results.append(result)
-
-    # Sort by total attribution (descending) for consistent ordering
-    bin_results.sort(key=lambda x: x["total_attribution"], reverse=True)
-
-    # Calculate SaCo and bin attribution bias (SINGLE CALL)
-    if len(bin_results) >= 2:
-        attributions = np.array([r["total_attribution"] for r in bin_results])
-        impacts = np.array([r["confidence_delta_abs"] for r in bin_results])
-
-        # Single call to get both image SaCo and bin bias
-        saco_score, bin_attribution_bias = calculate_saco_vectorized_with_bias(attributions, impacts)
-
-        # Add bin-specific attribution bias to results
-        for i, result in enumerate(bin_results):
-            bias = bin_attribution_bias[i]
-            result["bin_attribution_bias"] = float(bias)
-    else:
-        # If only one bin, no pairwise comparisons possible
-        saco_score = 0.0
-        for result in bin_results:
-            result["bin_attribution_bias"] = 0.0
-            result["action"] = "none"
-            result["misalignment_type"] = "undefined"
-            result["misalignment_strength"] = 0.0
-
-    if debug and "dev_0aec60bd" in str(image_path):
-        print(f"BINNED - Number of bins: {len(bin_results)}")
-        print(f"BINNED - Overall SaCo: {saco_score:.4f}")
-        print(f"BINNED - Bin biases[:5]: {[r['bin_attribution_bias'] for r in bin_results[:5]]}")
-
-    # Generate patch-level results if requested (for compatibility with saco_feature_analysis.py)
-    # TODO: remove patch_results
-    patch_results = []
-
-    return saco_score, bin_results, patch_results
+    except Exception as e:
+        print(f"Error in calculate_binned_saco_for_image: {e}")
+        raise
 
 
 def _get_or_compute_binned_results(
