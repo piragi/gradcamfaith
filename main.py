@@ -9,17 +9,21 @@ from pipeline_unified import run_unified_pipeline
 
 def main():
     datasets = [
-        # ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
-        # ("covidquex", Path("./data/covidquex/data/")),
+        ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
+        # ("covidquex", Path("./data/covidquex/data/lung/")),
         # ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
-        ("oxford_pets", Path("./data/oxford_pets"))
+        # ("oxford_pets", Path("./data/oxford_pets"))
     ]
 
     # Layers to test
-    layers_to_test = [6]
+    layers_to_test = [10]
+
+    # Feature gradient settings (NEW)
+    USE_FEATURE_GRADIENTS = False  # Set to False to disable feature gradient gating
+    FEATURE_GRADIENT_LAYERS = [4, 6]  # Which layers to apply feature gradients
 
     # Subset settings
-    subset_size = 50  # Set to None to use all images
+    subset_size = None  # Set to None to use all images
     random_seed = 42  # For reproducibility
 
     # Output directory for all experiments
@@ -39,8 +43,8 @@ def main():
             pipeline_config = config.PipelineConfig()
             pipeline_config.file.use_cached_original = False
             pipeline_config.file.use_cached_perturbed = ""
-            pipeline_config.file.current_mode = "train"  # Changed to train as requested
-            pipeline_config.file.weighted = False  # Changed to False as requested
+            pipeline_config.file.current_mode = "val"
+            pipeline_config.file.weighted = False  # Disable SAE boosting - only use feature gradients
             pipeline_config.classify.analysis = False
             pipeline_config.classify.data_collection = False
             pipeline_config.file.set_dataset(dataset_name)
@@ -48,16 +52,23 @@ def main():
             # Enable CLIP for waterbirds and oxford_pets
             if dataset_name in ["waterbirds", "oxford_pets"]:
                 pipeline_config.classify.use_clip = True
-                pipeline_config.classify.clip_model_name = "openai/clip-vit-base-patch16"
+                # Use OpenCLIP DataComp.XL model to match the paper's setup
+                pipeline_config.classify.clip_model_name = "open-clip:laion/CLIP-ViT-B-32-DataComp.XL-s13B-b90K"
 
                 # Set appropriate prompts
                 if dataset_name == "waterbirds":
-                    pipeline_config.classify.clip_text_prompts = ["a terrestrial bird", "an aquatic bird"]
+                    pipeline_config.classify.clip_text_prompts = [
+                        "a photo of a terrestrial bird", "a photo of an aquatic bird"
+                    ]
                 elif dataset_name == "oxford_pets":
-                    pipeline_config.classify.clip_text_prompts = ["a cat", "a dog"]
+                    pipeline_config.classify.clip_text_prompts = ["a photo of a cat", "a photo of a dog"]
 
             # Set boosting parameters - only changing the layer
             pipeline_config.classify.boosting.steering_layers = [layer]
+
+            # Enable feature gradient gating (NEW)
+            pipeline_config.classify.boosting.enable_feature_gradients = USE_FEATURE_GRADIENTS
+            pipeline_config.classify.boosting.feature_gradient_layers = FEATURE_GRADIENT_LAYERS
 
             # Create output dir for this run
             exp_name = f"{dataset_name}_layer{layer}"
@@ -76,6 +87,10 @@ def main():
                     'selection_method': pipeline_config.classify.boosting.selection_method,
                     'min_log_ratio': pipeline_config.classify.boosting.min_log_ratio,
                     'steering_layers': pipeline_config.classify.boosting.steering_layers,
+                },
+                'feature_gradient_params': {
+                    'enabled': USE_FEATURE_GRADIENTS,
+                    'layers': FEATURE_GRADIENT_LAYERS
                 }
             }
 

@@ -85,17 +85,34 @@ class FileConfig:
 @dataclass
 class BoostingConfig:
     """Configuration for SAE-based feature boosting/suppression."""
+    # === Class-aware robust features (if inference dict available) ===
+    use_class_aware_v2: bool = True  # Use new robust class-aware method if inference dict exists
+
+    # === NEW: Bias multiplicative correction parameters ===
+    # Correction method: 'direct', 'bounded', 'sigmoid', 'clamped'
+    correction_method: str = 'bounded'  # Exponential: exp(bias * scale)
+
+    # Scale factor for bias (1.0 = use bias directly)
+    bias_scale_factor: float = 150.0  # Moderate scaling: bias of 0.7 -> exp(1.4) ≈ 4x
+
+    # Aggregation when multiple features active: 'geometric_mean', 'arithmetic_mean', 'max', 'max_impact'
+    aggregation: str = 'max_impact'  # Use feature with strongest bias (avoids dilution)
+
+    # Minimum absolute bias to apply correction
+    min_abs_bias: float = 0.001  # Very low threshold since biases are small
+
+    # === Original parameters (kept for backward compatibility) ===
     # Strength parameters (constant multipliers, no adaptation)
-    boost_strength: float = 5.0  # Multiply attribution by this for boost features
-    suppress_strength: float = 5.0  # Divide attribution by this for suppress features
+    boost_strength: float = 10.  # Multiply attribution by this for boost features
+    suppress_strength: float = 100.0  # Divide attribution by this for suppress features
 
     # Selection limits
-    max_boost: int = 10
-    max_suppress: int = 10
+    max_boost: int = 5
+    max_suppress: int = 20
 
     # Frequency filtering
-    min_occurrences: int = 1
-    max_occurrences: int = 10000000
+    min_occurrences: int = 1  # Increased to only use well-represented features
+    max_occurrences: int = 10000  # Reduced to avoid overly common features
 
     # Ratio thresholds
     min_log_ratio: float = 0.
@@ -104,7 +121,7 @@ class BoostingConfig:
     min_activation: float = 0.1
 
     # Top-k filtering
-    topk_active: Optional[int] = None
+    topk_active: Optional[int] = None  # No limit - use all active features
 
     # Weighting strategy
     use_balanced_score: bool = True
@@ -113,13 +130,17 @@ class BoostingConfig:
     selection_method: str = 'saco'
 
     # Class-aware corrections
-    class_aware: bool = False
+    class_aware: bool = True
 
     # Random seed (for reproducibility)
     random_seed: int = 42
 
     # SAE layers to apply steering on
     steering_layers: List[int] = field(default_factory=lambda: [6])
+
+    # Feature gradient gating (NEW)
+    enable_feature_gradients: bool = False  # Enable feature gradient gating
+    feature_gradient_layers: List[int] = field(default_factory=lambda: [9, 10])  # Which layers to apply
 
 
 @dataclass
@@ -131,7 +152,7 @@ class ClassificationConfig:
     # Model parameters
     model_type: str = "vit_base_patch16_224"
     num_classes: int = 3
-    
+
     # CLIP-specific parameters
     use_clip: bool = False
     clip_model_name: str = "openai/clip-vit-base-patch16"

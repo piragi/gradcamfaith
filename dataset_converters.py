@@ -16,15 +16,12 @@ Standard format:
 """
 
 import json
-import random
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import torch
-import torchvision.transforms as transforms
 from PIL import Image
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -35,7 +32,7 @@ from dataset_config import COVIDQUEX_CONFIG, HYPERKVASIR_CONFIG, DatasetConfig
 def prepare_covidquex(source_path: Path, output_path: Path, config: DatasetConfig = COVIDQUEX_CONFIG) -> Dict:
     """
     Convert CovidQUEX dataset to unified format.
-    Images are preprocessed to 224x224 using resize(256) -> center crop(224).
+    Images are copied as-is and will be preprocessed at runtime using the transforms in dataset_config.
     
     Expects exact source structure:
     - source_path/
@@ -111,27 +108,22 @@ def prepare_covidquex(source_path: Path, output_path: Path, config: DatasetConfi
             print(f"Found {len(images)} images in {source_split}/{class_name}")
 
             for idx, img_path in enumerate(tqdm(images, desc=f"{source_split}/{class_name}")):
-                new_name = f"img_{class_idx:02d}_{target_split}_{idx:05d}.png"  # Always save as PNG
-                dest_path = output_path / target_split / f"class_{class_idx}" / new_name
+                try:
+                    # Skip empty files
+                    if img_path.stat().st_size == 0:
+                        print(f"Warning: Skipping empty file: {img_path}")
+                        continue
+                    
+                    new_name = f"img_{class_idx:02d}_{target_split}_{idx:05d}.png"  # Always save as PNG
+                    dest_path = output_path / target_split / f"class_{class_idx}" / new_name
 
-                # Apply same preprocessing as get_default_processor: resize(256) -> center crop(224)
-                img = Image.open(img_path).convert('RGB')
-                # Resize so smaller dimension is 256
-                w, h = img.size
-                if w < h:
-                    new_w = 256
-                    new_h = int(h * 256 / w)
-                else:
-                    new_h = 256
-                    new_w = int(w * 256 / h)
-                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                # Center crop to 224x224
-                left = (new_w - 224) // 2
-                top = (new_h - 224) // 2
-                right = left + 224
-                bottom = top + 224
-                img = img.crop((left, top, right, bottom))
-                img.save(dest_path, 'PNG')
+                    # Don't preprocess - just copy the original image
+                    # Preprocessing will be done at runtime via dataset_config.py
+                    img = Image.open(img_path).convert('RGB')
+                    img.save(dest_path, 'PNG')
+                except Exception as e:
+                    print(f"Warning: Failed to process {img_path}: {e}")
+                    continue
 
                 conversion_stats['total_images'] += 1
                 conversion_stats['splits'][target_split] += 1
@@ -173,7 +165,7 @@ def prepare_hyperkvasir(
 ) -> Dict:
     """
     Convert HyperKvasir dataset to unified format.
-    Images are preprocessed to 224x224 using direct resize (SSL4GIE methodology).
+    Images are copied as-is and will be preprocessed at runtime using the transforms in dataset_config.
     
     Uses the CSV file (image-labels.csv) to identify and organize images.
     
@@ -266,62 +258,15 @@ def prepare_hyperkvasir(
             new_name = f"img_{class_idx:02d}_{split}_{img_count:05d}{img_path.suffix}"
             dest_path = output_path / split / f"class_{class_idx}" / new_name
 
-            # SSL4GIE methodology: resize directly to 224x224
+            # Don't preprocess - just load and save the original image
+            # ALL preprocessing will be done at runtime via dataset_config.py
+            # NO AUGMENTATIONS should be applied during conversion
             img = Image.open(img_path).convert('RGB')
-            img = img.resize((224, 224), Image.Resampling.LANCZOS)
-
-            if split == 'train':
-                # For training, create multiple augmented versions with fixed seeds
-                # This matches the SSL4GIE training augmentations
-
-                # Define the augmentation pipeline
-                augment_transform = transforms.Compose([
-                    transforms.ColorJitter(brightness=0.4, contrast=0.5, saturation=0.25, hue=0.01),
-                    transforms.GaussianBlur((25, 25), sigma=(0.001, 2.0)),
-                    transforms.RandomHorizontalFlip(p=0.5),
-                    transforms.RandomVerticalFlip(p=0.5),
-                    transforms.RandomRotation(180),
-                ])
-
-                # Save original
-                img.save(dest_path, 'PNG')
-                conversion_stats['total_images'] += 1
-                conversion_stats['splits'][split] += 1
-                conversion_stats['classes'][finding] += 1
-
-                # Generate augmented versions with different seeds
-                # We'll create 4 augmented versions per image to get ~16k total
-                num_augmentations = 4
-                for aug_idx in range(num_augmentations):
-                    # Set seed for reproducibility (base_seed + image_index + aug_index)
-                    seed = 42 + img_count * 10 + aug_idx
-                    torch.manual_seed(seed)
-                    random.seed(seed)
-                    np.random.seed(seed)
-
-                    # Convert PIL to tensor, apply augmentations, convert back
-                    img_tensor = transforms.ToTensor()(img)
-                    # Add batch dimension for transforms
-                    img_tensor = img_tensor.unsqueeze(0)
-
-                    # Apply augmentations (need to convert back from tensor)
-                    augmented_pil = augment_transform(img)
-
-                    # Save augmented image
-                    aug_count = conversion_stats['splits'][split] + aug_idx + 1
-                    aug_name = f"img_{class_idx:02d}_{split}_{aug_count:05d}_aug{aug_idx}.png"
-                    aug_dest = output_path / split / f"class_{class_idx}" / aug_name
-                    augmented_pil.save(aug_dest, 'PNG')
-
-                    conversion_stats['total_images'] += 1
-                    conversion_stats['splits'][split] += 1
-                    conversion_stats['classes'][finding] += 1
-            else:
-                # For val/test, just save the original
-                img.save(dest_path, 'PNG')
-                conversion_stats['total_images'] += 1
-                conversion_stats['splits'][split] += 1
-                conversion_stats['classes'][finding] += 1
+            img.save(dest_path, 'PNG')
+            
+            conversion_stats['total_images'] += 1
+            conversion_stats['splits'][split] += 1
+            conversion_stats['classes'][finding] += 1
 
     # Save metadata
     with open(output_path / "dataset_metadata.json", 'w') as f:
@@ -432,11 +377,10 @@ def prepare_waterbirds(source_path: Path, output_path: Path, config: Optional['D
         new_name = f"img_{y:02d}_{split}_{img_count:05d}.jpg"
         dest_path = output_path / split / f"class_{y}" / new_name
 
-        # Process and save image
-        img = Image.open(img_path).convert('RGB')
-        # Resize to 224x224 (standard for vision models)
-        img = img.resize((224, 224), Image.Resampling.LANCZOS)
-        img.save(dest_path, 'JPEG')
+        # Copy original image without preprocessing
+        # Waterbirds will be preprocessed at runtime with proper CLIP settings
+        import shutil
+        shutil.copy2(img_path, dest_path)
 
         conversion_stats['total_images'] += 1
         conversion_stats['splits'][split] += 1
@@ -541,13 +485,10 @@ def prepare_oxford_pets(
                 # Load, resize to 224x224, and save image
                 dst_image = output_path / split_name / class_dir / f"img_{item['species']:02d}_{split_name}_{conversion_stats['splits'][split_name]:05d}.jpg"
 
+                # Copy original images without preprocessing
+                # Oxford Pets will be preprocessed at runtime
                 import shutil
                 shutil.copy2(src_image, dst_image)
-                # Open image, convert to RGB, resize to 224x224
-                # from PIL import Image
-                # img = Image.open(src_image).convert('RGB')
-                # img = img.resize((224, 224), Image.Resampling.LANCZOS)
-                # img.save(dst_image, 'JPEG')
 
                 conversion_stats["total_images"] += 1
                 conversion_stats["splits"][split_name] += 1

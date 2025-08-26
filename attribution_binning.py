@@ -216,12 +216,14 @@ def apply_binned_perturbation(
     original_tensor: torch.Tensor,
     bin_mask: torch.Tensor,
     perturbation_method: str = "mean",
-    original_pil_image=None
+    original_pil_image=None,
+    dataset_name: str = None
 ) -> torch.Tensor:
     """
     Apply perturbation to all patches in a bin.
     
     Uses grayscale perturbation method for consistency with patch-wise approach.
+    Uses dataset-specific preprocessing from centralized dataset_config.
     """
     if perturbation_method == "mean":
         if original_pil_image is not None:
@@ -261,12 +263,22 @@ def apply_binned_perturbation(
             result_pil.paste(grayscale_layer, (0, 0), mask=pil_mask)
 
             # 5. Preprocess the final perturbed PIL image back to a tensor
-            # Check the size of the result_pil to determine which processor to use
-            # TODO: does the image need to be preprocessed or is it already preprocessed? I.e. does normalization apply twice introduce bugs?
-            if result_pil.size == (224, 224):
-                processor = preprocessing.get_processor_for_precached_224_images()
+            # Use dataset-specific transforms from centralized dataset_config
+            if dataset_name:
+                from dataset_config import get_dataset_config
+                dataset_config = get_dataset_config(dataset_name)
+                # Use test transforms (no augmentations) for perturbation evaluation
+                # The dataset config will handle whether to use CLIP or ViT preprocessing
+                processor = dataset_config.get_transforms('test')
             else:
-                processor = preprocessing.get_default_processor(img_size=224)
+                # Fallback to old preprocessing if dataset_name not provided
+                # This should be removed once all callers are updated
+                import vit.preprocessing as preprocessing
+                if result_pil.size == (224, 224):
+                    processor = preprocessing.get_processor_for_precached_224_images()
+                else:
+                    processor = preprocessing.get_default_processor(img_size=224)
+
             perturbed_tensor = processor(result_pil)
             return perturbed_tensor
         else:
@@ -316,11 +328,15 @@ def load_image_and_attributions(classification_result: ClassificationResult, tar
     """
     Load image and attribution data from files.
     
+    NOTE: We only load the raw PIL image here, no preprocessing.
+    Preprocessing will be done after perturbation using dataset-specific transforms.
+    
     Separated concern: File I/O and data loading
     """
-    # Load image
+    # Load raw image without any preprocessing
     image_path = classification_result.image_path
-    pil_image, tensor = preprocessing.preprocess_image(str(image_path), img_size=target_size)
+    from PIL import Image
+    pil_image = Image.open(image_path).convert('RGB')
 
     # Load attributions
     attr_path = classification_result.attribution_paths.raw_attribution_path
@@ -333,7 +349,7 @@ def load_image_and_attributions(classification_result: ClassificationResult, tar
 
     return ImageData(
         pil_image=pil_image,
-        tensor=tensor,
+        tensor=None,  # We don't preprocess yet - will do after perturbation
         raw_attributions=raw_attributions,
         original_confidence=original_pred.confidence,
         original_class_idx=original_pred.predicted_class_idx
@@ -344,7 +360,8 @@ def create_binned_perturbations(
     image_data: ImageData,
     n_bins: int,
     perturbation_method: str = "mean",
-    patch_size: int = 32
+    patch_size: int = 32,
+    dataset_name: str = None
 ) -> BinnedPerturbationData:
     """
     Create bins and apply perturbations.
@@ -360,8 +377,10 @@ def create_binned_perturbations(
         # Create spatial mask
         mask = create_spatial_mask_for_bin(bin_info, patch_size=patch_size)
 
-        # Apply perturbation
-        perturbed = apply_binned_perturbation(image_data.tensor, mask, perturbation_method, image_data.pil_image)
+        # Apply perturbation with dataset-specific preprocessing
+        perturbed = apply_binned_perturbation(
+            image_data.tensor, mask, perturbation_method, image_data.pil_image, dataset_name
+        )
         perturbed_tensors.append(perturbed)
 
     return BinnedPerturbationData(bins=bins, perturbed_tensors=perturbed_tensors)
@@ -466,15 +485,32 @@ def calculate_binned_saco_for_image(
         Tuple of (saco_score, bin_results, patch_results)
     """
     try:
-        # Step 1: Load image and attributions
+        # Get dataset name from config for proper preprocessing
+        dataset_name = config.file.dataset_name if hasattr(config.file, 'dataset_name') else None
+
+        # Step 1: Load image and attributions (no preprocessing yet)
         image_data = load_image_and_attributions(original_result, target_size=config.classify.target_size[0])
 
-        # Step 2: Create bins and apply perturbations
-        # TODO: Determine patch_size from model architecture (16 for B-16, 32 for B-32)
-        # TODO: should be automatic
-        patch_size = 16  # Default for B-32
+        # Step 2: Create bins and apply perturbations (with dataset-specific preprocessing)
+        # Determine patch_size from model architecture
+        if hasattr(vit_model, 'cfg') and hasattr(vit_model.cfg, 'patch_size'):
+            patch_size = vit_model.cfg.patch_size
+        else:
+            # Infer from dataset/model type
+            # For CLIP models using B-32 architecture
+            if dataset_name in ['waterbirds', 'oxford_pets']:
+                patch_size = 32
+            else:
+                patch_size = 16  # Default for standard ViT-B-16
+        
+        if debug:
+            print(f"Using patch_size={patch_size} for {dataset_name}")
         perturbation_data = create_binned_perturbations(
-            image_data, n_bins, perturbation_method=config.perturb.method, patch_size=patch_size
+            image_data,
+            n_bins,
+            perturbation_method=config.perturb.method,
+            patch_size=patch_size,
+            dataset_name=dataset_name
         )
 
         # Step 3: Measure impacts through model inference

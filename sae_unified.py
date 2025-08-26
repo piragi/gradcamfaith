@@ -20,11 +20,11 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 # ============ CONFIG ============
 config = {
     'datasets': ['covidquex'],  # list of datasets to train on
-    'layers': [6],  # which layers to train
-    'k': 64,  # topk activation
-    'expansion_factor': 128,
-    'lr': 1e-5,
-    'epochs': 5,
+    'layers': [7, 8, 9, 10],  # which layers to train
+    'k': 128,  # topk activation
+    'expansion_factor': 64,
+    'lr': 5e-4,
+    'epochs': 3,
     'batch_size': 4096,
     'wandb_project': 'vit_unified_sae',
     'log_to_wandb': True,
@@ -51,13 +51,13 @@ for dataset_name in config['datasets']:
     train_path = data_path / "train"
     val_path = data_path / "val"
 
-    # Get transform for preprocessed 224x224 images
-    from vit.preprocessing import get_processor_for_precached_224_images
-    transform = get_processor_for_precached_224_images()
+    # Get dataset-specific transforms
+    transform = dataset_config.get_transforms('train')
+    val_transform = dataset_config.get_transforms('test')  # No augmentations for validation
 
     # Load datasets
     train_dataset = torchvision.datasets.ImageFolder(train_path, transform)
-    val_dataset = torchvision.datasets.ImageFolder(val_path, transform)
+    val_dataset = torchvision.datasets.ImageFolder(val_path, val_transform)
     print(f"Training dataset size: {len(train_dataset)} images")
     print(f"Validation dataset size: {len(val_dataset)} images")
 

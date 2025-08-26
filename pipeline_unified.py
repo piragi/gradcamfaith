@@ -34,6 +34,7 @@ from dataset_converters import convert_dataset
 from faithfulness import evaluate_and_report_faithfulness
 from translrp.ViT_new import VisionTransformer
 from transmm_sfaf import generate_attribution_prisma, load_steering_resources
+from transmm_sfaf_enhanced import generate_attribution_prisma_enhanced
 from unified_dataloader import (UnifiedMedicalDataset, create_dataloader, get_single_image_loader)
 
 
@@ -60,14 +61,22 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, 
 
         # Use vit_prisma's load_hooked_model to get CLIP as HookedViT
         # This automatically converts CLIP weights to HookedViT format
-        clip_model_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch16"
+        clip_model_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch32"
 
-        model = load_hooked_model(clip_model_name)
-        model.to(device).eval()
+        model = load_hooked_model(clip_model_name, dtype=torch.float32, device=device)
+        # Ensure model is on the correct device
+        model = model.to(device)
+        model.eval()
 
         # Also load the processor for text encoding
-        processor_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch16"
-        processor = CLIPProcessor.from_pretrained(processor_name)
+        # For OpenCLIP models, use vit_prisma's transforms
+        if "open-clip:" in clip_model_name:
+            from vit_prisma.transforms import get_clip_val_transforms
+            processor = get_clip_val_transforms()
+            print("Using vit_prisma transforms for OpenCLIP model")
+        else:
+            processor_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch32"
+            processor = CLIPProcessor.from_pretrained(processor_name)
 
         print(f"✅ CLIP loaded as HookedViT")
         # Return tuple for CLIP (model, processor)
@@ -163,7 +172,9 @@ def classify_single_image(
         return loaded_result
 
     # Load and preprocess image
-    input_tensor = get_single_image_loader(image_path, dataset_config)
+    # Check if we're using CLIP (config might be None in some cases)
+    use_clip = config and config.classify.use_clip
+    input_tensor = get_single_image_loader(image_path, dataset_config, use_clip=use_clip)
     input_tensor = input_tensor.to(device)
 
     # Get prediction
@@ -293,14 +304,16 @@ def classify_explain_single_image(
             return loaded_result
 
     # Load and preprocess image
-    input_tensor = get_single_image_loader(image_path, dataset_config)
+    # Check if we're using CLIP (config might be None in some cases)
+    use_clip = config and config.classify.use_clip
+    input_tensor = get_single_image_loader(image_path, dataset_config, use_clip=use_clip)
     input_tensor = input_tensor.to(device)
 
     # Only create CLIP classifier if not provided (shouldn't happen in normal pipeline)
     if processor is not None and clip_classifier is None:
-        from clip_classifier import create_clip_classifier_for_waterbirds, create_clip_classifier_for_oxford_pets
+        from clip_classifier import (create_clip_classifier_for_oxford_pets, create_clip_classifier_for_waterbirds)
         print("WARNING: Creating CLIP classifier per image (inefficient!)")
-        
+
         # Choose the appropriate factory based on dataset
         dataset_name = config.file.dataset_name
         if dataset_name == "oxford_pets":
@@ -318,17 +331,31 @@ def classify_explain_single_image(
                 custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
             )
 
-    # Generate attribution
-    raw_attribution_result_dict = generate_attribution_prisma(
-        model=model,
-        input_tensor=input_tensor,
-        config=config,
-        idx_to_class=dataset_config.idx_to_class,  # Pass dataset-specific class mapping
-        device=device,
-        steering_resources=steering_resources,
-        enable_steering=config.file.weighted,
-        clip_classifier=clip_classifier,
-    )
+    # Generate attribution - use enhanced version if feature gradients are enabled
+    if config.classify.boosting.enable_feature_gradients:
+        raw_attribution_result_dict = generate_attribution_prisma_enhanced(
+            model=model,
+            input_tensor=input_tensor,
+            config=config,
+            idx_to_class=dataset_config.idx_to_class,  # Pass dataset-specific class mapping
+            device=device,
+            steering_resources=steering_resources,
+            enable_steering=config.file.weighted,
+            enable_feature_gradients=True,
+            feature_gradient_layers=config.classify.boosting.feature_gradient_layers,
+            clip_classifier=clip_classifier,
+        )
+    else:
+        raw_attribution_result_dict = generate_attribution_prisma(
+            model=model,
+            input_tensor=input_tensor,
+            config=config,
+            idx_to_class=dataset_config.idx_to_class,  # Pass dataset-specific class mapping
+            device=device,
+            steering_resources=steering_resources,
+            enable_steering=config.file.weighted,
+            clip_classifier=clip_classifier,
+        )
 
     # Extract raw attribution
     raw_attr = raw_attribution_result_dict.get("raw_attribution", np.array([]))
@@ -464,10 +491,13 @@ def run_unified_pipeline(
 
     # Create dataloader
     print(f"Creating dataloader from {prepared_path}")
+    # Check if we're using CLIP for this dataset
+    use_clip = config.classify.use_clip if hasattr(config.classify, 'use_clip') else False
     dataset_loader = create_dataloader(
         dataset_name=dataset_name,
         data_path=prepared_path,
-        batch_size=config.classify.batch_size if hasattr(config.classify, 'batch_size') else 32
+        batch_size=config.classify.batch_size if hasattr(config.classify, 'batch_size') else 32,
+        use_clip=use_clip
     )
 
     # Print dataset statistics
@@ -489,10 +519,16 @@ def run_unified_pipeline(
         model = model_result
         processor = None
 
-    # Load steering resources if needed
+    # Load steering resources if needed - for BOTH steering and feature gradient layers
     steering_layers = config.classify.boosting.steering_layers
-    steering_resources = load_steering_resources(steering_layers, dataset_name=dataset_name)
-    print(f"Steering resources loaded for {dataset_name} layers: {steering_layers}")
+    feature_gradient_layers = config.classify.boosting.feature_gradient_layers if config.classify.boosting.enable_feature_gradients else []
+
+    # Combine both layer sets to load all necessary SAEs
+    all_layers_needing_sae = list(set(steering_layers) | set(feature_gradient_layers))
+    steering_resources = load_steering_resources(all_layers_needing_sae, dataset_name=dataset_name)
+    print(
+        f"Steering resources loaded for {dataset_name} layers: {all_layers_needing_sae} (steering: {steering_layers}, gradients: {feature_gradient_layers})"
+    )
 
     # Process images from the specified split (mode)
     split_to_use = config.file.current_mode if config.file.current_mode in ['train', 'val', 'test', 'dev'] else 'test'
@@ -516,9 +552,9 @@ def run_unified_pipeline(
     # Create CLIP classifier once if using CLIP (not per image!)
     clip_classifier = None
     if processor is not None:
-        from clip_classifier import create_clip_classifier_for_waterbirds, create_clip_classifier_for_oxford_pets
+        from clip_classifier import (create_clip_classifier_for_oxford_pets, create_clip_classifier_for_waterbirds)
         print("Creating CLIP classifier (once for all images)...")
-        
+
         # Choose the appropriate factory based on dataset
         if dataset_name == "oxford_pets":
             clip_classifier = create_clip_classifier_for_oxford_pets(
@@ -534,11 +570,14 @@ def run_unified_pipeline(
                 device=device,
                 custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
             )
-    
+
     # Classify and explain
     results = []
-    for image_path, true_label_idx in tqdm(image_data, desc="Classifying & Explaining"):
+
+    for idx, (image_path, true_label_idx) in enumerate(tqdm(image_data, desc="Classifying & Explaining")):
         try:
+            print(f"\n[Image {idx+1}/{len(image_data)}]: {image_path.name}")
+
             # Convert label index to label name
             true_label = dataset_config.idx_to_class[true_label_idx]
 
@@ -554,6 +593,7 @@ def run_unified_pipeline(
                 clip_classifier=clip_classifier  # Pass pre-created classifier
             )
             results.append(result)
+
         except Exception as e:
             print(f"Error processing {image_path.name}: {e}")
             continue
@@ -573,8 +613,24 @@ def run_unified_pipeline(
             print(f"Error in faithfulness evaluation: {e}")
 
     # Run attribution analysis
-    print("Running attribution analysis...")
-    saco_analysis = run_binned_attribution_analysis(config, model, results, device, n_bins=49)
+    # For B-32: 49 patches total, use fewer bins (e.g., 20)
+    # For B-16: 196 patches total, can use 49 bins
+    # Check for B-32 models (both patch32 and B-32 patterns)
+    is_patch32 = False
+    if hasattr(config.classify, 'clip_model_name') and config.classify.clip_model_name:
+        model_name = config.classify.clip_model_name.lower()
+        is_patch32 = "patch32" in model_name or "b-32" in model_name or "b32" in model_name
+    n_bins = 20 if is_patch32 else 49
+    print(f"Running attribution analysis with {n_bins} bins (patch-{'32' if is_patch32 else '16'})...")
+
+    # For CLIP models, wrap the classifier for attribution analysis
+    model_for_attribution = model
+    if clip_classifier is not None:
+        from clip_classifier import CLIPModelWrapper
+        model_for_attribution = CLIPModelWrapper(clip_classifier)
+        print("Using CLIP wrapper for attribution analysis")
+
+    saco_analysis = run_binned_attribution_analysis(config, model_for_attribution, results, device, n_bins=n_bins)
 
     # Extract SaCo scores (overall and per-class)
     saco_results = {}
@@ -618,4 +674,3 @@ if __name__ == "__main__":
     )
 
     print(f"\nProcessed {len(results)} images successfully")
-

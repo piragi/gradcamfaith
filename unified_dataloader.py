@@ -32,7 +32,8 @@ class UnifiedMedicalDataset:
         dataset_config: DatasetConfig,
         batch_size: int = 32,
         num_workers: int = 4,
-        pin_memory: bool = True
+        pin_memory: bool = True,
+        use_clip: bool = False
     ):
         """
         Initialize the unified dataset loader.
@@ -43,12 +44,14 @@ class UnifiedMedicalDataset:
             batch_size: Batch size for DataLoader
             num_workers: Number of workers for data loading
             pin_memory: Whether to pin memory for CUDA
+            use_clip: If True, use CLIP-specific preprocessing
         """
         self.data_path = Path(data_path)
         self.config = dataset_config
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
+        self.use_clip = use_clip
         
         # Verify the data path exists and has the expected structure
         self._verify_data_structure()
@@ -62,7 +65,7 @@ class UnifiedMedicalDataset:
             split_path = self.data_path / split
             if split_path.exists():
                 # Get appropriate transforms for this split
-                transform = self.config.get_transforms(split)
+                transform = self.config.get_transforms(split, use_clip=self.use_clip)
                 
                 # Create ImageFolder dataset
                 dataset = ImageFolder(
@@ -184,6 +187,7 @@ def create_dataloader(
     data_path: Path,
     batch_size: int = 32,
     num_workers: int = 4,
+    use_clip: bool = False,
     **kwargs
 ) -> UnifiedMedicalDataset:
     """
@@ -194,6 +198,7 @@ def create_dataloader(
         data_path: Path to the prepared dataset
         batch_size: Batch size for DataLoader
         num_workers: Number of workers for data loading
+        use_clip: If True, use CLIP-specific preprocessing
         **kwargs: Additional arguments passed to UnifiedMedicalDataset
         
     Returns:
@@ -205,13 +210,15 @@ def create_dataloader(
         dataset_config=config,
         batch_size=batch_size,
         num_workers=num_workers,
+        use_clip=use_clip,
         **kwargs
     )
 
 
 def get_single_image_loader(
     image_path: Path,
-    dataset_config: DatasetConfig
+    dataset_config: DatasetConfig,
+    use_clip: bool = False
 ) -> torch.Tensor:
     """
     Load and preprocess a single image for inference.
@@ -219,6 +226,7 @@ def get_single_image_loader(
     Args:
         image_path: Path to the image
         dataset_config: Configuration for preprocessing
+        use_clip: If True, use CLIP-specific preprocessing
         
     Returns:
         Preprocessed image tensor ready for model input
@@ -226,8 +234,8 @@ def get_single_image_loader(
     # Load image
     image = Image.open(image_path).convert('RGB')
     
-    # Apply test transforms
-    transform = dataset_config.get_transforms('test')
+    # Apply test transforms with CLIP flag
+    transform = dataset_config.get_transforms('test', use_clip=use_clip)
     image_tensor = transform(image)
     
     # Add batch dimension
