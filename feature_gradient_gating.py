@@ -5,9 +5,7 @@ Implements Option 4: Using SAE feature gradients to create cleaner per-patch att
 
 from typing import Any, Dict, Optional, Tuple
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 
 
 def compute_feature_gradient_gate(
@@ -293,69 +291,5 @@ def apply_feature_gradient_gating(
         del denoise_gate
     if 'gate_exp' in locals():
         del gate_exp
-
-    return gated_cam, debug_info
-
-
-def integrate_with_translrp(
-    cam_pos_avg: torch.Tensor,
-    layer_idx: int,
-    resources: Dict[str, Any],
-    gradients: Dict[str, torch.Tensor],
-    sae_codes: Dict[int, torch.Tensor],
-    activations: Dict[str, torch.Tensor],
-    config: Optional[Dict[str, Any]] = None,
-    debug: bool = False
-) -> Tuple[torch.Tensor, Dict[str, Any]]:
-    """
-    Integration function for TransLRP pipeline.
-    
-    This function can be called within transmm_sfaf.py to apply
-    feature gradient gating at specific layers.
-    
-    Args:
-        cam_pos_avg: Current attention CAM
-        layer_idx: Layer index
-        resources: Steering resources including SAE
-        gradients: Dictionary of captured gradients
-        sae_codes: Dictionary of SAE codes by layer
-        activations: Dictionary of captured activations
-        config: Configuration for gating
-        debug: Whether to collect debug info
-        
-    Returns:
-        Modified cam_pos_avg and debug information
-    """
-    # Get residual gradient for this layer
-    resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
-    if resid_hook_name + "_grad" not in gradients:
-        # Need to add backward hook for residuals
-        return cam_pos_avg, {"error": "No residual gradients captured"}
-
-    residual_grad = gradients[resid_hook_name + "_grad"]
-
-    # Get SAE codes for this layer (spatial tokens only)
-    if layer_idx not in sae_codes:
-        return cam_pos_avg, {"error": "No SAE codes for layer"}
-
-    codes = sae_codes[layer_idx]
-    if codes.dim() == 3:
-        codes = codes[0]  # Remove batch dimension
-    codes = codes[1:]  # Remove CLS token
-
-    # Get residual gradient (spatial tokens only)
-    if residual_grad.dim() == 3:
-        residual_grad = residual_grad[0]  # Remove batch dimension
-    residual_grad = residual_grad[1:]  # Remove CLS token
-
-    # Get SAE from resources
-    sae = resources.get("sae")
-    if sae is None:
-        return cam_pos_avg, {"error": "No SAE in resources"}
-
-    # Apply feature gradient gating
-    gated_cam, debug_info = apply_feature_gradient_gating(
-        cam_pos_avg=cam_pos_avg, residual_grad=residual_grad, sae_codes=codes, sae=sae, config=config, debug=debug
-    )
 
     return gated_cam, debug_info

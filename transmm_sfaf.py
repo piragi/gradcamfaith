@@ -14,9 +14,7 @@ from vit_prisma.models.weight_conversion import convert_timm_weights
 from vit_prisma.sae import SparseAutoencoder
 
 from config import PipelineConfig
-from feature_gradient_gating import (
-    apply_feature_gradient_gating, compute_feature_gradient_gate, compute_reconstruction_denoise_gate
-)
+from feature_gradient_gating import apply_feature_gradient_gating
 
 
 def load_models():
@@ -261,7 +259,6 @@ def transmm_prisma_enhanced(
                 }
 
                 # Get residuals for denoising if available
-                # NOTE: Disabling denoising for now due to shape mismatch
                 layer_residuals = None  # Disable denoising for now
 
                 cam_pos_avg, layer_debug = apply_feature_gradient_gating(
@@ -311,9 +308,7 @@ def transmm_prisma_enhanced(
     attribution_pos_np = normalize_fn(attribution_pos_np)
 
     # Add feature gradient debug info to output
-    extra_info = {
-        'feature_gradient_debug': feature_gradient_debug if enable_feature_gradients else {}
-    }
+    extra_info = {'feature_gradient_debug': feature_gradient_debug if enable_feature_gradients else {}}
 
     # Clear the debug dictionary if it has tensor references
     for layer_key in feature_gradient_debug.keys():
@@ -371,3 +366,4 @@ def generate_attribution_prisma_enhanced(
         "head_contribution": [],
         "extra_info": extra_info
     }
+
