@@ -283,6 +283,106 @@ def select_random_features(
     return [], []
 
 
+def select_class_aware_features(
+    codes: torch.Tensor,
+    inference_dict: Dict[str, Any],
+    predicted_class: str,
+    top_L_per_patch: int = 5,
+    strength_k: float = 3.0,
+    debug: bool = True
+) -> Dict[int, Dict[str, float]]:
+    """
+    Select features using class-aware robust statistics.
+    
+    Args:
+        codes: SAE codes [n_patches, n_feats]
+        inference_dict: Robust inference dictionary with per-class features
+        predicted_class: The predicted class name
+        top_L_per_patch: Number of top features to consider per patch
+        strength_k: Exponential strength multiplier
+        debug: Whether to print debug info
+        
+    Returns:
+        Dictionary mapping feature_id to correction info
+    """
+    if debug:
+        print(f"\n=== CLASS-AWARE FEATURE SELECTION ===")
+        print(f"Predicted class: {predicted_class}")
+
+    # Get class-specific features
+    class_features = inference_dict.get('by_class', {}).get(predicted_class, {})
+
+    if not class_features:
+        if debug:
+            print(f"No reliable features for class {predicted_class}")
+        return {}
+
+    if debug:
+        print(f"Available reliable features for {predicted_class}: {len(class_features)}")
+
+    # Get config
+    config = inference_dict.get('config', {})
+    top_L = min(top_L_per_patch, config.get('top_L', 5))
+    k = strength_k if strength_k is not None else config.get('strength_k', 3.0)
+
+    # Collect features that are active in this sample
+    n_patches = codes.shape[0]
+    selected_features = {}
+
+    for patch_idx in range(n_patches):
+        patch_acts = codes[patch_idx]  # [n_feats]
+
+        # Find top-L activated features in this patch
+        active_mask = patch_acts > 0
+        if not active_mask.any():
+            continue
+
+        # Get top-L features by activation
+        top_k = min(top_L, active_mask.sum().item())
+        if top_k == 0:
+            continue
+
+        top_values, top_indices = torch.topk(patch_acts, k=top_k)
+
+        # Check which are in our reliable set
+        for i in range(top_k):
+            feat_id = top_indices[i].item()
+            activation = top_values[i].item()
+
+            if feat_id in class_features:
+                feat_info = class_features[feat_id]
+
+                if feat_id not in selected_features:
+                    selected_features[feat_id] = {
+                        'bias': feat_info['bias'],
+                        'raw_bias': feat_info.get('raw_bias', feat_info['bias']),
+                        'n_occurrences': feat_info.get('n', 0),
+                        'consistency': feat_info.get('consistency', 1.0),
+                        'patches': [],
+                        'max_activation': activation
+                    }
+
+                # Track patch activation
+                selected_features[feat_id]['patches'].append(patch_idx)
+                selected_features[feat_id]['max_activation'] = max(
+                    selected_features[feat_id]['max_activation'], activation
+                )
+
+    if debug:
+        print(f"Selected {len(selected_features)} reliable features active in this sample")
+        if selected_features:
+            # Show top features by bias magnitude
+            sorted_feats = sorted(selected_features.items(), key=lambda x: abs(x[1]['bias']), reverse=True)
+            print(f"\nTop features by |bias|:")
+            for feat_id, info in sorted_feats[:5]:
+                print(
+                    f"  Feature {feat_id}: bias={info['bias']:.3f}, "
+                    f"n_patches={len(info['patches'])}, n_occ={info['n_occurrences']}"
+                )
+
+    return selected_features
+
+
 def select_saco_features(
     codes: torch.Tensor,
     saco_results: Dict[str, Any],
@@ -447,7 +547,147 @@ def precache_sorted_features(
         print(f"Pre-cached {len(sorted_under)} under-attributed features")
 
 
+def precache_bias_multiplicative_features(
+    saco_results: Dict[str, Any], min_occurrences: int = 10, max_occurrences: int = 100, min_abs_bias: float = 0.0
+):
+    """
+    Pre-cache sorted features for bias multiplicative correction.
+    Call this once when loading the saco_results dictionary.
+    """
+    results_by_type = saco_results.get('results_by_type', {})
+    all_features = {**results_by_type.get('under_attributed', {}), **results_by_type.get('over_attributed', {})}
+
+    # Pre-filter and sort features
+    sorted_features = []
+    for feat_id, stats in all_features.items():
+        n_occ = stats.get('n_occurrences', 0)
+        if n_occ < min_occurrences or n_occ > max_occurrences:
+            continue
+
+        bin_bias = abs(stats.get('mean_log_ratio', 0))
+        if bin_bias < min_abs_bias:
+            continue
+
+        sorted_features.append((feat_id, stats, bin_bias))
+
+    # Sort by bias magnitude (descending)
+    sorted_features.sort(key=lambda x: x[2], reverse=True)
+
+    # Cache with the standard parameters
+    cache_key = f'_cached_bias_mult_{min_occurrences}_{max_occurrences}_{min_abs_bias}'
+    setattr(build_bias_multiplicative_mask, cache_key, sorted_features)
+
+    print(f"Pre-cached {len(sorted_features)} features for bias multiplicative correction")
+    if sorted_features:
+        top_biases = [f[2] for f in sorted_features[:10]]
+        print(f"  Top 10 bias magnitudes: {[f'{b:.4f}' for b in top_biases]}")
+
+
 @torch.no_grad()
+def build_class_aware_mask(
+    codes: torch.Tensor,
+    inference_dict: Dict[str, Any],
+    predicted_class: str,
+    top_L_per_patch: int = 5,
+    strength_k: float = 3.0,
+    clamp_min: float = 0.3,
+    clamp_max: float = 3.0,
+    debug: bool = False
+) -> torch.Tensor:
+    """
+    Build multiplicative mask using class-aware robust features.
+    
+    Args:
+        codes: SAE codes [n_patches, n_feats]
+        inference_dict: Robust inference dictionary
+        predicted_class: Predicted class name
+        top_L_per_patch: Top features per patch
+        strength_k: Exponential strength
+        clamp_min/max: Clamp range for patch multipliers
+        debug: Whether to print debug info
+        
+    Returns:
+        Multiplicative mask [n_patches]
+    """
+    device = codes.device
+    n_patches = codes.shape[0]
+
+    # Get class-specific reliable features
+    class_features = inference_dict.get('by_class', {}).get(predicted_class, {})
+
+    if not class_features:
+        if debug:
+            print(f"No reliable features for class {predicted_class}, returning neutral mask")
+        return torch.ones(n_patches, device=device)
+
+    # Get config
+    config = inference_dict.get('config', {})
+    top_L = min(top_L_per_patch, config.get('top_L', 5))
+    k = strength_k if strength_k is not None else config.get('strength_k', 3.0)
+    clamp_min = clamp_min if clamp_min is not None else config.get('clamp_min', 0.3)
+    clamp_max = clamp_max if clamp_max is not None else config.get('clamp_max', 3.0)
+
+    # Initialize mask
+    patch_multipliers = torch.ones(n_patches, device=device)
+
+    # Process each patch
+    for patch_idx in range(n_patches):
+        patch_acts = codes[patch_idx]  # [n_feats]
+
+        # Find top-L features in this patch
+        active_mask = patch_acts > 0
+        if not active_mask.any():
+            continue
+
+        top_k = min(top_L, active_mask.sum().item())
+        if top_k == 0:
+            continue
+
+        top_values, top_indices = torch.topk(patch_acts, k=top_k)
+
+        # Normalize activations within patch
+        if top_k > 1:
+            # Z-score normalization -> sigmoid to [0,1]
+            act_mean = top_values.mean()
+            act_std = top_values.std() + 1e-8
+            norm_acts = torch.sigmoid((top_values - act_mean) / act_std)
+        else:
+            norm_acts = torch.ones_like(top_values)
+
+        # Compute multiplier contributions
+        multipliers = []
+        for i in range(top_k):
+            feat_id = top_indices[i].item()
+
+            if feat_id in class_features:
+                feat_info = class_features[feat_id]
+                bias = feat_info['bias']
+                activation = norm_acts[i].item()
+
+                # Exponential correction: exp(k * bias * activation)
+                m = math.exp(k * bias * activation)
+                multipliers.append(m)
+
+        if multipliers:
+            # Geometric mean of contributions
+            import numpy as np
+            patch_mult = np.exp(np.mean(np.log(multipliers)))
+            # Clamp to range
+            patch_mult = max(clamp_min, min(clamp_max, patch_mult))
+            patch_multipliers[patch_idx] = patch_mult
+
+    if debug:
+        print(f"\nMask statistics:")
+        print(f"  Mean: {patch_multipliers.mean():.3f}")
+        print(f"  Std: {patch_multipliers.std():.3f}")
+        print(f"  Min: {patch_multipliers.min():.3f}")
+        print(f"  Max: {patch_multipliers.max():.3f}")
+        print(f"  Patches boosted (>1.1): {(patch_multipliers > 1.1).sum().item()}")
+        print(f"  Patches suppressed (<0.9): {(patch_multipliers < 0.9).sum().item()}")
+
+    return patch_multipliers
+
+
 def build_boost_mask_improved(
     sae_codes: torch.Tensor,
     saco_results: Dict[str, Any],
@@ -511,6 +751,25 @@ def build_boost_mask_improved(
 
     predicted_class_name = idx_to_class.get(predicted_class, f'class_{predicted_class}')
 
+    # Use new class-aware method if inference dict is provided
+    if use_class_aware_v2 and inference_dict is not None:
+        if debug:
+            print(f"\n=== USING CLASS-AWARE V2 WITH ROBUST FEATURES ===")
+            print(f"Predicted class: {predicted_class_name}")
+
+        # Build mask using robust class-aware features
+        mask = build_class_aware_mask(
+            codes,
+            inference_dict,
+            predicted_class_name,
+            top_L_per_patch=5,
+            strength_k=3.0,
+            clamp_min=0.3,
+            clamp_max=3.0,
+            debug=debug
+        )
+        return mask
+
     if debug:
         print(f"\n=== Boosting for {predicted_class_name} (method: {selection_method}) ===")
 
@@ -572,3 +831,469 @@ def build_boost_mask_improved(
         )
 
     return boost_mask, selected_features
+
+
+@torch.no_grad()
+def build_additive_correction_mask(
+    sae_codes: torch.Tensor,
+    saco_results: Dict[str, Any],
+    predicted_class: int,
+    idx_to_class: Dict[int, str],
+    device: torch.device,
+    *,
+    # Activation threshold
+    min_activation: float = 0.1,
+
+    # Scaling factor for corrections
+    scaling_factor: float = 1.0,
+
+    # Frequency filtering
+    min_occurrences: int = 1,
+    max_occurrences: int = 10000000,
+
+    # Minimum absolute bias to consider
+    min_abs_bias: float = 0.0,
+
+    # Top-k filtering for active features
+    topk_active: Optional[int] = None,
+
+    # Aggregation method when multiple features active at same patch
+    aggregation: str = 'weighted_mean',  # 'weighted_mean', 'sum', 'max'
+    debug: bool = False
+) -> Tuple[torch.Tensor, List[int], Dict[str, Any]]:
+    """
+    Build an additive correction mask based on bin bias values.
+    
+    This function directly uses the bin_attribution_bias as an additive correction,
+    since it represents how much the attribution should be adjusted when a feature is active.
+    
+    Args:
+        sae_codes: SAE feature codes [1+T, k]
+        saco_results: SaCo analysis results with bin biases
+        predicted_class: Predicted class index
+        idx_to_class: Class index to name mapping
+        device: Device to run on
+        min_activation: Minimum activation threshold to consider feature active
+        scaling_factor: Scale the correction strength (1.0 = use bias directly)
+        min_occurrences: Minimum feature occurrences in dataset
+        max_occurrences: Maximum feature occurrences in dataset
+        min_abs_bias: Minimum absolute bias value to apply correction
+        topk_active: If specified, only consider top-k most active features
+        aggregation: How to combine corrections when multiple features are active
+        debug: Whether to print debug information
+        
+    Returns:
+        correction_mask: Additive corrections for each patch
+        selected_features: List of feature IDs that contributed to corrections
+        debug_info: Dictionary with debug information
+    """
+    codes = sae_codes[0, 1:].to(device)  # Remove CLS token
+    n_patches, n_feats = codes.shape
+
+    predicted_class_name = idx_to_class.get(predicted_class, f'class_{predicted_class}')
+
+    if debug:
+        print(f"\n=== ADDITIVE Correction for {predicted_class_name} ===")
+        print(f"Patches: {n_patches}, Features: {n_feats}")
+        print(f"Scaling factor: {scaling_factor}, Aggregation: {aggregation}")
+
+    # Initialize correction mask with zeros (no correction)
+    correction_mask = torch.zeros(n_patches, device=device)
+
+    # Get active features in current sample
+    active_set = get_active_features(codes, min_activation, topk_active)
+
+    if debug:
+        print(f"Active features in sample: {len(active_set)}")
+
+    # Combine all features (both under and over-attributed)
+    results_by_type = saco_results.get('results_by_type', {})
+    all_features = {**results_by_type.get('under_attributed', {}), **results_by_type.get('over_attributed', {})}
+
+    # Track corrections per patch for aggregation
+    patch_corrections = [[] for _ in range(n_patches)]
+    patch_weights = [[] for _ in range(n_patches)]
+    selected_features = []
+
+    # Statistics for debugging
+    features_used = 0
+    features_filtered = {'not_active': 0, 'out_of_bounds': 0, 'low_occ': 0, 'high_occ': 0, 'low_bias': 0}
+
+    for feat_id, stats in all_features.items():
+        # Check if feature index is valid
+        if feat_id >= n_feats:
+            features_filtered['out_of_bounds'] += 1
+            continue
+
+        # Check if feature is active in this sample
+        if feat_id not in active_set:
+            features_filtered['not_active'] += 1
+            continue
+
+        # Apply occurrence filters
+        n_occ = stats.get('n_occurrences', 0)
+        if n_occ < min_occurrences:
+            features_filtered['low_occ'] += 1
+            continue
+        if n_occ > max_occurrences:
+            features_filtered['high_occ'] += 1
+            continue
+
+        # Get bin bias (this is the attribution error)
+        bin_bias = stats.get('mean_log_ratio', 0)
+
+        # Apply minimum bias threshold
+        if abs(bin_bias) < min_abs_bias:
+            features_filtered['low_bias'] += 1
+            continue
+
+        # Get feature activations for each patch
+        feat_activations = codes[:, feat_id]
+        active_mask = feat_activations > min_activation
+
+        if not active_mask.any():
+            continue
+
+        features_used += 1
+        selected_features.append(feat_id)
+
+        # Store corrections and weights for each active patch
+        for patch_idx in active_mask.nonzero(as_tuple=True)[0]:
+            activation_strength = feat_activations[patch_idx].item()
+            # The correction is the bin bias scaled by the scaling factor
+            correction = bin_bias * scaling_factor
+            patch_corrections[patch_idx].append(correction)
+            patch_weights[patch_idx].append(activation_strength)
+
+        if debug and features_used <= 5:  # Show first 5 features
+            n_active_patches = active_mask.sum().item()
+            print(
+                f"  Feature {feat_id}: bias={bin_bias:.3f}, "
+                f"occ={n_occ}, patches={n_active_patches}, "
+                f"class={stats.get('dominant_class', 'unknown')}"
+            )
+
+    # Aggregate corrections per patch
+    patches_corrected = 0
+    max_correction = 0
+    min_correction = 0
+
+    for patch_idx in range(n_patches):
+        if not patch_corrections[patch_idx]:
+            continue
+
+        patches_corrected += 1
+        corrections = torch.tensor(patch_corrections[patch_idx], device=device)
+        weights = torch.tensor(patch_weights[patch_idx], device=device)
+
+        if aggregation == 'weighted_mean':
+            # Weight by activation strength
+            weights_norm = weights / weights.sum()
+            patch_correction = (corrections * weights_norm).sum()
+        elif aggregation == 'sum':
+            # Simple sum of all corrections
+            patch_correction = corrections.sum()
+        elif aggregation == 'max':
+            # Use the correction with maximum absolute value
+            idx = corrections.abs().argmax()
+            patch_correction = corrections[idx]
+        else:
+            # Default to mean
+            patch_correction = corrections.mean()
+
+        correction_mask[patch_idx] = patch_correction
+        max_correction = max(max_correction, patch_correction.item())
+        min_correction = min(min_correction, patch_correction.item())
+
+    if debug:
+        print(f"\nCorrection Summary:")
+        print(f"  Features used: {features_used}/{len(all_features)}")
+        print(f"  Features filtered: {features_filtered}")
+        print(f"  Patches corrected: {patches_corrected}/{n_patches}")
+        print(f"  Correction range: [{min_correction:.3f}, {max_correction:.3f}]")
+        print(f"  Mean abs correction: {correction_mask.abs().mean().item():.3f}")
+
+    # Prepare debug info
+    debug_info = {
+        'features_used': features_used,
+        'features_filtered': features_filtered,
+        'patches_corrected': patches_corrected,
+        'correction_range': (min_correction, max_correction),
+        'mean_abs_correction': correction_mask.abs().mean().item()
+    }
+
+    return correction_mask, selected_features, debug_info
+
+
+@torch.no_grad()
+def build_bias_multiplicative_mask(
+    sae_codes: torch.Tensor,
+    saco_results: Dict[str, Any],
+    device: torch.device,
+    *,
+    # Activation threshold
+    min_activation: float = 0.1,
+
+    # Correction method
+    correction_method: str = 'bounded',  # 'direct', 'bounded', 'sigmoid', 'clamped'
+
+    # Scale factor for bias
+    scale_factor: float = 1.0,
+
+    # Minimum absolute bias to apply correction
+    min_abs_bias: float = 0.0,
+
+    # Frequency filtering
+    min_occurrences: int = 1,
+    max_occurrences: int = 10000000,
+
+    # Top-k filtering for active features
+    topk_active: Optional[int] = None,
+
+    # Aggregation method for multiple features
+    aggregation: str = 'geometric_mean',  # 'geometric_mean', 'arithmetic_mean', 'max'
+    debug: bool = False
+) -> Tuple[torch.Tensor, List[int], Dict[str, Any]]:
+    """
+    Build multiplicative mask using (1 + bin_bias) formula with proper handling.
+    
+    This function uses the bin_attribution_bias as a multiplicative correction factor,
+    interpreting it as the proportional adjustment needed for proper attribution.
+    
+    Args:
+        sae_codes: SAE feature codes [1+T, k]
+        saco_results: SaCo analysis results with bin biases
+        device: Device to run on
+        min_activation: Minimum activation threshold to consider feature active
+        correction_method: How to convert bias to multiplier:
+            - 'direct': multiplier = 1 + bias (clamped at 0.1)
+            - 'bounded': multiplier = exp(bias) (always positive)
+            - 'sigmoid': multiplier = 0.5 + 1.5*sigmoid(bias) (range [0.5, 2])
+            - 'clamped': multiplier = 1 + bias, clamped to [0.2, 3]
+        scale_factor: Scale the bias before applying (for fine-tuning strength)
+        min_abs_bias: Minimum absolute bias value to apply correction
+        min_occurrences: Minimum feature occurrences in dataset
+        max_occurrences: Maximum feature occurrences in dataset
+        topk_active: If specified, only consider top-k most active features
+        aggregation: How to combine multiple feature corrections
+        debug: Whether to print debug information
+        
+    Returns:
+        multiplier_mask: Multiplicative corrections for each patch
+        selected_features: List of feature IDs that contributed to corrections
+        debug_info: Dictionary with debug information
+    """
+    codes = sae_codes[0, 1:].to(device)  # Remove CLS token
+    n_patches, n_feats = codes.shape
+
+    if debug:
+        print(f"\n=== BIAS MULTIPLICATIVE Correction ===")
+        print(f"Patches: {n_patches}, Features: {n_feats}")
+        print(f"Method: {correction_method}, Scale: {scale_factor}, Aggregation: {aggregation}")
+
+    # Initialize with ones (no correction)
+    multiplier_mask = torch.ones(n_patches, device=device)
+
+    # Get active features in current sample
+    active_set = get_active_features(codes, min_activation, topk_active)
+
+    if debug:
+        print(f"Active features in sample: {len(active_set)}")
+
+    # Combine all features (both under and over-attributed)
+    results_by_type = saco_results.get('results_by_type', {})
+    all_features = {**results_by_type.get('under_attributed', {}), **results_by_type.get('over_attributed', {})}
+
+    # OPTIMIZATION: Pre-filter and sort features once
+    # Check if we have a cached sorted list
+    cache_key = f'_cached_bias_mult_{min_occurrences}_{max_occurrences}_{min_abs_bias}'
+    if hasattr(build_bias_multiplicative_mask, cache_key):
+        sorted_features = getattr(build_bias_multiplicative_mask, cache_key)
+        if debug:
+            print(f"  Using cached sorted features: {len(sorted_features)} features")
+    else:
+        # Pre-filter features by occurrences and bias
+        sorted_features = []
+        for feat_id, stats in all_features.items():
+            n_occ = stats.get('n_occurrences', 0)
+            if n_occ < min_occurrences or n_occ > max_occurrences:
+                continue
+
+            bin_bias = abs(stats.get('mean_log_ratio', 0))
+            if bin_bias < min_abs_bias:
+                continue
+
+            sorted_features.append((feat_id, stats, bin_bias))
+
+        # Sort by bias magnitude (descending)
+        sorted_features.sort(key=lambda x: x[2], reverse=True)
+
+        # Cache for future use
+        setattr(build_bias_multiplicative_mask, cache_key, sorted_features)
+
+        if debug:
+            print(f"  Pre-filtered to {len(sorted_features)} features from {len(all_features)}")
+
+    # Track multipliers per patch for aggregation
+    patch_multipliers = [[] for _ in range(n_patches)]
+    patch_weights = [[] for _ in range(n_patches)]
+    patch_biases = [[] for _ in range(n_patches)]  # Store original biases for max_impact
+    selected_features = []
+
+    # Statistics for debugging
+    features_used = 0
+    features_filtered = {'not_active': 0, 'out_of_bounds': 0}
+
+    if debug:
+        print(f"  Sorted features available: {len(sorted_features)}")
+        print(f"  Active features in image: {len(active_set)}")
+        # Find overlap
+        overlap = sum(1 for feat_id, _, _ in sorted_features if feat_id in active_set and feat_id < n_feats)
+        print(f"  Overlap (features both in dict AND active): {overlap}")
+
+    # Limit to top N features by bias if too many
+    max_features_to_check = 512  # Don't check more than 100 features for speed
+    features_to_process = sorted_features[:max_features_to_check] if len(
+        sorted_features
+    ) > max_features_to_check else sorted_features
+
+    for feat_id, stats, _ in features_to_process:
+        # Check if feature index is valid
+        if feat_id >= n_feats:
+            features_filtered['out_of_bounds'] += 1
+            continue
+
+        # Check if feature is active in this sample
+        if feat_id not in active_set:
+            features_filtered['not_active'] += 1
+            continue
+
+        # Get bin bias and scale it (already pre-filtered by occurrences and min_bias)
+        bin_bias = stats.get('mean_log_ratio', 0) * scale_factor
+
+        # Get feature activations for each patch
+        feat_activations = codes[:, feat_id]
+        active_mask = feat_activations > min_activation
+
+        if not active_mask.any():
+            continue
+
+        features_used += 1
+        selected_features.append(feat_id)
+
+        # Calculate multiplier based on method
+        if correction_method == 'direct':
+            # Direct but with safety floor
+            multiplier = max(0.1, 1 + bin_bias)
+        elif correction_method == 'bounded':
+            # Exponential: always positive, symmetric
+            multiplier = torch.exp(torch.tensor(bin_bias, device=device))
+        elif correction_method == 'sigmoid':
+            # Sigmoid bounded to [0.5, 2]
+            multiplier = 0.5 + 1.5 * torch.sigmoid(torch.tensor(bin_bias, device=device))
+        elif correction_method == 'clamped':
+            # Direct with reasonable bounds
+            multiplier = torch.clamp(torch.tensor(1 + bin_bias, device=device), 0.2, 3.0)
+        else:
+            multiplier = 1.0
+
+        multiplier = multiplier.item() if torch.is_tensor(multiplier) else multiplier
+
+        # Store multipliers, weights, and biases for each active patch
+        for patch_idx in active_mask.nonzero(as_tuple=True)[0]:
+            activation_strength = feat_activations[patch_idx].item()
+            patch_multipliers[patch_idx].append(multiplier)
+            patch_weights[patch_idx].append(activation_strength)
+            patch_biases[patch_idx].append(bin_bias)  # Store original scaled bias
+
+        if debug and features_used <= 5:  # Show first 5 features
+            n_active_patches = active_mask.sum().item()
+            print(
+                f"  Feature {feat_id}: bias={bin_bias/scale_factor:.3f}, "
+                f"multiplier={multiplier:.3f}, occ={n_occ}, patches={n_active_patches}"
+            )
+
+        # Debug: Track bias distribution
+        if features_used == 1:
+            all_biases = [
+                abs(s.get('mean_log_ratio', 0)) for s in all_features.values()
+                if s.get('n_occurrences', 0) >= min_occurrences
+            ]
+            if all_biases:
+                print(f"\n  DEBUG - Bias distribution of {len(all_biases)} features:")
+                print(
+                    f"    Max: {max(all_biases):.4f}, Min: {min(all_biases):.4f}, "
+                    f"Mean: {sum(all_biases)/len(all_biases):.4f}"
+                )
+                print(f"    Features with |bias| > 0.5: {sum(1 for b in all_biases if b > 0.5)}")
+                print(f"    Features with |bias| > 0.1: {sum(1 for b in all_biases if b > 0.1)}")
+                print(f"    Features with |bias| > 0.01: {sum(1 for b in all_biases if b > 0.01)}")
+
+    # Aggregate multipliers per patch
+    patches_corrected = 0
+    max_multiplier = 1.0
+    min_multiplier = 1.0
+
+    for patch_idx in range(n_patches):
+        if not patch_multipliers[patch_idx]:
+            continue
+
+        patches_corrected += 1
+        multipliers = torch.tensor(patch_multipliers[patch_idx], device=device)
+        weights = torch.tensor(patch_weights[patch_idx], device=device)
+
+        if aggregation == 'geometric_mean':
+            # Weighted geometric mean (appropriate for multiplicative corrections)
+            weights_norm = weights / weights.sum()
+            # Use log-space for numerical stability
+            log_multipliers = torch.log(multipliers)
+            patch_multiplier = torch.exp((log_multipliers * weights_norm).sum())
+        elif aggregation == 'arithmetic_mean':
+            # Weighted arithmetic mean
+            weights_norm = weights / weights.sum()
+            patch_multiplier = (multipliers * weights_norm).sum()
+        elif aggregation == 'max':
+            # Use the strongest correction (furthest from 1.0)
+            idx = (multipliers - 1).abs().argmax()  # Furthest from 1
+            patch_multiplier = multipliers[idx]
+        elif aggregation == 'max_impact':
+            # NEW: Use the feature with highest impact (strongest absolute bias)
+            # This avoids dilution by letting the "expert" feature make the decision
+            biases = torch.tensor(patch_biases[patch_idx], device=device)
+            abs_biases = biases.abs()
+            max_impact_idx = abs_biases.argmax()
+            patch_multiplier = multipliers[max_impact_idx]
+        else:
+            # Simple mean as fallback
+            patch_multiplier = multipliers.mean()
+
+        multiplier_mask[patch_idx] = patch_multiplier
+        max_multiplier = max(max_multiplier, patch_multiplier.item())
+        min_multiplier = min(min_multiplier, patch_multiplier.item())
+
+    if debug:
+        print(f"\nMultiplier Summary:")
+        print(f"  Features used: {features_used}/{len(all_features)}")
+        print(f"  Features filtered: {features_filtered}")
+        print(f"  Patches corrected: {patches_corrected}/{n_patches}")
+        print(f"  Multiplier range: [{min_multiplier:.3f}, {max_multiplier:.3f}]")
+        print(f"  Mean multiplier: {multiplier_mask.mean().item():.3f}")
+
+        # Show distribution of multipliers
+        boosted = (multiplier_mask > 1.05).sum().item()
+        suppressed = (multiplier_mask < 0.95).sum().item()
+        unchanged = n_patches - boosted - suppressed
+        print(f"  Patches: {boosted} boosted, {suppressed} suppressed, {unchanged} unchanged")
+
+    # Prepare debug info
+    debug_info = {
+        'features_used': features_used,
+        'features_filtered': features_filtered,
+        'patches_corrected': patches_corrected,
+        'multiplier_range': (min_multiplier, max_multiplier),
+        'mean_multiplier': multiplier_mask.mean().item(),
+        'patches_boosted': (multiplier_mask > 1.05).sum().item(),
+        'patches_suppressed': (multiplier_mask < 0.95).sum().item()
+    }
+
+    return multiplier_mask, selected_features, debug_info

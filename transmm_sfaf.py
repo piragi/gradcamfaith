@@ -48,9 +48,6 @@ def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict
         layers: List of layer indices to load
         dataset_name: Name of the dataset ('covidquex' or 'hyperkvasir')
     """
-    print(f"\n[DEBUG] load_steering_resources called from transmm_sfaf.py for layers {layers}")
-    from memory_debug import print_memory_status
-    print_memory_status("BEFORE_LOADING_SAES")
     resources = {}
 
     for layer_idx in layers:
@@ -70,7 +67,7 @@ def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict
             else:
                 # Original logic for other datasets
                 sae_dir = Path("data") / f"sae_{dataset_name}" / f"layer_{layer_idx}"
-                sae_files = list(sae_dir.glob("*/n_images_*.pt"))
+                sae_files = list(sae_dir.glob("**/n_images_*.pt"))
                 # Filter out log_feature_sparsity files
                 sae_files = [f for f in sae_files if 'log_feature_sparsity' not in str(f)]
 
@@ -230,7 +227,7 @@ def transmm_prisma(
         one_hot[0, predicted_class_idx] = 1
         one_hot.requires_grad_(True)
         loss = torch.sum(one_hot * logits)
-        loss.backward(retain_graph=True)  # Use retain_graph for CLIP
+        loss.backward(retain_graph=False)  # Use retain_graph for CLIP
 
     prediction_result_dict = {
         "logits":

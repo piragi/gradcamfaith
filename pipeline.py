@@ -12,21 +12,22 @@ from tqdm import tqdm
 # Suppress PIL debug logging
 logging.getLogger('PIL').setLevel(logging.WARNING)
 
+import math
+
 import io_utils
 import perturbation
 import visualization
 import vit.model as model
 import vit.preprocessing as preprocessing
+from attribution_binning import run_binned_attribution_analysis
 from config import FileConfig, PipelineConfig
 from data_types import (
     AttributionDataBundle, AttributionOutputPaths, ClassEmbeddingRepresentationItem, ClassificationPrediction,
     ClassificationResult, FFNActivityItem, HeadContributionItem, PerturbationPatchInfo, PerturbedImageRecord
 )
 from faithfulness import evaluate_and_report_faithfulness
-import math
 from translrp.ViT_new import VisionTransformer
 from transmm_sfaf import (generate_attribution_prisma, load_models, load_steering_resources)
-from attribution_binning import run_binned_attribution_analysis
 
 
 def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
@@ -52,7 +53,7 @@ def preprocess_dataset(config: PipelineConfig, source_dir: Path) -> List[Path]:
             # Extract class and split information from directory structure
             # Handle structure: source_dir/class/images/file.png or source_dir/class/file.jpg
             immediate_parent = image_file.parent.name
-            
+
             if immediate_parent == "images":
                 # Structure: class/images/file.png - class is grandparent
                 class_name = image_file.parent.parent.name
@@ -352,9 +353,7 @@ def classify_and_explain_dataset(
         image_paths_to_process, desc=f"Classifying & Explaining (suffix: '{config.file.output_suffix}')"
     ):
         try:
-            result = classify_explain_single_image(
-                config, image_path, vit_model, device, steering_resources
-            )
+            result = classify_explain_single_image(config, image_path, vit_model, device, steering_resources)
             collected_results.append(result)
         except Exception as e:
             print(f"Error C&E {image_path.name}: {e}")
@@ -375,7 +374,7 @@ def classify_dataset_only(
     image_paths_to_process: List[Path], output_results_csv_path: Path
 ) -> List[ClassificationResult]:
     collected_results: List[ClassificationResult] = []
-    
+
     for image_path in tqdm(image_paths_to_process, desc=f"Classifying dataset (suffix: '{config.file.output_suffix}')"):
         try:
             result = classify_single_image(config, image_path, vit_model, device)
@@ -475,10 +474,7 @@ def generate_patch_coordinates(image: Image.Image, patch_size: int) -> List[Tupl
     return patches
 
 
-def perturb_image_patches(
-    config: PipelineConfig,
-    original_image_path: Path
-) -> List[PerturbedImageRecord]:
+def perturb_image_patches(config: PipelineConfig, original_image_path: Path) -> List[PerturbedImageRecord]:
     """
     Perturb patches in a single image.
     
@@ -499,15 +495,12 @@ def perturb_image_patches(
     for patch_id, x, y in patch_coordinates_list:
         patch_info_dc = PerturbationPatchInfo(patch_id=patch_id, x=x, y=y)
         record = perturb_single_patch(config, original_image_path, patch_info_dc)
-        if record: 
+        if record:
             perturbed_records.append(record)
     return perturbed_records
 
 
-def perturb_dataset(
-    config: PipelineConfig,
-    image_paths_to_perturb: List[Path]
-) -> List[PerturbedImageRecord]:
+def perturb_dataset(config: PipelineConfig, image_paths_to_perturb: List[Path]) -> List[PerturbedImageRecord]:
     """
     Perturb patches in all images.
     
@@ -551,7 +544,7 @@ def visualize_attributions(results_df: pd.DataFrame, output_dir: str = './result
     """
     # Ensure output directory exists
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    
+
     for _, row in results_df.iterrows():
         # Extract file locations from the DataFrame row
         image_path = row["image_path"]
@@ -565,9 +558,7 @@ def visualize_attributions(results_df: pd.DataFrame, output_dir: str = './result
 
         # Call the visualization function
         visualization.visualize_attribution_map(
-            attribution_map,
-            original_image,
-            save_path=f'{output_dir}/{Path(image_path).stem}_visualization.png'
+            attribution_map, original_image, save_path=f'{output_dir}/{Path(image_path).stem}_visualization.png'
         )
 
 
@@ -607,8 +598,6 @@ def run_classification_standalone(
     return results
 
 
-
-
 def run_pipeline(config: PipelineConfig,
                  source_dir_for_preprocessing: Path,
                  device: Optional[torch.device] = None) -> List[ClassificationResult]:
@@ -638,7 +627,12 @@ def run_pipeline(config: PipelineConfig,
     print(f"Running Classify & Explain for original images")
 
     original_results_explained = classify_and_explain_dataset(
-        config=config, vit_model=vit_model, device=device, image_paths_to_process=original_image_paths, output_results_csv_path=originals_csv_path, steering_resources=steering_resources
+        config=config,
+        vit_model=vit_model,
+        device=device,
+        image_paths_to_process=original_image_paths,
+        output_results_csv_path=originals_csv_path,
+        steering_resources=steering_resources
     )
 
     if config.classify.analysis:
@@ -649,7 +643,6 @@ def run_pipeline(config: PipelineConfig,
             print(f"Error in faithfulness evaluation: {e}")
             import traceback
             traceback.print_exc()
-
 
     print("Compare attributions")
     run_binned_attribution_analysis(config, vit_model, original_results_explained, device, n_bins=49)
