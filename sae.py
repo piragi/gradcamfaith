@@ -1,6 +1,8 @@
 import copy
 import gc
+import logging
 import os
+from pathlib import Path
 
 import torch
 import torchvision
@@ -9,110 +11,143 @@ from vit_prisma.sae import VisionSAETrainer
 from vit_prisma.sae.config import VisionModelSAERunnerConfig
 
 import wandb
-from vit.preprocessing import get_default_processor
-from transmm_sfaf import load_models
-import logging
+from dataset_config import get_dataset_config
+from pipeline import load_model_for_dataset
 
 # Suppress PIL debug logging
 logging.getLogger('PIL').setLevel(logging.WARNING)
 
-model_name = "vit_base_patch16_224"
-hooked_model = HookedSAEViT.from_pretrained(model_name, load_pretrained_model=False)
+# ============ CONFIG ============
+config = {
+    'datasets': ['covidquex'],  # list of datasets to train on
+    'layers': [7, 8, 9, 10],  # which layers to train
+    'k': 128,  # topk activation
+    'expansion_factor': 64,
+    'lr': 5e-4,
+    'epochs': 3,
+    'batch_size': 4096,
+    'wandb_project': 'vit_unified_sae',
+    'log_to_wandb': True,
+}
+# ================================
 
-num_classes = 3
-hooked_model.head = torch.nn.Linear(hooked_model.cfg.d_model, num_classes)
+# Process each dataset
+for dataset_name in config['datasets']:
+    print(f"\n{'='*60}")
+    print(f"Processing dataset: {dataset_name}")
+    print(f"{'='*60}\n")
 
-hooked_model = load_models()
-train_path = "./lung/Train"
-val_path = "./lung/Val"
+    # Load dataset config
+    dataset_config = get_dataset_config(dataset_name)
+    print(f"Training SAEs for {dataset_config.name} dataset")
+    print(f"Number of classes: {dataset_config.num_classes}")
 
-transform = get_default_processor(224)
+    # Load model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    hooked_model = load_model_for_dataset(dataset_config, device)
 
-# label_map = {2: 3, 3: 2}
-# def custom_target_transform(target):
-    # return label_map.get(target, target)
+    # Set up data paths
+    data_path = Path(f"data/{dataset_name}_unified")
+    train_path = data_path / "train"
+    val_path = data_path / "val"
 
+    # Get dataset-specific transforms
+    transform = dataset_config.get_transforms('train')
+    val_transform = dataset_config.get_transforms('test')  # No augmentations for validation
 
-train_dataset = torchvision.datasets.ImageFolder(train_path, transform) #, target_transform=custom_target_transform)
-val_dataset = torchvision.datasets.ImageFolder(val_path, transform) #, target_transform=custom_target_transform)
-print(f"Training dataset size: {len(train_dataset)} images")
+    # Load datasets
+    train_dataset = torchvision.datasets.ImageFolder(train_path, transform)
+    val_dataset = torchvision.datasets.ImageFolder(val_path, val_transform)
+    print(f"Training dataset size: {len(train_dataset)} images")
+    print(f"Validation dataset size: {len(val_dataset)} images")
 
-base_config = VisionModelSAERunnerConfig(
-    model_name=model_name,
-    # hook_point_layer=9,
-    layer_subtype='hook_resid_post',
-    cls_token_only=False,
-    context_size=197,
-    expansion_factor=64,
-    activation_fn_str="topk",
-    activation_fn_kwargs={'k': 64},
-    lr=0.00002,
-    # l1_coefficient=2e-4,
-    train_batch_size=4096,
-    num_epochs=3,
-    lr_scheduler_name="cosineannealingwarmup",
-    lr_warm_up_steps=100,
-    n_batches_in_buffer=64,
-    initialization_method="encoder_transpose_decoder",
-    dataset_name="hyper-kvasir",
-    log_to_wandb=True,
-    wandb_project='vit_covidquex_sae_k_sweep',
-    n_checkpoints=1,
-    use_ghost_grads=True,
-    dead_feature_threshold=1e-9,
-    feature_sampling_window=1000,
-    dead_feature_window=20,
-)
+    # Base SAE config
+    base_config = VisionModelSAERunnerConfig(
+        model_name="vit_base_patch16_224",
+        layer_subtype='hook_resid_post',
+        cls_token_only=False,
+        context_size=197,
+        expansion_factor=config['expansion_factor'],
+        activation_fn_str="topk",
+        activation_fn_kwargs={'k': config['k']},
+        lr=config['lr'],
+        train_batch_size=config['batch_size'],
+        num_epochs=config['epochs'],
+        lr_scheduler_name="cosineannealingwarmup",
+        lr_warm_up_steps=100,
+        n_batches_in_buffer=64,
+        initialization_method="encoder_transpose_decoder",
+        dataset_name=dataset_name,
+        log_to_wandb=config['log_to_wandb'],
+        wandb_project=config['wandb_project'],
+        n_checkpoints=1,
+        use_ghost_grads=True,
+        dead_feature_threshold=1e-9,
+        feature_sampling_window=1000,
+        dead_feature_window=20,
+    )
 
-sweep_parameters = {'hook_point_layer': [4,5]}
+    # Set the actual dataset size for custom datasets
+    base_config.dataset_size = len(train_dataset)
 
-for layer_idx in sweep_parameters['hook_point_layer']:
-    # Clear memory at start of each iteration
+    # Train SAE for each layer
+    for layer_idx in config['layers']:
+        # Clear memory at start of each iteration
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+        run_config = copy.deepcopy(base_config)
+        run_config.hook_point_layer = layer_idx
+
+        # Set up save directory in our organized structure
+        save_dir = Path(f"data/sae_{dataset_name}/layer_{layer_idx}")
+        save_dir.mkdir(parents=True, exist_ok=True)
+        run_config.checkpoint_path = str(save_dir)
+
+        run_name = f"sae_{dataset_name}_l{layer_idx}_k{config['k']}_exp{config['expansion_factor']}"
+        print(f"\nSTARTING: {run_name}")
+        print(f"Layer {layer_idx}, k={config['k']}, expansion={config['expansion_factor']}")
+        print(f"Saving to: {save_dir}")
+
+        trainer = VisionSAETrainer(run_config, hooked_model, train_dataset, val_dataset)
+
+        try:
+            trained_sae = trainer.run()
+            print(f"SUCCESS: Finished training for layer {layer_idx}")
+            print(f"SAE saved in: {save_dir}/n_images_{len(train_dataset)}.pt")
+        except Exception as e:
+            print(f"ERROR: Training failed for layer {layer_idx}")
+            print(f"Error details: {e}")
+            continue
+        finally:
+            print("Cleaning up memory...")
+            wandb.finish()
+
+            # Cleanup
+            if 'trained_sae' in locals():
+                del trained_sae
+            del trainer
+
+            # Clear model gradients
+            for param in hooked_model.parameters():
+                param.grad = None
+
+            # Clear GPU cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+            gc.collect()
+
+    print(f"\nAll SAEs trained and saved in data/sae_{dataset_name}/")
+
+    # Clean up model before next dataset
+    del hooked_model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
 
-    run_config = copy.deepcopy(base_config)
-
-    run_config.hook_point_layer = layer_idx
-
-    run_name = f"sae_l{layer_idx}_k{run_config.activation_fn_kwargs['k']}_exp{run_config.expansion_factor}_lr{run_config.lr}"
-    # run_config.wandb_run_name = run_name
-
-    checkpoint_dir = f'./models/sweep/{run_name}'
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    run_config.checkpoint_path = checkpoint_dir
-
-    print(f"STARTING SWEEP RUN: {run_name}")
-    print(f"Configuration: k={run_config.activation_fn_kwargs['k']}, expansion={run_config.expansion_factor}")
-
-    trainer = VisionSAETrainer(run_config, hooked_model, train_dataset, val_dataset)
-
-    try:
-        trained_sae = trainer.run()
-        print(f"\nSUCCESS: Finished training for {run_name}")
-        print(f"Final SAE saved in: {run_config.checkpoint_path}")
-    except Exception as e:
-        print(f"\nERROR: Training failed for {run_name}")
-        print(f"Error details: {e}")
-        continue
-    finally:
-        print("Finishing wandb run and cleaning up memory")
-        wandb.finish()
-
-        # Explicit cleanup to prevent memory leaks
-        if 'trained_sae' in locals():
-            del trained_sae
-        del trainer
-
-        # Clear model gradients
-        for param in hooked_model.parameters():
-            param.grad = None
-
-        # Clear GPU cache
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
-        # Force garbage collection
-        gc.collect()
+print(f"\n{'='*60}")
+print("All datasets processed successfully!")
+print(f"{'='*60}")

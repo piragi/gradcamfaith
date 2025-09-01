@@ -17,7 +17,7 @@ from tqdm import tqdm
 from vit_prisma.sae import SparseAutoencoder
 
 from dataset_config import get_dataset_config
-from pipeline_unified import load_model_for_dataset
+from pipeline import load_model_for_dataset
 
 # Suppress debug logging
 logging.getLogger('PIL').setLevel(logging.WARNING)

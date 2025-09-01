@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import config
-from pipeline_unified import run_unified_pipeline
+from pipeline import run_unified_pipeline
 
 
 def main():

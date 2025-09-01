@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 import config
-from pipeline_unified import run_unified_pipeline
+from pipeline import run_unified_pipeline
 
 
 def run_single_experiment(
