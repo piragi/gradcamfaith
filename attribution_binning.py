@@ -23,7 +23,6 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-import analysis
 import vit.preprocessing as preprocessing
 from data_types import ClassificationResult
 
@@ -650,7 +649,7 @@ def run_binned_saco_analysis(
     for name, df_to_save in analysis_results.items():
         if isinstance(df_to_save, pd.DataFrame) and not df_to_save.empty:
             if name == "bin_results":
-                # Save bin results with dataset prefix for saco_feature_analysis
+                # Save bin results with dataset prefix
                 dataset_name = config.file.output_dir.name  # Assumes output_dir ends with dataset name
                 save_path = config.file.output_dir / f"{dataset_name}_bin_results.csv"
                 df_to_save.to_csv(save_path, index=False)

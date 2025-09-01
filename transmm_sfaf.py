@@ -13,10 +13,6 @@ from vit_prisma.models.base_vit import HookedSAEViT, HookedViT
 from vit_prisma.models.weight_conversion import convert_timm_weights
 from vit_prisma.sae import SparseAutoencoder
 
-from build_boost_mask_improved import (
-    build_additive_correction_mask, build_bias_multiplicative_mask, build_boost_mask_improved, build_class_aware_mask,
-    precache_bias_multiplicative_features, precache_sorted_features
-)
 from config import PipelineConfig
 from feature_gradient_gating import (
     apply_feature_gradient_gating, compute_feature_gradient_gate, compute_reconstruction_denoise_gate
@@ -45,22 +41,18 @@ def load_models():
 
 def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict[int, Dict[str, Any]]:
     """
-    Loads SAEs and S_f/A_f dictionaries for the specified layers.
-    Dynamically finds SAE and feature dict paths based on dataset and layer.
+    Loads SAEs for the specified layers for feature gradient gating.
     
     Args:
         layers: List of layer indices to load
-        dataset_name: Name of the dataset ('covidquex' or 'hyperkvasir')
+        dataset_name: Name of the dataset ('covidquex', 'hyperkvasir', 'waterbirds', etc.)
     """
     resources = {}
 
     for layer_idx in layers:
         try:
-            # TEST: Use ImageNet CLIP B-32 SAE for waterbirds layer 5
             if dataset_name == "waterbirds":
-                print("=" * 60)
-                print("TEST MODE: Using ImageNet CLIP B-32 SAE for steering")
-                print("=" * 60)
+                # Use ImageNet CLIP B-32 SAE for waterbirds
                 sae_path = Path(f"data/sae_waterbirds_clip_b32/layer_{layer_idx}/weights.pt")
                 if not sae_path.exists():
                     print(f"Warning: ImageNet SAE not found at {sae_path}")
@@ -69,7 +61,7 @@ def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict
                 sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
                 sae.cuda().eval()
             else:
-                # Original logic for other datasets
+                # Load SAE for other datasets
                 sae_dir = Path("data") / f"sae_{dataset_name}" / f"layer_{layer_idx}"
                 sae_files = list(sae_dir.glob("**/n_images_*.pt"))
                 # Filter out log_feature_sparsity files
@@ -88,44 +80,8 @@ def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict
 
             resources[layer_idx] = {"sae": sae}
 
-            # Load SaCo feature dictionary - try inference dict first, then fall back to old format
-            inference_dict_path = Path(f"data/featuredict_{dataset_name}/layer_{layer_idx}_inference_dict.pt")
-            old_saco_path = Path(f"data/featuredict_{dataset_name}/layer_{layer_idx}_saco_features.pt")
-
-            if inference_dict_path.exists():
-                # New robust inference dictionary with class-aware features
-                inference_dict = torch.load(inference_dict_path, weights_only=False)
-                resources[layer_idx]["inference_dict"] = inference_dict
-                resources[layer_idx]["use_class_aware"] = True
-                print(f"Loaded class-aware inference dict for {dataset_name} layer {layer_idx}")
-                print(f"  Classes: {inference_dict.get('metadata', {}).get('classes', [])}")
-                print(f"  Reliable features: {inference_dict.get('metadata', {}).get('reliable_features', 0)}")
-            elif old_saco_path.exists():
-                # Old format SaCo results
-                saco_results = torch.load(old_saco_path, weights_only=False)
-                resources[layer_idx]["saco_dict"] = saco_results
-                resources[layer_idx]["use_class_aware"] = False
-                print(f"Loaded old-format SaCo dictionary for {dataset_name} layer {layer_idx}")
-
-                # Pre-cache sorted features for performance
-                try:
-                    # Pre-cache for the old method (if still used)
-                    precache_sorted_features(saco_results)
-                    # Pre-cache for the new bias multiplicative method
-                    precache_bias_multiplicative_features(
-                        saco_results,
-                        min_occurrences=50,  # Match updated config defaults
-                        max_occurrences=500,
-                        min_abs_bias=0.001
-                    )
-                except Exception as e:
-                    print(f"Warning: Could not pre-cache features: {e}")
-            else:
-                print(f"ERROR: SaCo dict not found at {saco_dict_path}")
-                print(f"Please run saco_feature_analysis.py first to generate feature dictionaries")
-
         except Exception as e:
-            print(f"Error loading resources for {dataset_name} layer {layer_idx}: {e}")
+            print(f"Error loading SAE for {dataset_name} layer {layer_idx}: {e}")
 
     return resources
 
@@ -155,19 +111,18 @@ def transmm_prisma_enhanced(
     device: Optional[torch.device] = None,
     img_size: int = 224,
     steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,
-    enable_steering: bool = True,
-    enable_feature_gradients: bool = True,  # NEW: Enable feature gradient gating
-    feature_gradient_layers: Optional[List[int]] = None,  # NEW: Which layers to apply
+    enable_feature_gradients: bool = True,  # Enable feature gradient gating
+    feature_gradient_layers: Optional[List[int]] = None,  # Which layers to apply
     steering_strength: float = 1.5,
     clip_classifier: Optional[Any] = None,
 ) -> Tuple[Dict[str, Any], np.ndarray, Dict[str, Any]]:
     """
-    Enhanced TransMM with both feature boosting and feature gradient gating.
+    Enhanced TransMM with feature gradient gating for improved faithfulness.
     
-    Additional parameters:
+    Parameters:
         enable_feature_gradients: Whether to use feature gradient gating
         feature_gradient_layers: Which layers to apply feature gradients 
-                                (default: last 2 layers)
+                                (default: layers 9-10)
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -175,8 +130,6 @@ def transmm_prisma_enhanced(
     # Default to applying feature gradients at layers 9-10 if not specified
     if feature_gradient_layers is None:
         feature_gradient_layers = [9, 10] if enable_feature_gradients else []
-
-    active_steering_layers = list(steering_resources.keys()) if enable_steering and steering_resources else []
 
     input_tensor = input_tensor.to(device)
     if input_tensor.dim() == 3:
@@ -200,8 +153,8 @@ def transmm_prisma_enhanced(
     fwd_hooks = [(name, save_activation_hook) for name in attn_hook_names]
     bwd_hooks = [(name, save_gradient_hook) for name in attn_hook_names]
 
-    # Add residual hooks for steering and feature gradient layers
-    all_resid_layers = set(active_steering_layers) | set(feature_gradient_layers)
+    # Add residual hooks for feature gradient layers
+    all_resid_layers = set(feature_gradient_layers) if enable_feature_gradients else set()
 
     if all_resid_layers:
         # Create a single hook function that checks layer index from hook.name
@@ -216,7 +169,7 @@ def transmm_prisma_enhanced(
             resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
             fwd_hooks.append((resid_hook_name, save_resid_hook))  # Use the same function for all
 
-            # NEW: Add backward hook for residual gradients
+            # Add backward hook for residual gradients
             if layer_idx in feature_gradient_layers:
                 bwd_hooks.append((resid_hook_name, save_gradient_hook))
 
@@ -258,8 +211,6 @@ def transmm_prisma_enhanced(
     # Attribution loop with feature gradient gating
     num_tokens = activations[attn_hook_names[0]].shape[-1]
     R_pos = torch.eye(num_tokens, num_tokens, device='cpu')
-    all_boosted_features = {}
-    accumulated_correction_mask = None
     feature_gradient_debug = {}
 
     for i in range(model_prisma.cfg.n_layers):
@@ -311,9 +262,6 @@ def transmm_prisma_enhanced(
 
                 # Get residuals for denoising if available
                 # NOTE: Disabling denoising for now due to shape mismatch
-                # The SAE expects full tokens including CLS, but we've removed CLS
-                # from codes. To enable denoising, we'd need to keep the original codes
-                # with CLS for reconstruction.
                 layer_residuals = None  # Disable denoising for now
 
                 cam_pos_avg, layer_debug = apply_feature_gradient_gating(
@@ -329,72 +277,13 @@ def transmm_prisma_enhanced(
 
                 feature_gradient_debug[i] = layer_debug
 
+                # Debug output if needed
                 # if layer_debug.get('feature_gating', {}).get('mean_gate'):
-                # print(f"  Mean gate multiplier: {layer_debug['feature_gating']['mean_gate']:.3f}")
-
-        # Apply existing feature boosting if configured
-        if i in active_steering_layers:
-            resources = steering_resources[i]
-            codes_for_layer = sae_codes.get(i)
-
-            if codes_for_layer is not None and ("saco_dict" in resources or "inference_dict" in resources):
-                boosting_config = config.classify.boosting
-
-                if resources.get('use_class_aware', False) and 'inference_dict' in resources:
-                    # Class-aware correction
-                    inference_dict = resources['inference_dict']
-                    pred_class_idx = prediction_result_dict['predicted_class_idx']
-                    pred_class_name = idx_to_class.get(pred_class_idx, f'class_{pred_class_idx}')
-
-                    correction_mask = build_class_aware_mask(
-                        codes_for_layer[0, 1:],
-                        inference_dict,
-                        pred_class_name,
-                        top_L_per_patch=10,
-                        strength_k=boosting_config.bias_scale_factor,
-                        clamp_min=0.2,
-                        clamp_max=5.0,
-                        debug=False
-                    )
-
-                    if accumulated_correction_mask is None:
-                        accumulated_correction_mask = correction_mask.cpu()
-                    else:
-                        accumulated_correction_mask = torch.sqrt(accumulated_correction_mask * correction_mask.cpu())
-
-                elif "saco_dict" in resources:
-                    # Original SaCo-based correction
-                    saco_results = resources["saco_dict"]
-                    correction_mask, selected_feat_ids, debug_info = build_bias_multiplicative_mask(
-                        sae_codes=codes_for_layer,
-                        saco_results=saco_results,
-                        device=device,
-                        min_activation=boosting_config.min_activation,
-                        correction_method=boosting_config.correction_method,
-                        scale_factor=boosting_config.bias_scale_factor,
-                        min_abs_bias=boosting_config.min_abs_bias,
-                        min_occurrences=boosting_config.min_occurrences,
-                        max_occurrences=boosting_config.max_occurrences,
-                        topk_active=boosting_config.topk_active,
-                        aggregation=boosting_config.aggregation,
-                        debug=False
-                    )
-
-                    if accumulated_correction_mask is None:
-                        accumulated_correction_mask = correction_mask.cpu()
-                    else:
-                        accumulated_correction_mask = torch.sqrt(accumulated_correction_mask * correction_mask.cpu())
-
-                    all_boosted_features[i] = selected_feat_ids
+                #     print(f"  Mean gate multiplier: {layer_debug['feature_gating']['mean_gate']:.3f}")
 
         R_pos = R_pos + apply_self_attention_rules(R_pos, cam_pos_avg)
 
     transformer_attribution_pos = R_pos[0, 1:].clone()
-
-    # Apply accumulated correction
-    if accumulated_correction_mask is not None and enable_steering:
-        # print(f"Applying accumulated correction mask")
-        transformer_attribution_pos = transformer_attribution_pos * accumulated_correction_mask
 
     # Convert to numpy first to avoid keeping tensor references
     raw_patch_map = transformer_attribution_pos.detach().cpu().numpy()
@@ -422,9 +311,7 @@ def transmm_prisma_enhanced(
     attribution_pos_np = normalize_fn(attribution_pos_np)
 
     # Add feature gradient debug info to output
-    # Make sure we're not keeping any tensor references
     extra_info = {
-        'boosted_features': all_boosted_features,
         'feature_gradient_debug': feature_gradient_debug if enable_feature_gradients else {}
     }
 
@@ -451,13 +338,12 @@ def generate_attribution_prisma_enhanced(
     idx_to_class: Dict[int, str],
     device: Optional[torch.device] = None,
     steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,
-    enable_steering: bool = True,
-    enable_feature_gradients: bool = True,  # NEW
-    feature_gradient_layers: Optional[List[int]] = None,  # NEW
+    enable_feature_gradients: bool = True,
+    feature_gradient_layers: Optional[List[int]] = None,
     clip_classifier: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
-    Generate attribution with both feature boosting and gradient gating.
+    Generate attribution with feature gradient gating for improved faithfulness.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -469,7 +355,6 @@ def generate_attribution_prisma_enhanced(
         input_tensor=input_tensor,
         steering_resources=steering_resources,
         config=config,
-        enable_steering=enable_steering,
         enable_feature_gradients=enable_feature_gradients,
         feature_gradient_layers=feature_gradient_layers,
         idx_to_class=idx_to_class,

@@ -340,7 +340,6 @@ def classify_explain_single_image(
         idx_to_class=dataset_config.idx_to_class,  # Pass dataset-specific class mapping
         device=device,
         steering_resources=steering_resources,
-        enable_steering=False,  # Disable steering for now
         enable_feature_gradients=config.classify.boosting.enable_feature_gradients,
         feature_gradient_layers=config.classify.boosting.feature_gradient_layers
         if config.classify.boosting.enable_feature_gradients else [],
@@ -704,10 +703,7 @@ def run_unified_pipeline(
                 for param in sae.parameters():
                     param.data = torch.empty(0)
                 del steering_resources[layer_idx]["sae"]
-            if "inference_dict" in steering_resources[layer_idx]:
-                del steering_resources[layer_idx]["inference_dict"]
-            if "saco_dict" in steering_resources[layer_idx]:
-                del steering_resources[layer_idx]["saco_dict"]
+            # Only SAE resources to clean up now
         steering_resources.clear()
         del steering_resources
 
