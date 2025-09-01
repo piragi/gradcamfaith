@@ -9,18 +9,18 @@ from pipeline_unified import run_unified_pipeline
 
 def main():
     datasets = [
-        ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
+        # ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
         # ("covidquex", Path("./data/covidquex/data/lung/")),
-        # ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
+        ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
         # ("oxford_pets", Path("./data/oxford_pets"))
     ]
 
     # Layers to test
-    layers_to_test = [10]
+    layers_to_test = [4]
 
     # Feature gradient settings (NEW)
-    USE_FEATURE_GRADIENTS = False  # Set to False to disable feature gradient gating
-    FEATURE_GRADIENT_LAYERS = [4, 6]  # Which layers to apply feature gradients
+    USE_FEATURE_GRADIENTS = True  # Set to False to disable feature gradient gating
+    FEATURE_GRADIENT_LAYERS = [4, 9]  # Which layers to apply feature gradients
 
     # Subset settings
     subset_size = None  # Set to None to use all images
@@ -45,7 +45,7 @@ def main():
             pipeline_config.file.use_cached_perturbed = ""
             pipeline_config.file.current_mode = "val"
             pipeline_config.file.weighted = False  # Disable SAE boosting - only use feature gradients
-            pipeline_config.classify.analysis = False
+            pipeline_config.classify.analysis = True
             pipeline_config.classify.data_collection = False
             pipeline_config.file.set_dataset(dataset_name)
 
@@ -74,7 +74,7 @@ def main():
             exp_name = f"{dataset_name}_layer{layer}"
             exp_output_dir = output_base_dir / exp_name
             exp_output_dir.mkdir(parents=True, exist_ok=True)
-            pipeline_config.file.base_pipeline_dir = Path(f"./data/{dataset_name}_unified/results")  # exp_output_dir
+            pipeline_config.file.base_pipeline_dir = exp_output_dir  # Path(f"./data/{dataset_name}_unified/results")
 
             # Save config for this run
             config_dict = {

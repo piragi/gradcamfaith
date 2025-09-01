@@ -22,13 +22,13 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 
 # ============ SWEEP CONFIG ============
 SWEEP_CONFIG = {
-    'dataset': 'hyperkvasir',  # single dataset for sweep
-    'layers': [1, 2, 3, 5, 7, 8, 9, 10],  # which layers to train
+    'dataset': 'covidquex',  # single dataset for sweep
+    'layers': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],  # which layers to train
 
     # Hyperparameters to sweep
     'expansion_factors': [64],  # Higher = more features to capture variance
     'k_values': [128],  # TopK active features
-    'learning_rates': [5e-4],  # Learning rates
+    'learning_rates': [5e-4, 1e-3],  # Learning rates
 
     # Fixed parameters
     'epochs': 3,  # Reduced to 3 epochs

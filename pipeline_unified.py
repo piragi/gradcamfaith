@@ -19,8 +19,6 @@ from tqdm import tqdm
 logging.getLogger('PIL').setLevel(logging.WARNING)
 
 import io_utils
-import perturbation
-import visualization
 import vit.preprocessing as preprocessing
 from attribution_binning import run_binned_attribution_analysis
 from config import FileConfig, PipelineConfig
@@ -31,10 +29,9 @@ from data_types import (
 # New imports for unified system
 from dataset_config import DatasetConfig, get_dataset_config
 from dataset_converters import convert_dataset
-from faithfulness import evaluate_and_report_faithfulness
+from faithfulness_unified import evaluate_and_report_faithfulness
 from translrp.ViT_new import VisionTransformer
-from transmm_sfaf import generate_attribution_prisma, load_steering_resources
-from transmm_sfaf_enhanced import generate_attribution_prisma_enhanced
+from transmm_sfaf_enhanced import (generate_attribution_prisma_enhanced, load_steering_resources)
 from unified_dataloader import (UnifiedMedicalDataset, create_dataloader, get_single_image_loader)
 
 
@@ -223,7 +220,10 @@ def save_attribution_bundle_to_files(
     # Save logits if available
     if attribution_bundle.logits is not None:
         logits_path = file_config.attribution_dir / f"{image_stem}_logits.npy"
-        np.save(logits_path, attribution_bundle.logits)
+        logits_arr = attribution_bundle.logits
+        if isinstance(logits_arr, torch.Tensor):
+            logits_arr = logits_arr.detach().cpu().numpy()
+        np.save(logits_path, logits_arr)
 
     # Save FFN activities
     if attribution_bundle.ffn_activities:
@@ -331,31 +331,21 @@ def classify_explain_single_image(
                 custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
             )
 
-    # Generate attribution - use enhanced version if feature gradients are enabled
-    if config.classify.boosting.enable_feature_gradients:
-        raw_attribution_result_dict = generate_attribution_prisma_enhanced(
-            model=model,
-            input_tensor=input_tensor,
-            config=config,
-            idx_to_class=dataset_config.idx_to_class,  # Pass dataset-specific class mapping
-            device=device,
-            steering_resources=steering_resources,
-            enable_steering=config.file.weighted,
-            enable_feature_gradients=True,
-            feature_gradient_layers=config.classify.boosting.feature_gradient_layers,
-            clip_classifier=clip_classifier,
-        )
-    else:
-        raw_attribution_result_dict = generate_attribution_prisma(
-            model=model,
-            input_tensor=input_tensor,
-            config=config,
-            idx_to_class=dataset_config.idx_to_class,  # Pass dataset-specific class mapping
-            device=device,
-            steering_resources=steering_resources,
-            enable_steering=config.file.weighted,
-            clip_classifier=clip_classifier,
-        )
+    # Always use enhanced version for better performance
+    # It will run vanilla TransLRP when both steering and feature gradients are disabled
+    raw_attribution_result_dict = generate_attribution_prisma_enhanced(
+        model=model,
+        input_tensor=input_tensor,
+        config=config,
+        idx_to_class=dataset_config.idx_to_class,  # Pass dataset-specific class mapping
+        device=device,
+        steering_resources=steering_resources,
+        enable_steering=False,  # Disable steering for now
+        enable_feature_gradients=config.classify.boosting.enable_feature_gradients,
+        feature_gradient_layers=config.classify.boosting.feature_gradient_layers
+        if config.classify.boosting.enable_feature_gradients else [],
+        clip_classifier=clip_classifier,
+    )
 
     # Extract raw attribution
     raw_attr = raw_attribution_result_dict.get("raw_attribution", np.array([]))
@@ -574,10 +564,8 @@ def run_unified_pipeline(
     # Classify and explain
     results = []
 
-    for idx, (image_path, true_label_idx) in enumerate(tqdm(image_data, desc="Classifying & Explaining")):
+    for _, (image_path, true_label_idx) in enumerate(tqdm(image_data, desc="Classifying & Explaining")):
         try:
-            print(f"\n[Image {idx+1}/{len(image_data)}]: {image_path.name}")
-
             # Convert label index to label name
             true_label = dataset_config.idx_to_class[true_label_idx]
 
@@ -604,11 +592,20 @@ def run_unified_pipeline(
         io_utils.save_classification_results_to_csv(results, csv_path)
         print(f"Results saved to {csv_path}")
 
+    # For CLIP models, wrap the classifier for both faithfulness and attribution analysis
+    model_for_analysis = model
+    if clip_classifier is not None:
+        from clip_classifier import CLIPModelWrapper
+        model_for_analysis = CLIPModelWrapper(clip_classifier)
+        print("Using CLIP wrapper for analysis")
+
     # Run faithfulness evaluation if configured
     if config.classify.analysis:
         print("Running faithfulness evaluation...")
         try:
-            evaluate_and_report_faithfulness(config, model, device, results)
+            evaluate_and_report_faithfulness(
+                config, model_for_analysis, device, results, clip_classifier=clip_classifier
+            )
         except Exception as e:
             print(f"Error in faithfulness evaluation: {e}")
 
@@ -623,14 +620,7 @@ def run_unified_pipeline(
     n_bins = 20 if is_patch32 else 49
     print(f"Running attribution analysis with {n_bins} bins (patch-{'32' if is_patch32 else '16'})...")
 
-    # For CLIP models, wrap the classifier for attribution analysis
-    model_for_attribution = model
-    if clip_classifier is not None:
-        from clip_classifier import CLIPModelWrapper
-        model_for_attribution = CLIPModelWrapper(clip_classifier)
-        print("Using CLIP wrapper for attribution analysis")
-
-    saco_analysis = run_binned_attribution_analysis(config, model_for_attribution, results, device, n_bins=n_bins)
+    saco_analysis = run_binned_attribution_analysis(config, model_for_analysis, results, device, n_bins=n_bins)
 
     # Extract SaCo scores (overall and per-class)
     saco_results = {}
@@ -656,6 +646,82 @@ def run_unified_pipeline(
             print(f"  {class_name}: {stats['mean']:.4f} (std={stats['std']:.4f}, n={stats['count']})")
 
     print("\nPipeline complete!")
+
+    # Clean up models and SAEs to prevent memory leaks
+    # IMPORTANT: We need to break circular references from backward pass
+    if 'model' in locals():
+        # Clear gradients first
+        model.zero_grad(set_to_none=True)
+        # Clear optimizer state if any
+        for p in model.parameters():
+            p.grad = None
+            if hasattr(p, '_grad'):
+                p._grad = None
+        # Move to CPU and clear data
+        model.to("cpu")
+        for param in model.parameters():
+            param.data = torch.empty(0)
+        # Clear any hooks
+        if hasattr(model, 'reset_hooks'):
+            model.reset_hooks(including_permanent=True, clear_contexts=True)
+        if hasattr(model, '_forward_hooks'):
+            model._forward_hooks.clear()
+        if hasattr(model, '_backward_hooks'):
+            model._backward_hooks.clear()
+        del model
+
+    if 'processor' in locals():
+        del processor
+
+    if 'clip_classifier' in locals():
+        if hasattr(clip_classifier, 'vision_model'):
+            # Clear gradients
+            clip_classifier.vision_model.zero_grad(set_to_none=True)
+            for p in clip_classifier.vision_model.parameters():
+                p.grad = None
+            clip_classifier.vision_model.to("cpu")
+            # Clear hooks
+            if hasattr(clip_classifier.vision_model, 'reset_hooks'):
+                clip_classifier.vision_model.reset_hooks(including_permanent=True, clear_contexts=True)
+        del clip_classifier
+
+    if 'model_for_analysis' in locals():
+        if hasattr(model_for_analysis, 'to'):
+            model_for_analysis.to("cpu")
+        # For CLIPModelWrapper, clean the underlying model
+        if hasattr(model_for_analysis, 'model') and hasattr(model_for_analysis.model, 'vision_model'):
+            model_for_analysis.model.vision_model.zero_grad(set_to_none=True)
+            if hasattr(model_for_analysis.model.vision_model, 'reset_hooks'):
+                model_for_analysis.model.vision_model.reset_hooks(including_permanent=True, clear_contexts=True)
+        del model_for_analysis
+
+    # Clean up steering resources (SAEs)
+    if 'steering_resources' in locals() and steering_resources:
+        for layer_idx in list(steering_resources.keys()):
+            if "sae" in steering_resources[layer_idx]:
+                sae = steering_resources[layer_idx]["sae"]
+                sae.to("cpu")
+                for param in sae.parameters():
+                    param.data = torch.empty(0)
+                del steering_resources[layer_idx]["sae"]
+            if "inference_dict" in steering_resources[layer_idx]:
+                del steering_resources[layer_idx]["inference_dict"]
+            if "saco_dict" in steering_resources[layer_idx]:
+                del steering_resources[layer_idx]["saco_dict"]
+        steering_resources.clear()
+        del steering_resources
+
+    # Force garbage collection
+    import gc
+    for _ in range(3):
+        gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     return results, saco_results
 
 

@@ -141,6 +141,7 @@ class BoostingConfig:
     # Feature gradient gating (NEW)
     enable_feature_gradients: bool = False  # Enable feature gradient gating
     feature_gradient_layers: List[int] = field(default_factory=lambda: [9, 10])  # Which layers to apply
+    kappa: int = 10
 
 
 @dataclass

@@ -19,3 +19,5 @@ wandb/
 *.txt
 *.pdf
 /data
+/experiments
+/hf_cache

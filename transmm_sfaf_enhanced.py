@@ -45,50 +45,87 @@ def load_models():
 
 def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict[int, Dict[str, Any]]:
     """
-    Loads SAEs and feature dictionaries for the specified layers.
+    Loads SAEs and S_f/A_f dictionaries for the specified layers.
+    Dynamically finds SAE and feature dict paths based on dataset and layer.
+    
+    Args:
+        layers: List of layer indices to load
+        dataset_name: Name of the dataset ('covidquex' or 'hyperkvasir')
     """
     resources = {}
 
     for layer_idx in layers:
         try:
-            # Find SAE path
-            sae_dir = Path("data") / f"sae_{dataset_name}" / f"layer_{layer_idx}"
-            sae_files = list(sae_dir.glob("n_images_*.pt"))
-            sae_files = [f for f in sae_files if 'log_feature_sparsity' not in str(f)]
+            # TEST: Use ImageNet CLIP B-32 SAE for waterbirds layer 5
+            if dataset_name == "waterbirds":
+                print("=" * 60)
+                print("TEST MODE: Using ImageNet CLIP B-32 SAE for steering")
+                print("=" * 60)
+                sae_path = Path(f"data/sae_waterbirds_clip_b32/layer_{layer_idx}/weights.pt")
+                if not sae_path.exists():
+                    print(f"Warning: ImageNet SAE not found at {sae_path}")
+                    continue
+                print(f"Loading ImageNet SAE from {sae_path}")
+                sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
+                sae.cuda().eval()
+            else:
+                # Original logic for other datasets
+                sae_dir = Path("data") / f"sae_{dataset_name}" / f"layer_{layer_idx}"
+                sae_files = list(sae_dir.glob("**/n_images_*.pt"))
+                # Filter out log_feature_sparsity files
+                sae_files = [f for f in sae_files if 'log_feature_sparsity' not in str(f)]
 
-            if not sae_files:
-                print(f"Warning: No SAE found for {dataset_name} layer {layer_idx}")
-                continue
+                if not sae_files:
+                    print(f"Warning: No SAE found for {dataset_name} layer {layer_idx} in {sae_dir}")
+                    continue
 
-            sae_path = sorted(sae_files)[-1]
-            print(f"Loading SAE from {sae_path}")
+                # Use the most recent SAE file
+                sae_path = sorted(sae_files)[-1]
+                print(f"Loading SAE from {sae_path}")
 
-            sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
-            sae.cuda().eval()
-
-            # Ensure SAE doesn't track gradients
-            for param in sae.parameters():
-                param.requires_grad = False
+                sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
+                sae.cuda().eval()
 
             resources[layer_idx] = {"sae": sae}
 
-            # Load feature dictionary
+            # Load SaCo feature dictionary - try inference dict first, then fall back to old format
             inference_dict_path = Path(f"data/featuredict_{dataset_name}/layer_{layer_idx}_inference_dict.pt")
             old_saco_path = Path(f"data/featuredict_{dataset_name}/layer_{layer_idx}_saco_features.pt")
 
             if inference_dict_path.exists():
+                # New robust inference dictionary with class-aware features
                 inference_dict = torch.load(inference_dict_path, weights_only=False)
                 resources[layer_idx]["inference_dict"] = inference_dict
                 resources[layer_idx]["use_class_aware"] = True
-                print(f"Loaded class-aware inference dict for layer {layer_idx}")
+                print(f"Loaded class-aware inference dict for {dataset_name} layer {layer_idx}")
+                print(f"  Classes: {inference_dict.get('metadata', {}).get('classes', [])}")
+                print(f"  Reliable features: {inference_dict.get('metadata', {}).get('reliable_features', 0)}")
             elif old_saco_path.exists():
+                # Old format SaCo results
                 saco_results = torch.load(old_saco_path, weights_only=False)
                 resources[layer_idx]["saco_dict"] = saco_results
                 resources[layer_idx]["use_class_aware"] = False
-                print(f"Loaded SaCo dictionary for layer {layer_idx}")
+                print(f"Loaded old-format SaCo dictionary for {dataset_name} layer {layer_idx}")
+
+                # Pre-cache sorted features for performance
+                try:
+                    # Pre-cache for the old method (if still used)
+                    precache_sorted_features(saco_results)
+                    # Pre-cache for the new bias multiplicative method
+                    precache_bias_multiplicative_features(
+                        saco_results,
+                        min_occurrences=50,  # Match updated config defaults
+                        max_occurrences=500,
+                        min_abs_bias=0.001
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not pre-cache features: {e}")
+            else:
+                print(f"ERROR: SaCo dict not found at {saco_dict_path}")
+                print(f"Please run saco_feature_analysis_simple.py first to generate feature dictionaries")
 
         except Exception as e:
-            print(f"Error loading resources for layer {layer_idx}: {e}")
+            print(f"Error loading resources for {dataset_name} layer {layer_idx}: {e}")
 
     return resources
 
@@ -205,7 +242,7 @@ def transmm_prisma_enhanced(
 
     prediction_result_dict = {
         "logits":
-        logits.detach(),
+        logits.detach().cpu().numpy(),
         "probabilities":
         probabilities.squeeze().cpu().detach().numpy().tolist()
         if isinstance(probabilities, torch.Tensor) else probabilities,
@@ -233,7 +270,7 @@ def transmm_prisma_enhanced(
 
         # Apply feature gradient gating if configured
         if i in feature_gradient_layers and i in steering_resources:
-            print(f"Applying feature gradient gating at layer {i}")
+            # print(f"Applying feature gradient gating at layer {i}")
 
             resid_grad_key = f"blocks.{i}.hook_resid_post_grad"
             if resid_grad_key in gradients and i in residuals:
@@ -253,10 +290,6 @@ def transmm_prisma_enhanced(
                 residual_grad = residual_grad_cpu.to(device)
                 codes_gpu = codes.to(device)
 
-                # Remove batch dimension and CLS token
-                # print(f"DEBUG Layer {i}: Initial shapes - residual_grad: {residual_grad.shape}, codes: {codes.shape}")
-                # print(f"DEBUG Layer {i}: cam_pos_avg shape: {cam_pos_avg.shape}")
-
                 if residual_grad.dim() == 3:
                     residual_grad = residual_grad[0]
                 residual_grad = residual_grad[1:]  # Remove CLS
@@ -265,12 +298,10 @@ def transmm_prisma_enhanced(
                     codes_gpu = codes_gpu[0]
                 codes_gpu = codes_gpu[1:]  # Remove CLS
 
-                # print(f"DEBUG Layer {i}: After CLS removal - residual_grad: {residual_grad.shape}, codes: {codes.shape}")
-
-                # Apply feature gradient gating
+                # Apply feature gradient gating - get parameters from config
                 gating_config = {
-                    'top_k_features': config.classify.boosting.topk_active or 5,
-                    'kappa': 50.0,
+                    'top_k_features': getattr(config.classify.boosting, 'topk_active', 5),
+                    'kappa': getattr(config.classify.boosting, 'kappa', 50.0),
                     'clamp_min': 0.2,
                     'clamp_max': 5.0,
                     'denoise_gradient': True,
@@ -298,8 +329,8 @@ def transmm_prisma_enhanced(
 
                 feature_gradient_debug[i] = layer_debug
 
-                if layer_debug.get('feature_gating', {}).get('mean_gate'):
-                    print(f"  Mean gate multiplier: {layer_debug['feature_gating']['mean_gate']:.3f}")
+                # if layer_debug.get('feature_gating', {}).get('mean_gate'):
+                # print(f"  Mean gate multiplier: {layer_debug['feature_gating']['mean_gate']:.3f}")
 
         # Apply existing feature boosting if configured
         if i in active_steering_layers:

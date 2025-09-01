@@ -196,7 +196,7 @@ def create_clip_classifier_for_waterbirds(
     return classifier
 
 
-class CLIPModelWrapper:
+class CLIPModelWrapper(torch.nn.Module):
     """
     Wrapper that makes a CLIP classifier behave like a standard model for inference.
     
@@ -211,6 +211,7 @@ class CLIPModelWrapper:
         Args:
             clip_classifier: CLIPClassifier instance
         """
+        super().__init__()
         self.clip_classifier = clip_classifier
         self.training = False  # Always in eval mode for attribution
 
@@ -227,8 +228,26 @@ class CLIPModelWrapper:
         return self
 
     def to(self, device):
-        """Move to device (no-op, classifier already on device)."""
+        # move underlying models if they exist
+        if hasattr(self.clip_classifier, "vision_model"):
+            self.clip_classifier.vision_model.to(device)
+        if hasattr(self.clip_classifier, "text_model") and self.clip_classifier.text_model is not None:
+            self.clip_classifier.text_model.to(device)
         return self
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Forward method required by nn.Module.
+        
+        Args:
+            images: Input images tensor
+            
+        Returns:
+            Logits tensor
+        """
+        # Use the CLIP classifier without gradients for inference
+        result = self.clip_classifier.forward(images, requires_grad=False)
+        return result["logits"]
 
     def __call__(self, images: torch.Tensor) -> torch.Tensor:
         """
@@ -240,9 +259,7 @@ class CLIPModelWrapper:
         Returns:
             Logits tensor
         """
-        # Use the CLIP classifier without gradients for inference
-        result = self.clip_classifier.forward(images, requires_grad=False)
-        return result["logits"]
+        return self.forward(images)
 
     @property
     def cfg(self):
