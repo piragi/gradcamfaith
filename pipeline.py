@@ -30,7 +30,6 @@ from data_types import (
 from dataset_config import DatasetConfig, get_dataset_config
 from dataset_converters import convert_dataset
 from faithfulness import evaluate_and_report_faithfulness
-from translrp.ViT_new import VisionTransformer
 from transmm_sfaf import (generate_attribution_prisma_enhanced, load_steering_resources)
 from unified_dataloader import (UnifiedMedicalDataset, create_dataloader, get_single_image_loader)
 
