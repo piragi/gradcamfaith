@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Setup script to download Hyperkvasir and CovidQueX datasets and model files.
-Run: python setup_downloads.py
+Setup script to download datasets, models, and SAE checkpoints.
+Run: python setup.py
 
 Downloads:
 - Hyperkvasir: dataset (zip) and model from Google Drive
 - CovidQueX: dataset (tar.gz) and model from Google Drive
+- Oxford-IIIT Pet: dataset and model
+- SAE Checkpoints: Pre-trained Sparse Autoencoders from HuggingFace
 """
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -17,6 +20,7 @@ from typing import Dict, List
 
 import gdown
 import requests
+from huggingface_hub import hf_hub_download
 
 
 def download_with_progress(url: str, filename: Path) -> None:
@@ -275,6 +279,75 @@ def download_covidquex(data_dir: Path, models_dir: Path) -> None:
             print(f"Warning: Could not check/extract model file: {e}")
 
 
+def download_sae_checkpoints(data_dir: Path) -> None:
+    """Download SAE checkpoints from HuggingFace for all layers."""
+    print("\n" + "=" * 50)
+    print("Downloading SAE Checkpoints from HuggingFace")
+    print("=" * 50)
+    
+    # Map each layer to its specific repository
+    layer_repo_map = {
+        1: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_1-hook_resid_post-64-82",
+        2: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_2-hook_resid_post-64-80",
+        3: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_3-hook_resid_post-64-80",
+        4: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_4-hook_resid_post-64-80",
+        5: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_5-hook_resid_post-64-81",
+        6: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_6-hook_resid_post-64-81",
+        7: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_7-hook_resid_post-64-83",
+        8: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_8-hook_resid_post-64-84",
+        9: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_9-hook_resid_post-64-86",
+        10: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_10-hook_resid_post-64-85"
+    }
+    
+    sae_base_dir = data_dir / "sae_waterbirds_clip_b32"
+    successful_layers = []
+    
+    for layer_num, repo_id in layer_repo_map.items():
+        print(f"\nDownloading Layer {layer_num} SAE checkpoint...")
+        print(f"  Repository: {repo_id}")
+        
+        try:
+            # Download the checkpoint
+            downloaded_path = hf_hub_download(
+                repo_id=repo_id, 
+                filename="weights.pt", 
+                cache_dir="./hf_cache"
+            )
+            
+            # Create the target directory structure for this layer's SAE
+            target_dir = sae_base_dir / f"layer_{layer_num}"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Copy to the expected location
+            target_path = target_dir / "weights.pt"
+            shutil.copy(downloaded_path, target_path)
+            print(f"  ✓ Layer {layer_num} checkpoint saved to: {target_path}")
+            
+            # Also download the config file if available
+            try:
+                config_path = hf_hub_download(
+                    repo_id=repo_id, 
+                    filename="config.json", 
+                    cache_dir="./hf_cache"
+                )
+                shutil.copy(config_path, target_dir / "config.json")
+                print(f"  ✓ Layer {layer_num} config file saved")
+            except:
+                # Config file is optional
+                pass
+            
+            successful_layers.append(layer_num)
+            
+        except Exception as e:
+            print(f"  ✗ Error downloading layer {layer_num}: {str(e)}")
+    
+    print(f"\nSAE Checkpoints Summary:")
+    print(f"  Successfully downloaded: {len(successful_layers)}/10 layers")
+    print(f"  Layers: {sorted(successful_layers)}")
+    print(f"  Location: {sae_base_dir}")
+    print(f"  Model: CLIP-ViT-B-32 (ImageNet pretrained)")
+
+
 def print_summary(data_dir: Path, models_dir: Path) -> None:
     """Print summary of downloaded files."""
     print("\nSummary:")
@@ -313,6 +386,9 @@ def main():
 
         # Download Oxford-IIIT Pet
         download_oxford_pets(data_dir, models_dir)
+        
+        # Download SAE checkpoints from HuggingFace
+        download_sae_checkpoints(data_dir)
 
         # Print summary
         print_summary(data_dir, models_dir)
@@ -333,8 +409,9 @@ if __name__ == "__main__":
     try:
         import gdown
         import requests
+        from huggingface_hub import hf_hub_download
     except ImportError as e:
-        print("Missing required package. Install: pip install gdown requests")
+        print("Missing required package. Install: pip install gdown requests huggingface-hub")
         sys.exit(1)
 
     main()
