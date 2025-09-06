@@ -11,7 +11,7 @@ def main():
     datasets = [
         # ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
         # ("covidquex", Path("./data/covidquex/data/lung/")),
-        ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
+        ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2/")),
         # ("oxford_pets", Path("./data/oxford_pets"))
     ]
 
@@ -20,10 +20,10 @@ def main():
 
     # Feature gradient settings (NEW)
     USE_FEATURE_GRADIENTS = True  # Set to False to disable feature gradient gating
-    FEATURE_GRADIENT_LAYERS = [4, 9]  # Which layers to apply feature gradients
+    FEATURE_GRADIENT_LAYERS = [2,4,5]  # Which layers to apply feature gradients
 
     # Subset settings
-    subset_size = None  # Set to None to use all images
+    subset_size = 1000  # Set to None to use all images
     random_seed = 42  # For reproducibility
 
     # Output directory for all experiments
@@ -44,9 +44,7 @@ def main():
             pipeline_config.file.use_cached_original = False
             pipeline_config.file.use_cached_perturbed = ""
             pipeline_config.file.current_mode = "val"
-            pipeline_config.file.weighted = False  # Disable SAE boosting - only use feature gradients
-            pipeline_config.classify.analysis = True
-            pipeline_config.classify.data_collection = False
+            pipeline_config.classify.analysis = False
             pipeline_config.file.set_dataset(dataset_name)
 
             # Enable CLIP for waterbirds and oxford_pets
@@ -74,7 +72,7 @@ def main():
             exp_name = f"{dataset_name}_layer{layer}"
             exp_output_dir = output_base_dir / exp_name
             exp_output_dir.mkdir(parents=True, exist_ok=True)
-            pipeline_config.file.base_pipeline_dir = exp_output_dir  # Path(f"./data/{dataset_name}_unified/results")
+            pipeline_config.file.base_pipeline_dir = Path(f"./data/{dataset_name}_unified/results")
 
             # Save config for this run
             config_dict = {
@@ -82,10 +80,6 @@ def main():
                 'layer': layer,
                 'timestamp': datetime.now().isoformat(),
                 'boosting_params': {
-                    'boost_strength': pipeline_config.classify.boosting.boost_strength,
-                    'max_boost': pipeline_config.classify.boosting.max_boost,
-                    'selection_method': pipeline_config.classify.boosting.selection_method,
-                    'min_log_ratio': pipeline_config.classify.boosting.min_log_ratio,
                     'steering_layers': pipeline_config.classify.boosting.steering_layers,
                 },
                 'feature_gradient_params': {

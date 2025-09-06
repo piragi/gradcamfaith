@@ -11,7 +11,6 @@ class FileConfig:
     dataset_name: str = "hyperkvasir"
     base_pipeline_dir: Path = field(default_factory=lambda: Path("./data/hyperkvasir_unified/results"))
     current_mode: Modes = "test"
-    weighted = False
 
     output_suffix: str = ""
 
@@ -25,8 +24,7 @@ class FileConfig:
 
     @property
     def output_dir(self) -> Path:
-        weighted_suffix = "_weighted" if self.weighted else ""
-        return self.base_pipeline_dir / f'{self.current_mode}{weighted_suffix}'
+        return self.base_pipeline_dir / self.current_mode
 
     @property
     def data_dir(self) -> Path:
@@ -85,52 +83,8 @@ class FileConfig:
 @dataclass
 class BoostingConfig:
     """Configuration for SAE-based feature boosting/suppression."""
-    # === Class-aware robust features (if inference dict available) ===
-    use_class_aware_v2: bool = True  # Use new robust class-aware method if inference dict exists
-
-    # === NEW: Bias multiplicative correction parameters ===
-    # Correction method: 'direct', 'bounded', 'sigmoid', 'clamped'
-    correction_method: str = 'bounded'  # Exponential: exp(bias * scale)
-
-    # Scale factor for bias (1.0 = use bias directly)
-    bias_scale_factor: float = 150.0  # Moderate scaling: bias of 0.7 -> exp(1.4) ≈ 4x
-
-    # Aggregation when multiple features active: 'geometric_mean', 'arithmetic_mean', 'max', 'max_impact'
-    aggregation: str = 'max_impact'  # Use feature with strongest bias (avoids dilution)
-
-    # Minimum absolute bias to apply correction
-    min_abs_bias: float = 0.001  # Very low threshold since biases are small
-
-    # === Original parameters (kept for backward compatibility) ===
-    # Strength parameters (constant multipliers, no adaptation)
-    boost_strength: float = 10.  # Multiply attribution by this for boost features
-    suppress_strength: float = 100.0  # Divide attribution by this for suppress features
-
-    # Selection limits
-    max_boost: int = 5
-    max_suppress: int = 20
-
-    # Frequency filtering
-    min_occurrences: int = 1  # Increased to only use well-represented features
-    max_occurrences: int = 10000  # Reduced to avoid overly common features
-
-    # Ratio thresholds
-    min_log_ratio: float = 0.
-
-    # Activation threshold
-    min_activation: float = 0.1
-
     # Top-k filtering
-    topk_active: Optional[int] = None  # No limit - use all active features
-
-    # Weighting strategy
-    use_balanced_score: bool = True
-
-    # Selection method: 'saco', 'topk_activation', 'random'
-    selection_method: str = 'saco'
-
-    # Class-aware corrections
-    class_aware: bool = True
+    top_k_features: Optional[int] = None  # No limit - use all active features
 
     # Random seed (for reproducibility)
     random_seed: int = 42
@@ -159,14 +113,7 @@ class ClassificationConfig:
     clip_model_name: str = "openai/clip-vit-base-patch16"
     clip_text_prompts: Optional[List[str]] = None  # If None, uses dataset defaults
 
-    attribution_method: str = "transmm"
     analysis = False
-    data_collection = False
-
-    percentile_threshold = 80
-    attention_threshold = 30
-    top_k_features = 20
-    base_strength = 1.5
 
     # Device configuration
     device: Optional[str] = None  # None will use CUDA if available
@@ -181,8 +128,9 @@ class PerturbationConfig:
     # Patch parameters
     patch_size: int = 16
 
+    # TODO: there is only mean as a perturbation method
     # Perturbation method
-    method: str = "mean"  # "mean" or "sd"
+    method: str = "mean"
 
     # Processing limits
     max_images: Optional[int] = None  # None means process all images

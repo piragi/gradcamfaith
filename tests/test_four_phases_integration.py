@@ -71,7 +71,6 @@ class TestFourPhasesIntegration:
         pipeline_config.file.use_cached_original = False
         pipeline_config.file.use_cached_perturbed = ""
         pipeline_config.file.current_mode = "val"  # Use validation set for faster testing
-        pipeline_config.classify.data_collection = False
         return pipeline_config
     
     @pytest.fixture

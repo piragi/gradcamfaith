@@ -48,9 +48,7 @@ def run_single_experiment(
     pipeline_config.file.use_cached_original = False
     pipeline_config.file.use_cached_perturbed = ""
     pipeline_config.file.current_mode = "val"
-    pipeline_config.file.weighted = False  # No SAE steering
     pipeline_config.classify.analysis = True
-    pipeline_config.classify.data_collection = False
     pipeline_config.file.set_dataset(dataset_name)
     pipeline_config.file.base_pipeline_dir = output_dir
 
@@ -70,7 +68,7 @@ def run_single_experiment(
 
     # Set kappa and topk_features in boosting config
     pipeline_config.classify.boosting.kappa = experiment_params.get('kappa', 50.0)
-    pipeline_config.classify.boosting.topk_active = experiment_params.get('topk_features', 5)
+    pipeline_config.classify.boosting.top_k_features = experiment_params.get('topk_features', 5)
 
     # No steering layers since we're not using SAE boosting
     pipeline_config.classify.boosting.steering_layers = []
@@ -198,43 +196,42 @@ def run_parameter_sweep(
 
         dataset_results = []
 
-        # # First run vanilla TransLRP (baseline)
-        # print("\nRunning vanilla TransLRP (baseline)...")
-        # exp_params = {'use_feature_gradients': False, 'feature_gradient_layers': [], 'kappa': 0, 'topk_features': 0}
-        #
-        # exp_dir = output_base_dir / dataset_name / "vanilla"
-        # result = run_single_experiment(
-        # dataset_name=dataset_name,
-        # source_path=source_path,
-        # experiment_params=exp_params,
-        # output_dir=exp_dir,
-        # subset_size=subset_size,
-        # random_seed=random_seed
-        # )
-        #
-        # # Don't keep full results in memory - just save minimal info
-        # summary = {
-        # 'name': 'vanilla',
-        # 'status': result.get('status'),
-        # 'n_images': result.get('n_images', 0),
-        # 'error': result.get('error') if result.get('status') == 'error' else None
-        # }
-        # dataset_results.append(summary)
-        #
-        # # Explicitly delete the full result to free memory
-        # del result
-        #
-        # # Force garbage collection
-        # import gc
-        # gc.collect()
-        # torch.cuda.empty_cache()
+        # First run vanilla TransLRP (baseline)
+        print("\nRunning vanilla TransLRP (baseline)...")
+        exp_params = {'use_feature_gradients': False, 'feature_gradient_layers': [], 'kappa': 0, 'topk_features': 0}
+        
+        exp_dir = output_base_dir / dataset_name / "vanilla"
+        result = run_single_experiment(
+        dataset_name=dataset_name,
+        source_path=source_path,
+        experiment_params=exp_params,
+        output_dir=exp_dir,
+        subset_size=subset_size,
+        random_seed=random_seed
+        )
+        
+        # Don't keep full results in memory - just save minimal info
+        summary = {
+        'name': 'vanilla',
+        'status': result.get('status'),
+        'n_images': result.get('n_images', 0),
+        'error': result.get('error') if result.get('status') == 'error' else None
+        }
+        dataset_results.append(summary)
+        
+        # Explicitly delete the full result to free memory
+        del result
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
 
-        # Print memory usage
-        # if torch.cuda.is_available():
-        # print(
-        # f"GPU Memory after vanilla: {torch.cuda.memory_allocated()/1024**2:.1f} MB allocated, "
-        # f"{torch.cuda.memory_reserved()/1024**2:.1f} MB reserved"
-        # )
+        if torch.cuda.is_available():
+            print(
+            f"GPU Memory after vanilla: {torch.cuda.memory_allocated()/1024**2:.1f} MB allocated, "
+            f"{torch.cuda.memory_reserved()/1024**2:.1f} MB reserved"
+            )
 
         # Run feature gradient gating experiments
         for layers, kappa, topk in product(layer_combinations, kappa_values, topk_values):
@@ -335,7 +332,7 @@ def main():
         layer_combinations=layer_combinations,
         kappa_values=kappa_values,
         topk_values=topk_values,
-        subset_size=None,  # Use 100 images for quick testing, set to None for full dataset
+        subset_size=5,  # Use 100 images for quick testing, set to None for full dataset
         random_seed=42
     )
 

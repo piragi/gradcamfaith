@@ -111,7 +111,6 @@ def transmm_prisma_enhanced(
     steering_resources: Optional[Dict[int, Dict[str, Any]]] = None,
     enable_feature_gradients: bool = True,  # Enable feature gradient gating
     feature_gradient_layers: Optional[List[int]] = None,  # Which layers to apply
-    steering_strength: float = 1.5,
     clip_classifier: Optional[Any] = None,
 ) -> Tuple[Dict[str, Any], np.ndarray, Dict[str, Any]]:
     """
@@ -248,7 +247,7 @@ def transmm_prisma_enhanced(
                 codes_gpu = codes_gpu[1:]  # Remove CLS
 
                 # Apply feature gradient gating - get parameters from config
-                topk_value = getattr(config.classify.boosting, 'topk_active', 5)
+                topk_value = getattr(config.classify.boosting, 'top_k_features', 5)
                 if topk_value is None:
                     topk_value = 15  # Default when None
                 gating_config = {
