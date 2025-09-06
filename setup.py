@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Unified Data Setup Module
 
@@ -226,7 +225,6 @@ def download_covidquex(data_dir: Path, models_dir: Path) -> None:
                         print(f"Model copied to: {final_model_path}")
 
                         # Clean up - remove the original tar.gz file and extracted directories
-                        output_path.unlink()
                         results_dir = cq_models_dir / "results_model"
                         if results_dir.exists():
                             shutil.rmtree(results_dir)
