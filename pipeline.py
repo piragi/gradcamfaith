@@ -95,7 +95,6 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, 
     if not checkpoint_path.exists():
         raise FileNotFoundError(
             f"Model checkpoint not found at '{checkpoint_path}'. "
-            f"Please run the setup script to download the required model files."
         )
 
     print(f"Loading model checkpoint from {checkpoint_path}")
@@ -651,11 +650,6 @@ def run_unified_pipeline(
     if 'model_for_analysis' in locals():
         if hasattr(model_for_analysis, 'to'):
             model_for_analysis.to("cpu")
-        # For CLIPModelWrapper, clean the underlying model
-        if hasattr(model_for_analysis, 'model') and hasattr(model_for_analysis.model, 'vision_model'):
-            model_for_analysis.model.vision_model.zero_grad(set_to_none=True)
-            if hasattr(model_for_analysis.model.vision_model, 'reset_hooks'):
-                model_for_analysis.model.vision_model.reset_hooks(including_permanent=True, clear_contexts=True)
         del model_for_analysis
 
 
