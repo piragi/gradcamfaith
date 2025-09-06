@@ -248,8 +248,11 @@ def transmm_prisma_enhanced(
                 codes_gpu = codes_gpu[1:]  # Remove CLS
 
                 # Apply feature gradient gating - get parameters from config
+                topk_value = getattr(config.classify.boosting, 'topk_active', 5)
+                if topk_value is None:
+                    topk_value = 15  # Default when None
                 gating_config = {
-                    'top_k_features': getattr(config.classify.boosting, 'topk_active', 5),
+                    'top_k_features': topk_value,
                     'kappa': getattr(config.classify.boosting, 'kappa', 50.0),
                     'clamp_min': 0.2,
                     'clamp_max': 5.0,

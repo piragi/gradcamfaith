@@ -624,11 +624,11 @@ def run_binned_saco_analysis(
 
     # 3. Faithfulness vs Correctness Analysis
     saco_scores_map = pd.Series(saco_df.saco_score.values, index=saco_df.image_name).to_dict()
-    faithfulness_df = analysis.analyze_faithfulness_vs_correctness_from_objects(saco_scores_map, original_results)
+    faithfulness_df = analyze_faithfulness_vs_correctness_from_objects(saco_scores_map, original_results)
     analysis_results["faithfulness_correctness"] = faithfulness_df
 
     # 4. Key Attribution Patterns Analysis
-    patterns_df = analysis.analyze_key_attribution_patterns(
+    patterns_df = analyze_key_attribution_patterns(
         analysis_results["faithfulness_correctness"], vit_model, config
     )
     analysis_results["attribution_patterns"] = patterns_df
@@ -681,3 +681,84 @@ def run_binned_attribution_analysis(
     # Run binned analysis
     results = run_binned_saco_analysis(config, original_results, vit_model, device, n_bins)
     return results
+
+
+def extract_true_class_from_filename(filename):
+    """
+    Simple function to extract true class from filename.
+    For the unified dataloader format, the true label is already available in ClassificationResult.
+    This is a fallback that returns None if we can't determine the class.
+    """
+    # For waterbirds dataset, filenames typically start with class index
+    filepath_str = str(filename)
+    if 'img_00_' in filepath_str:
+        return 'landbird'
+    elif 'img_01_' in filepath_str:
+        return 'waterbird'
+    else:
+        # Return None - the true_label should be available in ClassificationResult
+        return None
+
+
+def analyze_faithfulness_vs_correctness_from_objects(
+    saco_scores: Dict[str, float],
+    original_classification_results: List[ClassificationResult]
+) -> pd.DataFrame:
+    """
+    Analyze the relationship between attribution faithfulness (SaCo) and prediction correctness.
+    
+    Args:
+        saco_scores: Dictionary mapping string original image paths to SaCo scores.
+        original_classification_results: List of ClassificationResult objects for original images.
+        
+    Returns:
+        DataFrame with SaCo scores, correctness, confidence, and paths for further analysis.
+    """
+    analysis_data_list = []
+
+    for original_res in original_classification_results:
+        image_path_str = str(original_res.image_path)
+        saco_score = saco_scores.get(image_path_str)
+
+        # Use true_label from ClassificationResult if available, otherwise fall back to extraction
+        true_class_label = original_res.true_label if original_res.true_label else extract_true_class_from_filename(original_res.image_path)
+
+        if original_res.prediction is None:
+            continue
+
+        prediction_info = original_res.prediction
+        attribution_paths_info = original_res.attribution_paths
+
+        row_data = {
+            'filename': image_path_str,
+            'saco_score': saco_score,
+            'predicted_class': prediction_info.predicted_class_label,
+            'predicted_idx': prediction_info.predicted_class_idx,
+            'true_class': true_class_label,
+            'is_correct': prediction_info.predicted_class_label == true_class_label,
+            'confidence': prediction_info.confidence,
+            'attribution_path': str(attribution_paths_info.attribution_path) if attribution_paths_info else None,
+            'logits': str(attribution_paths_info.logits) if attribution_paths_info and attribution_paths_info.logits else None,
+            'probabilities': prediction_info.probabilities
+        }
+        analysis_data_list.append(row_data)
+
+    return pd.DataFrame(analysis_data_list)
+
+
+def analyze_key_attribution_patterns(df: pd.DataFrame, model, config) -> pd.DataFrame:
+    """
+    Simplified version of attribution patterns analysis.
+    For now, just return the input DataFrame with basic processing.
+    """
+    # Clean data
+    df_clean = df.dropna(subset=['saco_score'])
+    
+    # Add class column for compatibility
+    if 'filename' in df_clean.columns:
+        df_clean['class'] = df_clean['true_class']
+    
+    # Only analyze correct predictions for now
+    df_clean = df_clean[df_clean['is_correct']]
+    
+    return df_clean
