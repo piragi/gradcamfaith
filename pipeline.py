@@ -92,33 +92,35 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, 
 
     # Load checkpoint if available
     checkpoint_path = Path(dataset_config.model_checkpoint)
-    if checkpoint_path.exists():
-        print(f"Loading model checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, weights_only=False)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Model checkpoint not found at '{checkpoint_path}'. "
+            f"Please run the setup script to download the required model files."
+        )
 
-        # Handle different checkpoint formats
-        if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict'].copy()
-        elif 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict'].copy()
-        else:
-            state_dict = checkpoint
+    print(f"Loading model checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
 
-        # Rename linear head if needed
-        if 'lin_head.weight' in state_dict:
-            state_dict['head.weight'] = state_dict.pop('lin_head.weight')
-        if 'lin_head.bias' in state_dict:
-            state_dict['head.bias'] = state_dict.pop('lin_head.bias')
-
-        # Convert weights to correct format
-        converted_weights = convert_timm_weights(state_dict, model.cfg)
-        model.load_state_dict(converted_weights)
+    # Handle different checkpoint formats
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict'].copy()
+    elif 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict'].copy()
     else:
-        print(f"Warning: Model checkpoint not found at {checkpoint_path}, using random initialization")
+        state_dict = checkpoint
+
+    # Rename linear head if needed for compatibility
+    if 'lin_head.weight' in state_dict:
+        state_dict['head.weight'] = state_dict.pop('lin_head.weight')
+    if 'lin_head.bias' in state_dict:
+        state_dict['head.bias'] = state_dict.pop('lin_head.bias')
+
+    # Convert weights to the correct format for the model and load them
+    converted_weights = convert_timm_weights(state_dict, model.cfg)
+    model.load_state_dict(converted_weights)
 
     model.to(device).eval()
     return model
-
 
 def prepare_dataset_if_needed(
     dataset_name: str, source_path: Path, prepared_path: Path, force_prepare: bool = False, **converter_kwargs
