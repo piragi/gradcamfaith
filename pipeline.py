@@ -645,44 +645,7 @@ def run_unified_pipeline(
 
     print("\nPipeline complete!")
 
-    # Clean up models and SAEs to prevent memory leaks
-    # IMPORTANT: We need to break circular references from backward pass
-    if 'model' in locals():
-        # Clear gradients first
-        model.zero_grad(set_to_none=True)
-        # Clear optimizer state if any
-        for p in model.parameters():
-            p.grad = None
-            if hasattr(p, '_grad'):
-                p._grad = None
-        # Move to CPU and clear data
-        model.to("cpu")
-        for param in model.parameters():
-            param.data = torch.empty(0)
-        # Clear any hooks
-        if hasattr(model, 'reset_hooks'):
-            model.reset_hooks(including_permanent=True, clear_contexts=True)
-        if hasattr(model, '_forward_hooks'):
-            model._forward_hooks.clear()
-        if hasattr(model, '_backward_hooks'):
-            model._backward_hooks.clear()
-        del model
-
-    if 'processor' in locals():
-        del processor
-
-    if 'clip_classifier' in locals():
-        if hasattr(clip_classifier, 'vision_model'):
-            # Clear gradients
-            clip_classifier.vision_model.zero_grad(set_to_none=True)
-            for p in clip_classifier.vision_model.parameters():
-                p.grad = None
-            clip_classifier.vision_model.to("cpu")
-            # Clear hooks
-            if hasattr(clip_classifier.vision_model, 'reset_hooks'):
-                clip_classifier.vision_model.reset_hooks(including_permanent=True, clear_contexts=True)
-        del clip_classifier
-
+    #TODO: Why is this not garbage collected?
     if 'model_for_analysis' in locals():
         if hasattr(model_for_analysis, 'to'):
             model_for_analysis.to("cpu")
@@ -693,45 +656,5 @@ def run_unified_pipeline(
                 model_for_analysis.model.vision_model.reset_hooks(including_permanent=True, clear_contexts=True)
         del model_for_analysis
 
-    # Clean up steering resources (SAEs)
-    if 'steering_resources' in locals() and steering_resources:
-        for layer_idx in list(steering_resources.keys()):
-            if "sae" in steering_resources[layer_idx]:
-                sae = steering_resources[layer_idx]["sae"]
-                sae.to("cpu")
-                for param in sae.parameters():
-                    param.data = torch.empty(0)
-                del steering_resources[layer_idx]["sae"]
-            # Only SAE resources to clean up now
-        steering_resources.clear()
-        del steering_resources
-
-    # Force garbage collection
-    import gc
-    for _ in range(3):
-        gc.collect()
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        gc.collect()
-        torch.cuda.empty_cache()
 
     return results, saco_results
-
-
-# Example usage
-if __name__ == "__main__":
-    from config import PipelineConfig
-
-    # Example: Run pipeline for CovidQUEX
-    config = PipelineConfig()
-
-    results = run_unified_pipeline(
-        config=config,
-        dataset_name="covidquex",
-        source_data_path=Path("./COVID-QU-Ex/"),
-        force_prepare=False  # Set to True to force re-preparation
-    )
-
-    print(f"\nProcessed {len(results)} images successfully")

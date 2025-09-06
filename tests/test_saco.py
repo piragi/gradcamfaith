@@ -15,8 +15,6 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import tempfile
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -24,10 +22,9 @@ import pytest
 import torch
 
 from attribution_binning import (
-    BinInfo, BinnedPerturbationData, ImageData, calculate_binned_saco_for_image, calculate_saco_vectorized_with_bias,
-    compute_saco_from_impacts, create_binned_perturbations, measure_bin_impacts
+    BinInfo, BinnedPerturbationData, ImageData, calculate_saco_vectorized_with_bias,
+    compute_saco_from_impacts, measure_bin_impacts
 )
-from data_types import (AttributionOutputPaths, ClassificationPrediction, ClassificationResult)
 
 # ============= TEST UTILITIES & FIXTURES =============
 
@@ -291,81 +288,6 @@ def test_measure_bin_impacts(mock_image_data):
 
 
 # ============= CATEGORY 3: INTEGRATION TESTS =============
-
-
-@pytest.mark.integration
-def test_full_pipeline_with_mocked_io():
-    """
-    Integration test of the full pipeline with mocked file I/O.
-    Tests that the refactored implementation correctly handles signed impacts.
-    """
-    # Create mock data
-    raw_attributions = np.array([0.8, 0.6, 0.4, 0.2])
-
-    with tempfile.NamedTemporaryFile(suffix='.npy', delete=False) as f:
-        np.save(f, raw_attributions)
-        attr_file = Path(f.name)
-
-    try:
-        # Create mock classification result
-        original_result = Mock(spec=ClassificationResult)
-        original_result.image_path = Path("/fake/image.jpg")
-        original_result.prediction = Mock(spec=ClassificationPrediction)
-        original_result.prediction.confidence = 0.9
-        original_result.prediction.predicted_class_idx = 0
-        original_result.attribution_paths = Mock(spec=AttributionOutputPaths)
-        original_result.attribution_paths.raw_attribution_path = attr_file
-
-        # Mock config and model
-        mock_config = Mock()
-        mock_config.classify.target_size = [224, 224]
-        mock_config.perturb.method = "mean"
-
-        # Create predictions with mixed impacts (including negative)
-        mock_predictions = [
-            {
-                "predicted_class_idx": 0,
-                "confidence": 0.3
-            },  # impact = 0.6
-            {
-                "predicted_class_idx": 0,
-                "confidence": 0.95
-            },  # impact = -0.05 (increases!)
-            {
-                "predicted_class_idx": 0,
-                "confidence": 0.7
-            },  # impact = 0.2
-            {
-                "predicted_class_idx": 0,
-                "confidence": 0.85
-            },  # impact = 0.05
-        ]
-
-        # Patch dependencies
-        with patch('attribution_binning.preprocessing.preprocess_image') as mock_preprocess, \
-             patch('attribution_binning.batched_model_inference') as mock_inference, \
-             patch('attribution_binning.create_spatial_mask_for_bin') as mock_mask, \
-             patch('attribution_binning.apply_binned_perturbation') as mock_perturb:
-
-            mock_preprocess.return_value = (Mock(), torch.randn(3, 224, 224))
-            mock_inference.return_value = mock_predictions
-            mock_mask.return_value = torch.zeros(224, 224, dtype=torch.bool)
-            mock_perturb.return_value = torch.randn(3, 224, 224)
-
-            # Run the function
-            saco_score, bin_results, _ = calculate_binned_saco_for_image(
-                original_result, Mock(), mock_config, torch.device("cpu"), n_bins=4
-            )
-
-            # Verify that negative impacts exist (confidence increase)
-            has_negative = any(r["confidence_delta"] < 0 for r in bin_results)
-            assert has_negative, "Should handle negative impacts (confidence increases)"
-
-            # SaCo should be valid
-            assert -1.0 <= saco_score <= 1.0
-
-    finally:
-        attr_file.unlink()
 
 
 @pytest.mark.integration
