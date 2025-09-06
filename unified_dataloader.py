@@ -152,34 +152,27 @@ class UnifiedMedicalDataset:
         if split not in self.datasets:
             return {}
         
-        dataset = self.datasets[split]
         class_counts = {i: 0 for i in range(self.config.num_classes)}
-        
-        for _, label in dataset.samples:
+        for _, label in self.datasets[split].samples:
             class_counts[label] += 1
-        
         return class_counts
     
     def get_statistics(self) -> Dict:
         """Get comprehensive statistics about the dataset."""
-        stats = {
+        return {
             'dataset_name': self.config.name,
             'num_classes': self.config.num_classes,
             'class_names': self.config.class_names,
-            'splits': {}
-        }
-        
-        for split in self.datasets:
-            class_counts = self.get_class_counts(split)
-            stats['splits'][split] = {
-                'total_samples': self.get_num_samples(split),
-                'class_distribution': {
-                    self.config.idx_to_class[idx]: count 
-                    for idx, count in class_counts.items()
-                }
+            'splits': {
+                split: {
+                    'total_samples': len(self.datasets[split]),
+                    'class_distribution': {
+                        self.config.idx_to_class[idx]: count 
+                        for idx, count in self.get_class_counts(split).items()
+                    }
+                } for split in self.datasets
             }
-        
-        return stats
+        }
 
 
 def create_dataloader(
@@ -244,29 +237,12 @@ def get_single_image_loader(
 
 # Example usage
 if __name__ == "__main__":
-    # Example: Load CovidQUEX dataset
-    dataset = create_dataloader(
-        dataset_name="covidquex",
-        data_path=Path("./data/covidquex_unified"),
-        batch_size=32
-    )
-    
-    # Get statistics
+    dataset = create_dataloader("covidquex", Path("./data/covidquex_unified"))
     stats = dataset.get_statistics()
-    print("Dataset Statistics:")
-    print(f"  Dataset: {stats['dataset_name']}")
-    print(f"  Classes: {stats['num_classes']} - {stats['class_names']}")
+    print(f"Dataset: {stats['dataset_name']}")
+    print(f"Classes: {stats['num_classes']} - {stats['class_names']}")
     
     for split, split_stats in stats['splits'].items():
-        print(f"\n  {split.upper()}:")
-        print(f"    Total samples: {split_stats['total_samples']}")
-        print(f"    Class distribution:")
+        print(f"{split}: {split_stats['total_samples']} samples")
         for class_name, count in split_stats['class_distribution'].items():
-            print(f"      {class_name}: {count}")
-    
-    # Example: Iterate through a few batches
-    train_loader = dataset.get_dataloader('train')
-    for i, (images, labels) in enumerate(train_loader):
-        print(f"\nBatch {i}: images shape: {images.shape}, labels shape: {labels.shape}")
-        if i >= 2:  # Just show first 3 batches
-            break
+            print(f"  {class_name}: {count}")

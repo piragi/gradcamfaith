@@ -32,85 +32,48 @@ except ImportError:
 
 
 def create_covidquex_transform(_) -> transforms.Compose:
-    """
-    Create CovidQUEX-specific transforms.
-    
-    CovidQUEX uses ViT only (no CLIP):
-    - Resize(256) + CenterCrop(224) pipeline
-    - Custom normalization: mean=[0.56, 0.56, 0.56], std=[0.21, 0.21, 0.21]
-    - Augmentations only for training
-    """
-    # CovidQUEX-specific normalization
-    mean = [0.56, 0.56, 0.56]
-    std = [0.21, 0.21, 0.21]
-    interpolation = BILINEAR
-
+    """CovidQUEX transforms: Resize(256) + CenterCrop(224) + custom normalization."""
     return transforms.Compose([
-        transforms.Resize(256, interpolation=interpolation),
+        transforms.Resize(256, interpolation=BILINEAR),
         transforms.CenterCrop(224),
         transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std)
+        transforms.Normalize(mean=[0.56, 0.56, 0.56], std=[0.21, 0.21, 0.21])
     ])
 
 
 def create_hyperkvasir_transform(split: str = 'test') -> transforms.Compose:
-    """
-    Create HyperKvasir-specific transforms.
+    """HyperKvasir transforms: ImageNet normalization + training augmentations."""
+    mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
     
-    HyperKvasir uses ViT only (no CLIP):
-    - Direct resize to 224x224 (images are already preprocessed to 224x224)
-    - ImageNet normalization: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-    - Extensive augmentations for training (ColorJitter, GaussianBlur, flips, rotation)
-    """
-    # ImageNet normalization for HyperKvasir
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-    interpolation = BILINEAR
-
+    base_transforms = [
+        transforms.Resize((224, 224), interpolation=BILINEAR),
+    ]
+    
     if split == 'train':
-        # Extensive augmentations as per SSL4GIE paper
-        return transforms.Compose([
-            transforms.Resize((224, 224), interpolation=interpolation),
+        base_transforms.extend([
             transforms.ColorJitter(brightness=0.4, contrast=0.5, saturation=0.25, hue=0.01),
             transforms.GaussianBlur((25, 25), sigma=(0.001, 2.0)),
             transforms.RandomHorizontalFlip(),
             transforms.RandomVerticalFlip(),
             transforms.RandomRotation(180),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)
         ])
-    else:
-        # No augmentations for val/test
-        return transforms.Compose([
-            transforms.Resize((224, 224), interpolation=interpolation),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)
-        ])
+    
+    base_transforms.extend([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std)
+    ])
+    
+    return transforms.Compose(base_transforms)
 
 
 def create_waterbirds_transform(_) -> transforms.Compose:
-    """
-    Create Waterbirds-specific transforms.
-    
-    Waterbirds uses CLIP only (no ViT):
-    - Direct resize to 224x224
-    - CLIP normalization
-    - No augmentations (natural images)
-    """
-
+    """Waterbirds transforms: CLIP preprocessing."""
     from vit_prisma.transforms import get_clip_val_transforms
     return get_clip_val_transforms()
 
 
 def create_oxford_pets_transform(_) -> transforms.Compose:
-    """
-    Create Oxford Pets-specific transforms.
-    
-    Oxford Pets uses CLIP only (no ViT):
-    - Direct resize to 224x224
-    - CLIP normalization
-    - No augmentations (natural images)
-    """
+    """Oxford Pets transforms: CLIP preprocessing."""
     from vit_prisma.transforms import get_clip_val_transforms
     return get_clip_val_transforms()
 
@@ -134,38 +97,11 @@ class DatasetConfig:
     # Data paths (set during runtime)
     prepared_data_path: Optional[Path] = None
 
-    # DEPRECATED - kept for backward compatibility only
-    # DO NOT USE THESE - use transform_fn instead
-    img_size: int = 224
-    normalize_mean: List[float] = None
-    normalize_std: List[float] = None
-
-    def __post_init__(self):
-        """Set default normalization values if not provided (DEPRECATED)."""
-        if self.normalize_mean is None:
-            self.normalize_mean = [0.485, 0.456, 0.406]  # ImageNet defaults
-        if self.normalize_std is None:
-            self.normalize_std = [0.229, 0.224, 0.225]  # ImageNet defaults
-
     def get_transforms(self, split: str = 'test', use_clip: bool = False):
-        """
-        Get transforms for a specific split (train/val/test/dev).
-        
-        This is THE centralized method for all preprocessing.
-        
-        Args:
-            split: The data split ('train', 'val', 'test', 'dev')
-            use_clip: If True, use CLIP-specific normalization values
-        """
+        """Get transforms for a specific split (train/val/test/dev)."""
         if self.transform_fn is not None:
-            # Use the new callable transform (THIS IS THE PREFERRED PATH)
             return self.transform_fn(split)
-
-        # If no transform_fn is defined, raise an error
-        raise ValueError(
-            f"No transform function defined for dataset {self.name}. "
-            "All datasets must define a transform_fn."
-        )
+        raise ValueError(f"No transform function defined for dataset {self.name}")
 
 
 # CovidQUEX Dataset Configuration
@@ -184,10 +120,7 @@ COVIDQUEX_CONFIG = DatasetConfig(
         2: "Normal"
     },
     model_checkpoint="./models/covidquex/covidquex_model.pth",
-    transform_fn=create_covidquex_transform,  # Use the centralized transform
-    # DEPRECATED - kept for reference only
-    normalize_mean=[0.56, 0.56, 0.56],
-    normalize_std=[0.21, 0.21, 0.21]
+    transform_fn=create_covidquex_transform
 )
 
 # HyperKvasir Dataset Configuration
@@ -212,7 +145,7 @@ HYPERKVASIR_CONFIG = DatasetConfig(
         5: "z-line"
     },
     model_checkpoint="./models/hyperkvasir/hyperkvasir_vit_model.pth",
-    transform_fn=create_hyperkvasir_transform  # Use the centralized transform
+    transform_fn=create_hyperkvasir_transform
 )
 
 # Waterbirds Dataset Configuration
@@ -228,8 +161,8 @@ WATERBIRDS_CONFIG = DatasetConfig(
         0: "landbird",
         1: "waterbird"
     },
-    model_checkpoint="",  # Will use CLIP, no checkpoint needed
-    transform_fn=create_waterbirds_transform  # Use the centralized transform
+    model_checkpoint="",
+    transform_fn=create_waterbirds_transform
 )
 
 # Oxford-IIIT Pet Dataset Configuration (Binary: Cat vs Dog)
@@ -245,8 +178,8 @@ OXFORD_PETS_CONFIG = DatasetConfig(
         0: "cat",
         1: "dog"
     },
-    model_checkpoint="",  # Will use CLIP, no checkpoint needed
-    transform_fn=create_oxford_pets_transform  # Use the centralized transform
+    model_checkpoint="",
+    transform_fn=create_oxford_pets_transform
 )
 
 # Dataset registry for easy access
