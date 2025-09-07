@@ -730,7 +730,6 @@ def analyze_faithfulness_vs_correctness_from_objects(
             'is_correct': prediction_info.predicted_class_label == true_class_label,
             'confidence': prediction_info.confidence,
             'attribution_path': str(attribution_paths_info.attribution_path) if attribution_paths_info else None,
-            'logits': str(attribution_paths_info.logits) if attribution_paths_info and attribution_paths_info.logits else None,
             'probabilities': prediction_info.probabilities
         }
         analysis_data_list.append(row_data)

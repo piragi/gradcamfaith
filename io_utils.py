@@ -83,17 +83,11 @@ def save_classification_results_to_csv(results: List[ClassificationResult], outp
             row.update({
                 'attribution_path': str(res.attribution_paths.attribution_path),
                 'raw_attribution_path': str(res.attribution_paths.raw_attribution_path),
-                'logits': str(res.attribution_paths.logits),
-                'ffn_activity_path': str(res.attribution_paths.ffn_activity_path),
-                'class_embedding_path': str(res.attribution_paths.class_embedding_path),
             })
         else:
             row.update({
                 'attribution_path': None,
                 'raw_attribution_path': None,
-                'logits': None,
-                'ffn_activity_path': None,
-                'class_embedding_path': None
             })
         flat_results_list.append(row)
     df = pd.DataFrame.from_records(flat_results_list)

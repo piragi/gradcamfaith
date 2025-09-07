@@ -7,12 +7,10 @@ It can work with any dataset that has been converted to the standard format.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
-import pandas as pd
 import torch
-from PIL import Image
 from tqdm import tqdm
 
 # Suppress PIL debug logging
@@ -22,15 +20,63 @@ import io_utils
 from saco import run_binned_attribution_analysis
 from config import FileConfig, PipelineConfig
 from data_types import (
-    AttributionDataBundle, AttributionOutputPaths, ClassEmbeddingRepresentationItem, ClassificationPrediction,
-    ClassificationResult, FFNActivityItem, HeadContributionItem, PerturbationPatchInfo, PerturbedImageRecord
+    AttributionDataBundle, AttributionOutputPaths, ClassificationPrediction,
+    ClassificationResult
 )
 # New imports for unified system
 from dataset_config import DatasetConfig, get_dataset_config
 from faithfulness import evaluate_and_report_faithfulness
 from setup import convert_dataset
-from transmm import (generate_attribution_prisma_enhanced, load_steering_resources)
-from unified_dataloader import (UnifiedMedicalDataset, create_dataloader, get_single_image_loader)
+from transmm import generate_attribution_prisma_enhanced
+from unified_dataloader import (create_dataloader, get_single_image_loader)
+from vit_prisma.sae import SparseAutoencoder
+
+
+def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict[int, Dict[str, Any]]:
+    """
+    Loads SAEs for the specified layers for feature gradient gating.
+    
+    Args:
+        layers: List of layer indices to load
+        dataset_name: Name of the dataset ('covidquex', 'hyperkvasir', 'waterbirds', etc.)
+    """
+    resources = {}
+
+    for layer_idx in layers:
+        try:
+            if dataset_name == "waterbirds":
+                # Use ImageNet CLIP B-32 SAE for waterbirds
+                sae_path = Path(f"data/sae_waterbirds_clip_b32/layer_{layer_idx}/weights.pt")
+                if not sae_path.exists():
+                    print(f"Warning: ImageNet SAE not found at {sae_path}")
+                    continue
+                print(f"Loading ImageNet SAE from {sae_path}")
+                sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
+                sae.cuda().eval()
+            else:
+                # Load SAE for other datasets
+                sae_dir = Path("data") / f"sae_{dataset_name}" / f"layer_{layer_idx}"
+                sae_files = list(sae_dir.glob("**/n_images_*.pt"))
+                # Filter out log_feature_sparsity files
+                sae_files = [f for f in sae_files if 'log_feature_sparsity' not in str(f)]
+
+                if not sae_files:
+                    print(f"Warning: No SAE found for {dataset_name} layer {layer_idx} in {sae_dir}")
+                    continue
+
+                # Use the most recent SAE file
+                sae_path = sorted(sae_files)[-1]
+                print(f"Loading SAE from {sae_path}")
+
+                sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
+                sae.cuda().eval()
+
+            resources[layer_idx] = {"sae": sae}
+
+        except Exception as e:
+            print(f"Error loading SAE for {dataset_name} layer {layer_idx}: {e}")
+
+    return resources
 
 
 def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, config: PipelineConfig = None):
@@ -206,75 +252,16 @@ def save_attribution_bundle_to_files(
 
     attribution_path = file_config.attribution_dir / f"{image_stem}_attribution.npy"
     raw_attribution_path = file_config.attribution_dir / f"{image_stem}_raw_attribution.npy"
-    logits_path = Path("")
-    ffn_activity_path = Path("")
-    class_embedding_path = Path("")
-    head_contribution_path = Path("")
 
     # Save positive attribution
     np.save(attribution_path, attribution_bundle.positive_attribution)
     # Save raw attribution
     np.save(raw_attribution_path, attribution_bundle.raw_attribution)
 
-    # Save logits if available
-    if attribution_bundle.logits is not None:
-        logits_path = file_config.attribution_dir / f"{image_stem}_logits.npy"
-        logits_arr = attribution_bundle.logits
-        if isinstance(logits_arr, torch.Tensor):
-            logits_arr = logits_arr.detach().cpu().numpy()
-        np.save(logits_path, logits_arr)
-
-    # Save FFN activities
-    if attribution_bundle.ffn_activities:
-        ffn_activity_path = file_config.attribution_dir / f"{image_stem}_ffn_activity.npy"
-        ffn_data_to_save = []
-        for item in attribution_bundle.ffn_activities:
-            ffn_data_to_save.append({
-                'layer': item.layer,
-                'mean_activity': item.mean_activity,
-                'cls_activity': item.cls_activity,
-                'activity_data': item.activity_data
-            })
-        np.save(ffn_activity_path, np.array(ffn_data_to_save, dtype=object))
-
-    # Save head contributions
-    if attribution_bundle.head_contribution:
-        head_contribution_path = file_config.attribution_dir / f"{image_stem}_head_contribution.npz"
-
-        layers = []
-        layer_indices = []
-
-        for item in attribution_bundle.head_contribution:
-            layers.append(item.stacked_contribution)
-            layer_indices.append(item.layer)
-
-        stacked_contributions = np.stack(layers, axis=0)
-        layer_indices = np.array(layer_indices)
-
-        np.savez(head_contribution_path, contributions=stacked_contributions, layer_indices=layer_indices)
-
-    # Save class embedding representations
-    if attribution_bundle.class_embedding_representations:
-        class_embedding_path = file_config.attribution_dir / f"{image_stem}_class_embedding_representation.npy"
-        class_embedding_data_to_save = []
-        for item in attribution_bundle.class_embedding_representations:
-            class_embedding_data_to_save.append({
-                'layer': item.layer,
-                'attention_class_representation_input': item.attention_class_representation_input,
-                'mlp_class_representation_input': item.mlp_class_representation_input,
-                'attention_class_representation_output': item.attention_class_representation_output,
-                'attention_map': item.attention_map,
-                'mlp_class_representation_output': item.mlp_class_representation_output
-            })
-        np.save(class_embedding_path, np.array(class_embedding_data_to_save, dtype=object))
 
     return AttributionOutputPaths(
         attribution_path=attribution_path,
         raw_attribution_path=raw_attribution_path,
-        logits=logits_path,
-        ffn_activity_path=ffn_activity_path,
-        class_embedding_path=class_embedding_path,
-        head_contribution_path=head_contribution_path
     )
 
 
@@ -357,54 +344,11 @@ def classify_explain_single_image(
         probabilities=prediction_data["probabilities"]
     )
 
-    # Process FFN activities
-    ffn_activity_items: List[FFNActivityItem] = []
-    if "ffn_activity" in raw_attribution_result_dict and raw_attribution_result_dict["ffn_activity"]:
-        for ffn_dict in raw_attribution_result_dict["ffn_activity"]:
-            ffn_activity_items.append(
-                FFNActivityItem(
-                    layer=ffn_dict["layer"],
-                    mean_activity=ffn_dict["mean_activity"],
-                    cls_activity=ffn_dict["cls_activity"],
-                    activity_data=ffn_dict["activity"]
-                )
-            )
-
-    # Process class embeddings
-    class_embedding_items: List[ClassEmbeddingRepresentationItem] = []
-    if "class_embedding_representation" in raw_attribution_result_dict and raw_attribution_result_dict[
-        "class_embedding_representation"]:
-        for cer_dict in raw_attribution_result_dict["class_embedding_representation"]:
-            class_embedding_items.append(
-                ClassEmbeddingRepresentationItem(
-                    layer=cer_dict["layer"],
-                    attention_class_representation_output=cer_dict["attention_class_representation_output"],
-                    mlp_class_representation_output=cer_dict["mlp_class_representation_output"],
-                    attention_class_representation_input=cer_dict["attention_class_representation_input"],
-                    attention_map=cer_dict["attention_map"],
-                    mlp_class_representation_input=cer_dict["mlp_class_representation_input"]
-                )
-            )
-
-    # Process head contributions
-    head_contribution_items: List[HeadContributionItem] = []
-    if "head_contribution" in raw_attribution_result_dict and raw_attribution_result_dict["head_contribution"]:
-        for head_contribution_dict in raw_attribution_result_dict["head_contribution"]:
-            head_contribution_items.append(
-                HeadContributionItem(
-                    layer=head_contribution_dict["layer"],
-                    stacked_contribution=head_contribution_dict["stacked_contribution"]
-                )
-            )
 
     # Create attribution bundle
     attribution_bundle = AttributionDataBundle(
         positive_attribution=raw_attribution_result_dict["attribution_positive"],
         raw_attribution=raw_attr,
-        logits=raw_attribution_result_dict.get("logits"),
-        ffn_activities=ffn_activity_items,
-        class_embedding_representations=class_embedding_items,
-        head_contribution=head_contribution_items,
     )
 
     # Save attribution bundle

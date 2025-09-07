@@ -15,108 +15,27 @@ class ClassificationPrediction:
     probabilities: List[float]
 
 
-@dataclass
-class FFNActivityItem:
-    layer: Union[int, str]
-    mean_activity: float
-    cls_activity: float
-    activity_data: np.ndarray
-
-    def __eq__(self, other):
-        if not isinstance(other, FFNActivityItem):
-            return NotImplemented
-        return (
-            self.layer == other.layer and np.isclose(self.mean_activity, other.mean_activity) and
-            np.isclose(self.cls_activity, other.cls_activity) and
-            np.array_equal(self.activity_data, other.activity_data)
-        )
-
-
-@dataclass
-class HeadContributionItem:
-    layer: Union[int, str]
-    stacked_contribution: np.ndarray
-
-    def __eq__(self, other):
-        if not isinstance(other, HeadContributionItem):
-            return NotImplemented
-        return (self.layer == other.layer and np.array_equal(self.stacked_contribution, other.stacked_contribution))
-
-
-@dataclass
-class ClassEmbeddingRepresentationItem:
-    layer: Union[int, str]
-    attention_class_representation_input: np.ndarray
-    mlp_class_representation_input: np.ndarray
-    attention_class_representation_output: np.ndarray
-    mlp_class_representation_output: np.ndarray
-    attention_map: np.ndarray
-
-    def __eq__(self, other):
-        if not isinstance(other, ClassEmbeddingRepresentationItem):
-            return NotImplemented
-        return (
-            self.layer == other.layer and
-            np.array_equal(self.attention_class_representation_input, other.attention_class_representation_input) and
-            np.array_equal(self.mlp_class_representation_input, other.mlp_class_representation_input) and
-            np.array_equal(self.attention_class_representation_output, other.attention_class_representation_output) and
-            np.array_equal(self.mlp_class_representation_output, other.mlp_class_representation_output) and
-            np.array_equal(self.attention_map, other.attention_map)
-        )
 
 
 @dataclass
 class AttributionDataBundle:
     positive_attribution: np.ndarray
     raw_attribution: np.ndarray
-    logits: Optional[np.ndarray]  # Can be None
-    ffn_activities: List[FFNActivityItem]
-    class_embedding_representations: List[ClassEmbeddingRepresentationItem]
-    head_contribution: List[HeadContributionItem]
 
     def __eq__(self, other):
         if not isinstance(other, AttributionDataBundle):
             return NotImplemented
 
-        logits_equal = False
-        if self.logits is None and other.logits is None:
-            logits_equal = True
-        elif self.logits is not None and other.logits is not None:
-            logits_equal = np.array_equal(self.logits, other.logits)
-        else:  # one is None, other is not
-            logits_equal = False
-
         return (
-            np.array_equal(self.positive_attribution, other.positive_attribution) and logits_equal and
-            self.ffn_activities == other.ffn_activities and  # Relies on FFNActivityItem.__eq__
-            self.class_embedding_representations == other.class_embedding_representations
-            and self.head_contribution == other.head_contribution
-        )  # Relies on ClassEmbeddingRepresentationItem.__eq__
+            np.array_equal(self.positive_attribution, other.positive_attribution) and
+            np.array_equal(self.raw_attribution, other.raw_attribution)
+        )
 
 
 @dataclass
 class AttributionOutputPaths:
     attribution_path: Path
     raw_attribution_path: Path
-    logits: Path  # Path to file which might contain an empty array
-    ffn_activity_path: Path
-    class_embedding_path: Path
-    head_contribution_path: Path
-
-    def load_head_contributions(self) -> List[Dict[str, Any]]:
-        """Load head contribution data from .npz file in expected format"""
-        if not self.head_contribution_path.exists():
-            raise FileNotFoundError(f"Head contribution file not found: {self.head_contribution_path}")
-
-        with np.load(self.head_contribution_path) as data:
-            stacked_contributions = data['contributions']  # [num_layers, num_heads, batch_size, num_tokens, head_dim]
-            layer_indices = data['layer_indices']  # [num_layers]
-
-        # Convert back to expected format
-        head_contributions = []
-        for i, layer_idx in enumerate(layer_indices):
-            head_contributions.append({'layer': int(layer_idx), 'activity_data': stacked_contributions[i]})
-        return head_contributions
 
 
 @dataclass
