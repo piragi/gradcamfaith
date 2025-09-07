@@ -489,7 +489,7 @@ def calculate_binned_saco_for_image(
         else:
             # Infer from dataset/model type
             # For CLIP models using B-32 architecture
-            if dataset_name in ['waterbirds', 'oxford_pets']:
+            if dataset_name == 'waterbirds':
                 patch_size = 32
             else:
                 patch_size = 16  # Default for standard ViT-B-16

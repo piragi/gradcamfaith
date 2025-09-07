@@ -7,7 +7,7 @@ It can work with any dataset that has been converted to the standard format.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -32,7 +32,7 @@ from unified_dataloader import (create_dataloader, get_single_image_loader)
 from vit_prisma.sae import SparseAutoencoder
 
 
-def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict[int, Dict[str, Any]]:
+def load_steering_resources(layers: List[int], dataset_name: Optional[str] = None) -> Dict[int, Dict[str, Any]]:
     """
     Loads SAEs for the specified layers for feature gradient gating.
     
@@ -79,7 +79,7 @@ def load_steering_resources(layers: List[int], dataset_name: str = None) -> Dict
     return resources
 
 
-def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, config: PipelineConfig = None):
+def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, config: Optional[PipelineConfig] = None):
     """
     Load the appropriate model for a given dataset configuration.
     
@@ -104,7 +104,7 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, 
         # This automatically converts CLIP weights to HookedViT format
         clip_model_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch32"
 
-        model = load_hooked_model(clip_model_name, dtype=torch.float32, device=device)
+        model = load_hooked_model(clip_model_name, dtype=torch.float32, device=str(device))
         # Ensure model is on the correct device
         model = model.to(device)
         model.eval()
@@ -119,7 +119,7 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, 
             processor_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch32"
             processor = CLIPProcessor.from_pretrained(processor_name)
 
-        print(f"✅ CLIP loaded as HookedViT")
+        print(f"CLIP loaded as HookedViT")
         # Return tuple for CLIP (model, processor)
         return (model, processor)
 
@@ -223,7 +223,7 @@ def classify_single_image(
     with torch.no_grad():
         logits = model(input_tensor)
         probabilities = torch.softmax(logits, dim=-1)
-        predicted_idx = torch.argmax(probabilities, dim=-1).item()
+        predicted_idx = int(torch.argmax(probabilities, dim=-1).item())
 
     current_prediction = ClassificationPrediction(
         predicted_class_label=dataset_config.idx_to_class[predicted_idx],
@@ -273,7 +273,6 @@ def classify_explain_single_image(
     device: torch.device,
     steering_resources: Optional[Dict[int, Dict[str, Any]]],
     true_label: Optional[str] = None,
-    processor: Optional[Any] = None,  # CLIP processor if using CLIP
     clip_classifier: Optional[Any] = None,  # Pre-created CLIP classifier
 ) -> ClassificationResult:
     """
@@ -295,30 +294,6 @@ def classify_explain_single_image(
     input_tensor = get_single_image_loader(image_path, dataset_config, use_clip=use_clip)
     input_tensor = input_tensor.to(device)
 
-    # Only create CLIP classifier if not provided (shouldn't happen in normal pipeline)
-    if processor is not None and clip_classifier is None:
-        from clip_classifier import (create_clip_classifier_for_oxford_pets, create_clip_classifier_for_waterbirds)
-        print("WARNING: Creating CLIP classifier per image (inefficient!)")
-
-        # Choose the appropriate factory based on dataset
-        dataset_name = config.file.dataset_name
-        if dataset_name == "oxford_pets":
-            clip_classifier = create_clip_classifier_for_oxford_pets(
-                vision_model=model,
-                processor=processor,
-                device=device,
-                custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
-            )
-        else:  # default to waterbirds
-            clip_classifier = create_clip_classifier_for_waterbirds(
-                vision_model=model,
-                processor=processor,
-                device=device,
-                custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
-            )
-
-    # Always use enhanced version for better performance
-    # It will run vanilla TransLRP when both steering and feature gradients are disabled
     raw_attribution_result_dict = generate_attribution_prisma_enhanced(
         model=model,
         input_tensor=input_tensor,
@@ -377,7 +352,7 @@ def run_unified_pipeline(
     force_prepare: bool = False,
     subset_size: Optional[int] = None,
     random_seed: Optional[int] = None
-) -> List[ClassificationResult]:
+) -> Tuple[List[ClassificationResult], Dict[str, Any]]:
     """
     Run the unified pipeline for any supported dataset.
     
@@ -410,15 +385,11 @@ def run_unified_pipeline(
     if prepared_data_path is None:
         prepared_data_path = Path(f"./data/{dataset_name}_unified")
 
-    # Prepare converter kwargs based on dataset
-    converter_kwargs = {}
-
     prepared_path = prepare_dataset_if_needed(
         dataset_name=dataset_name,
         source_path=source_data_path,
         prepared_path=prepared_data_path,
-        force_prepare=force_prepare,
-        **converter_kwargs
+        force_prepare=force_prepare
     )
 
     # Create dataloader
@@ -428,7 +399,7 @@ def run_unified_pipeline(
     dataset_loader = create_dataloader(
         dataset_name=dataset_name,
         data_path=prepared_path,
-        batch_size=config.classify.batch_size if hasattr(config.classify, 'batch_size') else 32,
+        batch_size=getattr(config.classify, 'batch_size', 32),
         use_clip=use_clip
     )
 
@@ -484,24 +455,14 @@ def run_unified_pipeline(
     # Create CLIP classifier once if using CLIP (not per image!)
     clip_classifier = None
     if processor is not None:
-        from clip_classifier import (create_clip_classifier_for_oxford_pets, create_clip_classifier_for_waterbirds)
+        from clip_classifier import create_clip_classifier_for_waterbirds
         print("Creating CLIP classifier (once for all images)...")
-
-        # Choose the appropriate factory based on dataset
-        if dataset_name == "oxford_pets":
-            clip_classifier = create_clip_classifier_for_oxford_pets(
-                vision_model=model,
-                processor=processor,
-                device=device,
-                custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
-            )
-        else:  # default to waterbirds
-            clip_classifier = create_clip_classifier_for_waterbirds(
-                vision_model=model,
-                processor=processor,
-                device=device,
-                custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
-            )
+        clip_classifier = create_clip_classifier_for_waterbirds(
+            vision_model=model,
+            processor=processor,
+            device=device,
+            custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
+        )
 
     # Classify and explain
     results = []
@@ -519,7 +480,6 @@ def run_unified_pipeline(
                 device=device,
                 steering_resources=steering_resources,
                 true_label=true_label,
-                processor=processor,  # Pass processor for CLIP
                 clip_classifier=clip_classifier  # Pass pre-created classifier
             )
             results.append(result)

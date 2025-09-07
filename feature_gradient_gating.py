@@ -99,17 +99,10 @@ def compute_feature_gradient_gate(
             'std_gate': gate.std().item(),
         }
     else:
-        # Even without debug, store minimal info
         debug_info = {
             'mean_gate': gate.mean().item(),
             'std_gate': gate.std().item(),
         }
-
-    # Clean up intermediate tensors to free GPU memory
-    del feature_grads, h_top, contributions, s_t, s_norm, top_vals, top_idx
-    if denoise_gradient:
-        del feature_proj
-    del decoder_norm
 
     return gate, debug_info
 
@@ -227,24 +220,22 @@ def apply_feature_gradient_gating(
     denoise_gate = None
     denoise_debug = {}
     if enable_denoising and residuals is not None:
-        print(f"DEBUG: Computing denoising gate, residuals shape: {residuals.shape}")
         with torch.no_grad():
-            print(f"DEBUG: About to decode sae_codes shape: {sae_codes.shape}")
             try:
                 reconstructions = sae.decode(sae_codes)
-                print(f"DEBUG: Got reconstructions shape: {reconstructions.shape}")
             except Exception as e:
-                print(f"ERROR in sae.decode: {e}")
-                print(f"SAE expects different input shape - disabling denoising")
+                # SAE decode failed - disable denoising
                 enable_denoising = False
                 denoise_gate = None
-        denoise_gate, denoise_debug = compute_reconstruction_denoise_gate(
-            residuals=residuals,
-            reconstructions=reconstructions,
-            alpha=config.get('denoise_alpha', 5.0),
-            min_gate=config.get('denoise_min', 0.6),
-            debug=debug
-        )
+        
+        if enable_denoising:
+            denoise_gate, denoise_debug = compute_reconstruction_denoise_gate(
+                residuals=residuals,
+                reconstructions=reconstructions,
+                alpha=config.get('denoise_alpha', 5.0),
+                min_gate=config.get('denoise_min', 0.6),
+                debug=debug
+            )
 
     # Combine gates
     if denoise_gate is not None:
@@ -284,12 +275,5 @@ def apply_feature_gradient_gating(
         'denoising': denoise_debug,
         'combined_gate': combined_gate.detach().cpu().numpy() if debug else None,
     }
-
-    # Clean up intermediate tensors
-    del feature_gate, combined_gate
-    if denoise_gate is not None:
-        del denoise_gate
-    if 'gate_exp' in locals():
-        del gate_exp
 
     return gated_cam, debug_info

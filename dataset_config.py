@@ -72,12 +72,6 @@ def create_waterbirds_transform(_) -> transforms.Compose:
     return get_clip_val_transforms()
 
 
-def create_oxford_pets_transform(_) -> transforms.Compose:
-    """Oxford Pets transforms: CLIP preprocessing."""
-    from vit_prisma.transforms import get_clip_val_transforms
-    return get_clip_val_transforms()
-
-
 @dataclass
 class DatasetConfig:
     """Configuration for a specific dataset with centralized preprocessing."""
@@ -97,7 +91,7 @@ class DatasetConfig:
     # Data paths (set during runtime)
     prepared_data_path: Optional[Path] = None
 
-    def get_transforms(self, split: str = 'test', use_clip: bool = False):
+    def get_transforms(self, split: str = 'test'):
         """Get transforms for a specific split (train/val/test/dev)."""
         if self.transform_fn is not None:
             return self.transform_fn(split)
@@ -165,29 +159,11 @@ WATERBIRDS_CONFIG = DatasetConfig(
     transform_fn=create_waterbirds_transform
 )
 
-# Oxford-IIIT Pet Dataset Configuration (Binary: Cat vs Dog)
-OXFORD_PETS_CONFIG = DatasetConfig(
-    name="oxford_pets",
-    num_classes=2,
-    class_names=["cat", "dog"],
-    class_to_idx={
-        "cat": 0,
-        "dog": 1
-    },
-    idx_to_class={
-        0: "cat",
-        1: "dog"
-    },
-    model_checkpoint="",
-    transform_fn=create_oxford_pets_transform
-)
-
 # Dataset registry for easy access
 DATASET_CONFIGS = {
     "covidquex": COVIDQUEX_CONFIG,
     "hyperkvasir": HYPERKVASIR_CONFIG,
     "waterbirds": WATERBIRDS_CONFIG,
-    "oxford_pets": OXFORD_PETS_CONFIG,
 }
 
 

@@ -300,7 +300,6 @@ def main():
         # ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
         # ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
         ("covidquex", Path("./data/covidquex/data/lung/")),
-        # ("oxford_pets", Path("./data/oxford_pets"))
     ]
 
     # Define parameter grid

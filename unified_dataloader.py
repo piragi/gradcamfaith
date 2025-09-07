@@ -65,7 +65,7 @@ class UnifiedMedicalDataset:
             split_path = self.data_path / split
             if split_path.exists():
                 # Get appropriate transforms for this split
-                transform = self.config.get_transforms(split, use_clip=self.use_clip)
+                transform = self.config.get_transforms(split)
                 
                 # Create ImageFolder dataset
                 dataset = ImageFolder(
@@ -227,8 +227,8 @@ def get_single_image_loader(
     # Load image
     image = Image.open(image_path).convert('RGB')
     
-    # Apply test transforms with CLIP flag
-    transform = dataset_config.get_transforms('test', use_clip=use_clip)
+    # Apply test transforms
+    transform = dataset_config.get_transforms('test')
     image_tensor = transform(image)
     
     # Add batch dimension
