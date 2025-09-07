@@ -28,8 +28,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
 from pipeline import run_unified_pipeline
-from main_sweep import run_parameter_sweep
-from faithfulness import evaluate_and_report_faithfulness
 
 
 class TestFourPhasesIntegration:
@@ -317,7 +315,7 @@ class TestFourPhasesIntegration:
         """Test that the pipeline works across different available datasets."""
         tested_datasets = 0
         
-        for dataset_name in check_datasets[:2]:  # Test up to 2 datasets to save time
+        for dataset_name in check_datasets:  # Test up to 2 datasets to save time
             if dataset_name == "waterbirds":
                 source_path = Path("./data/waterbirds/waterbird_complete95_forest2water2/")
                 base_config.classify.use_clip = True
@@ -360,3 +358,126 @@ class TestFourPhasesIntegration:
         
         assert tested_datasets > 0, "Should have successfully tested at least one dataset"
         print(f"Cross-dataset compatibility: {tested_datasets}/{len(check_datasets)} datasets tested successfully")
+    
+    def test_deterministic_validation_seed_42(self, require_cuda, check_datasets, base_config, test_output_dir):
+        """Deterministic validation test with seed 42 and subset of 10 - validates exact expected results."""
+        expected_results = {
+            'hyperkvasir': {
+                'mean_saco': 0.5512,
+                'std_saco': 0.3947,
+                'per_class_saco': {
+                    'cecum': {'mean': 0.1680, 'std': 0.3561, 'n': 4},
+                    'retroflex-rectum': {'mean': 0.8410, 'std': 0.0680, 'n': 3},
+                    'z-line': {'mean': 0.7725, 'std': 0.1143, 'n': 3}
+                }
+            },
+            'covidquex': {
+                'mean_saco': 0.4361,
+                'std_saco': 0.3236,
+                'per_class_saco': {
+                    'COVID-19': {'mean': 0.3592, 'std': 0.3823, 'n': 6},
+                    'Non-COVID': {'mean': 0.3818, 'std': 0.0629, 'n': 2},
+                    'Normal': {'mean': 0.7214, 'std': 0.0610, 'n': 2}
+                }
+            },
+            'waterbirds': {
+                'mean_saco': 0.6222,
+                'std_saco': 0.5917,
+                'per_class_saco': {
+                    'landbird': {'mean': 0.5802, 'std': 0.6116, 'n': 9},
+                    'waterbird': {'mean': 1.0000, 'std': float('nan'), 'n': 1}
+                }
+            }
+        }
+        
+        datasets_to_test = [
+            ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
+            ("covidquex", Path("./data/covidquex/data/lung/")),
+            ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2/"))
+        ]
+        
+        for dataset_name, source_path in datasets_to_test:
+            if dataset_name not in check_datasets:
+                print(f"Skipping {dataset_name} - not available")
+                continue
+                
+            print(f"\n--- Testing deterministic results for {dataset_name} ---")
+            
+            # Configure exactly like main.py with feature gradients OFF
+            base_config.file.set_dataset(dataset_name)
+            base_config.file.current_mode = "val"
+            base_config.classify.boosting.enable_feature_gradients = False
+            base_config.classify.boosting.steering_layers = [4]  # Layer 4 as in main.py
+            base_config.classify.analysis = True  # Enable faithfulness analysis
+            base_config.file.base_pipeline_dir = test_output_dir / dataset_name
+            base_config.file.base_pipeline_dir.mkdir(exist_ok=True)
+            
+            # Configure for specific datasets (matching main.py logic)
+            if dataset_name == "waterbirds":
+                base_config.classify.use_clip = True
+                base_config.classify.clip_model_name = "open-clip:laion/CLIP-ViT-B-32-DataComp.XL-s13B-b90K"
+                base_config.classify.clip_text_prompts = [
+                    "a photo of a terrestrial bird", "a photo of an aquatic bird"
+                ]
+            else:
+                base_config.classify.use_clip = False
+            
+            # Run with exact same parameters as expected results
+            results, saco_results = run_unified_pipeline(
+                config=base_config,
+                dataset_name=dataset_name,
+                source_data_path=source_path,
+                device=require_cuda,
+                subset_size=10,  # Exactly 10 as specified
+                random_seed=42   # Exact seed for reproducibility
+            )
+            
+            # Validate basic results
+            assert len(results) == 10, f"Should have exactly 10 results for {dataset_name}"
+            assert isinstance(saco_results, dict), f"Should have SaCo results for {dataset_name}"
+            
+            # Get expected values for this dataset
+            expected = expected_results[dataset_name]
+            
+            # Validate mean SaCo score (with tolerance for floating point precision)
+            actual_mean = saco_results.get('mean', 0.0)
+            expected_mean = expected['mean_saco']
+            assert abs(actual_mean - expected_mean) < 0.001, \
+                f"{dataset_name} mean SaCo mismatch: expected {expected_mean}, got {actual_mean}"
+            
+            # Validate std SaCo score
+            actual_std = saco_results.get('std', 0.0)
+            expected_std = expected['std_saco']
+            assert abs(actual_std - expected_std) < 0.001, \
+                f"{dataset_name} std SaCo mismatch: expected {expected_std}, got {actual_std}"
+            
+            # Validate per-class results if available
+            if 'per_class' in saco_results:
+                for class_name, expected_class_data in expected['per_class_saco'].items():
+                    if class_name in saco_results['per_class']:
+                        actual_class_data = saco_results['per_class'][class_name]
+                        
+                        # Check mean
+                        actual_class_mean = actual_class_data.get('mean', 0.0)
+                        expected_class_mean = expected_class_data['mean']
+                        assert abs(actual_class_mean - expected_class_mean) < 0.001, \
+                            f"{dataset_name} {class_name} mean mismatch: expected {expected_class_mean}, got {actual_class_mean}"
+                        
+                        # Check sample count (pandas uses 'count', not 'n')
+                        actual_n = actual_class_data.get('count', 0)
+                        expected_n = expected_class_data['n']
+                        assert actual_n == expected_n, \
+                            f"{dataset_name} {class_name} sample count mismatch: expected {expected_n}, got {actual_n}"
+                        
+                        # Check std (skip if expected is NaN)
+                        if not np.isnan(expected_class_data['std']):
+                            actual_class_std = actual_class_data.get('std', 0.0)
+                            expected_class_std = expected_class_data['std']
+                            assert abs(actual_class_std - expected_class_std) < 0.001, \
+                                f"{dataset_name} {class_name} std mismatch: expected {expected_class_std}, got {actual_class_std}"
+            
+            print(f"✅ {dataset_name}: All deterministic validations passed")
+            print(f"   Mean SaCo: {actual_mean:.4f} (expected: {expected_mean:.4f})")
+            print(f"   Std SaCo: {actual_std:.4f} (expected: {expected_std:.4f})")
+        
+        print("\n✅ All deterministic validation tests passed!")
