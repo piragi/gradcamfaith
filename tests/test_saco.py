@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 import torch
 
-from attribution_binning import (
+from saco import (
     BinInfo, BinnedPerturbationData, ImageData, calculate_saco_vectorized_with_bias,
     compute_saco_from_impacts, measure_bin_impacts
 )
@@ -259,7 +259,7 @@ def test_measure_bin_impacts(mock_image_data):
     )
 
     # Mock model predictions
-    with patch('attribution_binning.batched_model_inference') as mock_inference:
+    with patch('saco.batched_model_inference') as mock_inference:
         mock_inference.return_value = [
             {
                 "predicted_class_idx": 0,
