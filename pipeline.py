@@ -19,7 +19,6 @@ from tqdm import tqdm
 logging.getLogger('PIL').setLevel(logging.WARNING)
 
 import io_utils
-import vit.preprocessing as preprocessing
 from attribution_binning import run_binned_attribution_analysis
 from config import FileConfig, PipelineConfig
 from data_types import (

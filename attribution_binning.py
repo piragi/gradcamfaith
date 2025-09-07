@@ -23,7 +23,6 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-import vit.preprocessing as preprocessing
 from data_types import ClassificationResult
 
 
@@ -229,7 +228,6 @@ def apply_binned_perturbation(
             # Use consistent grayscale perturbation method
             from PIL import Image, ImageStat
 
-            import vit.preprocessing as preprocessing  # Make sure this import is available
 
             # 1. Calculate mean, but take only the first channel for grayscale value
             mean_channels = ImageStat.Stat(original_pil_image).mean
@@ -270,13 +268,7 @@ def apply_binned_perturbation(
                 # The dataset config will handle whether to use CLIP or ViT preprocessing
                 processor = dataset_config.get_transforms('test')
             else:
-                # Fallback to old preprocessing if dataset_name not provided
-                # This should be removed once all callers are updated
-                import vit.preprocessing as preprocessing
-                if result_pil.size == (224, 224):
-                    processor = preprocessing.get_processor_for_precached_224_images()
-                else:
-                    processor = preprocessing.get_default_processor(img_size=224)
+                raise ValueError("dataset_name is required for proper preprocessing")
 
             perturbed_tensor = processor(result_pil)
             return perturbed_tensor
