@@ -179,7 +179,7 @@ def create_clip_classifier_for_waterbirds(
     import open_clip
 
     # Load the same OpenCLIP model for text encoding (matching vision model)
-    clip_model, _, _ = open_clip.create_model_and_transforms(
+    text_model, _, _ = open_clip.create_model_and_transforms(
         "ViT-B-32", pretrained="datacomp_xl_s13b_b90k", device=device
     )
 
@@ -190,7 +190,7 @@ def create_clip_classifier_for_waterbirds(
         class_names = custom_prompts
 
     classifier = CLIPClassifier(
-        vision_model=vision_model, text_model=clip_model, processor=processor, class_names=class_names, device=device
+        vision_model=vision_model, text_model=text_model, processor=processor, class_names=class_names, device=device
     )
 
     return classifier
