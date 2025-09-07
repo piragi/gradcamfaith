@@ -29,7 +29,7 @@ from data_types import (
 from dataset_config import DatasetConfig, get_dataset_config
 from faithfulness import evaluate_and_report_faithfulness
 from setup import convert_dataset
-from transmm_sfaf import (generate_attribution_prisma_enhanced, load_steering_resources)
+from transmm import (generate_attribution_prisma_enhanced, load_steering_resources)
 from unified_dataloader import (UnifiedMedicalDataset, create_dataloader, get_single_image_loader)
 
 

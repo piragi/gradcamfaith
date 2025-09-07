@@ -135,7 +135,6 @@ def transmm_prisma_enhanced(
     # Storage for gradients, activations, SAE codes, and residuals
     gradients = {}
     activations = {}
-    sae_codes = {}
     residuals = {}  # Store residuals for feature gradient computation
 
     attn_hook_names = [f"blocks.{i}.attn.hook_pattern" for i in range(model_prisma.cfg.n_layers)]
