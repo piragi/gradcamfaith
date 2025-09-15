@@ -341,11 +341,11 @@ def main():
         [8, 9, 10],
     ]
 
-    kappa_values = [10.0, 20., 50.]  # Gating strength
-    topk_values = [1, 4, 16, 64, 128, None]  # Top-k features per patch
+    kappa_values = [10., 20., 30.]  # Gating strength
+    topk_values = [1, 4, 16, 64, None]  # Top-k features per patch
 
     # Gate construction types for interaction ablation
-    gate_constructions = ["gradient_only", "combined", "activation_only"]
+    gate_constructions = ["combined", "gradient_only", "activation_only"]
 
     # Decoder shuffling options for semantic alignment ablation
     shuffle_decoder_options = [False]  # Test both normal and shuffled - WARNING: works only with combined

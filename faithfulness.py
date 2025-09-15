@@ -7,6 +7,7 @@ import gc
 import json
 import logging
 import math
+from functools import lru_cache
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +16,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import quantus
+from quantus.helpers import utils as quantus_utils
+from quantus.metrics.faithfulness.faithfulness_correlation import (
+    FaithfulnessCorrelation as QuantusFaithfulnessCorrelation,
+)
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -39,15 +44,167 @@ class FaithfulnessEstimatorConfig:
         return self.estimator_fn()
 
 
-def faithfulness_correlation(subset_size, nr_runs):
-    return quantus.FaithfulnessCorrelation(
-        perturb_func=batch_patch_level_perturbation,  # Use batched version for better performance
+class PatchFaithfulnessCorrelation(QuantusFaithfulnessCorrelation):
+    """Faithfulness correlation that operates on patch attributions directly."""
+
+    def __init__(self, *, n_patches: int = 196, patch_size: int = 16, **kwargs):
+        super().__init__(**kwargs)
+        self.n_patches = n_patches
+        self.patch_size = patch_size
+        # Ensure we never sample more patches than available.
+        self.subset_size = min(self.subset_size, self.n_patches)
+
+    def _a_batch_to_patch_space(self, a_batch: np.ndarray) -> np.ndarray:
+        """Convert (N, C, 224, 224) attributions to (N, n_patches)."""
+        batch_size = a_batch.shape[0]
+        if a_batch.ndim == 2 and a_batch.shape[1] == self.n_patches:
+            return a_batch
+
+        if a_batch.ndim == 3 and a_batch.shape[1] * a_batch.shape[2] == self.n_patches:
+            return a_batch.reshape(batch_size, self.n_patches)
+
+        if a_batch.ndim == 4:
+            spatial = a_batch[:, 0]
+        else:
+            spatial = a_batch
+
+        grid_size = int(np.sqrt(self.n_patches))
+        patch_attributions = spatial[:, :: self.patch_size, :: self.patch_size]
+        return patch_attributions.reshape(batch_size, self.n_patches)
+
+    def __call__(
+        self,
+        model,
+        x_batch: np.ndarray,
+        y_batch: np.ndarray,
+        a_batch: Optional[np.ndarray] = None,
+        batch_size: int = 256,
+        device: Optional[str] = None,
+        softmax: bool = False,
+        **kwargs,
+    ) -> List[float]:
+        if a_batch is None:
+            raise ValueError("Precomputed attributions are required for PatchFaithfulnessCorrelation.")
+
+        if not hasattr(model, "predict") or not hasattr(model, "shape_input"):
+            model = quantus_utils.get_wrapped_model(
+                model=model,
+                channel_first=True,
+                softmax=softmax,
+                device=device,
+                model_predict_kwargs=None,
+            )
+
+        x_batch = np.asarray(x_batch)
+        y_batch = np.asarray(y_batch)
+        a_batch = np.asarray(a_batch)
+
+        scores: List[float] = []
+
+        for start in range(0, len(x_batch), batch_size):
+            end = min(start + batch_size, len(x_batch))
+            xb = x_batch[start:end]
+            yb = y_batch[start:end]
+            ab = a_batch[start:end]
+
+            ab = self._a_batch_to_patch_space(ab)
+
+            if self.normalise:
+                ab = self.normalise_func(ab)
+            if self.abs:
+                ab = np.abs(ab)
+
+            scores.extend(
+                self.evaluate_batch(
+                    model=model,
+                    x_batch=xb,
+                    y_batch=yb,
+                    a_batch=ab,
+                )
+            )
+
+        return scores
+
+    def evaluate_batch(
+        self,
+        model,
+        x_batch: np.ndarray,
+        y_batch: np.ndarray,
+        a_batch: np.ndarray,
+        **kwargs,
+    ) -> List[float]:
+        if x_batch.shape != a_batch.shape:
+            a_batch = self._a_batch_to_patch_space(a_batch)
+
+        batch_size = x_batch.shape[0]
+        a_batch = a_batch.reshape(batch_size, self.n_patches)
+
+        x_shape = x_batch.shape
+        x_flat = x_batch.reshape(batch_size, -1)
+
+        x_input = model.shape_input(x_batch, x_shape, channel_first=True, batched=True)
+        y_pred = model.predict(x_input)[np.arange(batch_size), y_batch]
+
+        patch_to_pixels = _get_patch_to_pixels_mapping(
+            height=x_shape[2],
+            width=x_shape[3],
+            patch_size=self.patch_size,
+            channels=x_shape[1],
+            n_patches=self.n_patches,
+        )
+
+        pixels_per_patch = len(patch_to_pixels[0])
+        max_indices = self.subset_size * pixels_per_patch
+        pred_deltas = []
+        att_sums = []
+
+        for _ in range(self.nr_runs):
+            patch_choices = np.stack(
+                [
+                    np.random.choice(self.n_patches, self.subset_size, replace=False)
+                    for _ in range(batch_size)
+                ],
+                axis=0,
+            )
+
+            pixel_indices = np.full((batch_size, max_indices), np.nan, dtype=float)
+            for idx in range(batch_size):
+                selected = patch_choices[idx]
+                pixels = np.concatenate([patch_to_pixels[int(p)] for p in selected])
+                pixel_indices[idx, : len(pixels)] = pixels
+
+            x_perturbed_flat = self.perturb_func(
+                arr=x_flat,
+                indices=pixel_indices,
+            )
+            x_perturbed = x_perturbed_flat.reshape(x_shape)
+
+            x_input = model.shape_input(x_perturbed, x_shape, channel_first=True, batched=True)
+            y_pred_perturb = model.predict(x_input)[np.arange(batch_size), y_batch]
+            pred_deltas.append(y_pred - y_pred_perturb)
+
+            att_sums.append(a_batch[np.arange(batch_size)[:, None], patch_choices].sum(axis=-1))
+
+        pred_deltas = np.stack(pred_deltas, axis=1)
+        att_sums = np.stack(att_sums, axis=1)
+
+        similarity = self.similarity_func(a=att_sums, b=pred_deltas, batched=True)
+        return similarity.tolist()
+
+
+def faithfulness_correlation(subset_size, nr_runs, n_patches):
+    patch_size = 32 if n_patches == 49 else 16
+    return PatchFaithfulnessCorrelation(
+        perturb_func=batch_patch_level_perturbation,
         perturb_baseline="black",
+        perturb_func_kwargs={"patch_size": patch_size},
         similarity_func=quantus.similarity_func.correlation_spearman,
         subset_size=subset_size,
         return_aggregate=False,
         normalise=False,
-        nr_runs=nr_runs
+        nr_runs=nr_runs,
+        n_patches=n_patches,
+        patch_size=patch_size,
     )
 
 
@@ -78,6 +235,56 @@ class PatchLevelPixelFlipping(quantus.PixelFlipping):
         self.baseline_value = perturb_baseline
         self.n_patches = n_patches
 
+    def __call__(
+        self,
+        model,
+        x_batch: np.ndarray,
+        y_batch: np.ndarray,
+        a_batch: Optional[np.ndarray] = None,
+        batch_size: int = 256,
+        device: Optional[str] = None,
+        softmax: bool = True,
+        **kwargs,
+    ) -> List[float]:
+        if a_batch is None:
+            raise ValueError("Precomputed attributions are required for PatchLevelPixelFlipping.")
+
+        if not hasattr(model, "predict") or not hasattr(model, "shape_input"):
+            model = quantus_utils.get_wrapped_model(
+                model=model,
+                channel_first=True,
+                softmax=softmax,
+                device=device,
+                model_predict_kwargs=None,
+            )
+
+        x_batch = np.asarray(x_batch)
+        y_batch = np.asarray(y_batch)
+        a_batch = np.asarray(a_batch)
+
+        scores: List[float] = []
+        for start in range(0, len(x_batch), batch_size):
+            end = min(start + batch_size, len(x_batch))
+            xb = x_batch[start:end]
+            yb = y_batch[start:end]
+            ab = a_batch[start:end]
+
+            if self.normalise:
+                ab = self.normalise_func(ab)
+            if self.abs:
+                ab = np.abs(ab)
+
+            scores.extend(
+                self.evaluate_batch(
+                    model=model,
+                    x_batch=xb,
+                    y_batch=yb,
+                    a_batch=ab,
+                )
+            )
+
+        return scores
+
     def evaluate_batch(self, model, x_batch: np.ndarray, y_batch: np.ndarray, a_batch: np.ndarray, **kwargs):
         """
         Fast patch-level PixelFlipping: Uses same sorting as standard but patch-level perturbation.
@@ -87,7 +294,9 @@ class PatchLevelPixelFlipping(quantus.PixelFlipping):
         n_patches = self.n_patches
         patch_size = 32 if n_patches == 49 else 16
 
-        if a_batch.shape[-1] > n_patches:
+        if a_batch.ndim == 2 and a_batch.shape[1] == n_patches:
+            a_batch_patches = a_batch
+        elif a_batch.shape[-1] > n_patches:
             a_batch_patches = self._extract_patch_attributions_exact(a_batch, n_patches)
         else:
             a_batch_patches = a_batch.reshape(batch_size, -1)
@@ -120,7 +329,7 @@ class PatchLevelPixelFlipping(quantus.PixelFlipping):
 
                 # Get all pixel indices for this batch sample's patches
                 all_pixel_indices = np.concatenate([
-                    patch_to_pixels[patch_idx] for patch_idx in valid_patches if patch_idx in patch_to_pixels
+                    patch_to_pixels[patch_idx] for patch_idx in valid_patches if 0 <= patch_idx < len(patch_to_pixels)
                 ])
 
                 # Apply baseline to all pixels at once
@@ -180,14 +389,15 @@ def faithfulness_pixel_flipping_optimized(n_patches=196):
     )
 
 
+@lru_cache(maxsize=None)
 def _get_patch_to_pixels_mapping(height=224, width=224, patch_size=16, channels=3, n_patches=None):
-    """Compute patch-to-pixel mappings for perturbation."""
+    """Compute and cache patch-to-pixel mappings for perturbation."""
     if n_patches is not None:
         grid_size = int(np.sqrt(n_patches))
     else:
         grid_size = width // patch_size
 
-    patch_to_pixels = {}
+    patch_to_pixels = []
 
     for patch_idx in range(grid_size * grid_size):
         row = patch_idx // grid_size
@@ -204,9 +414,9 @@ def _get_patch_to_pixels_mapping(height=224, width=224, patch_size=16, channels=
         c_grid, r_grid, col_grid = np.meshgrid(c_indices, r_indices, col_indices, indexing='ij')
         flat_indices = c_grid.flatten() * height * width + r_grid.flatten() * width + col_grid.flatten()
 
-        patch_to_pixels[patch_idx] = flat_indices
+        patch_to_pixels.append(flat_indices)
 
-    return patch_to_pixels
+    return tuple(patch_to_pixels)
 
 
 def batch_patch_level_perturbation(arr, indices, perturb_baseline="black", patch_size=16, **kwargs):
@@ -243,40 +453,40 @@ def batch_patch_level_perturbation(arr, indices, perturb_baseline="black", patch
     )
     
     perturbed_arr = arr.copy()
-    
+
     # Get patch-to-pixel mapping once
     patch_to_pixels = _get_patch_to_pixels_mapping(height, width, patch_size, channels)
-    
+
     # Vectorized processing for all samples
     for batch_idx in range(batch_size):
         # Get valid indices for this sample (non-NaN)
         valid_mask = ~np.isnan(indices[batch_idx])
         if not np.any(valid_mask):
             continue
-            
+
         valid_indices = indices[batch_idx][valid_mask].astype(int)
-        
+
         # Convert pixel indices to patch indices (vectorized)
         spatial_indices = valid_indices % (height * width)
         row_indices = (spatial_indices // width) // patch_size
         col_indices = (spatial_indices % width) // patch_size
         patch_indices = row_indices * grid_size + col_indices
-        
+
         # Get unique patches to perturb
         unique_patches = np.unique(patch_indices)
         unique_patches = unique_patches[unique_patches < grid_size * grid_size]
-        
+
         # Collect all pixel indices from the patches
         if len(unique_patches) > 0:
             all_pixel_indices = np.concatenate([patch_to_pixels[p] for p in unique_patches])
             all_pixel_indices = all_pixel_indices[all_pixel_indices < n_features]
-            
+
             # Apply baseline
             if baseline_value.ndim == 2:
                 perturbed_arr[batch_idx, all_pixel_indices] = baseline_value[batch_idx, all_pixel_indices]
             else:
                 perturbed_arr[batch_idx, all_pixel_indices] = baseline_value
-    
+
     return perturbed_arr
 
 
@@ -377,7 +587,8 @@ def calc_faithfulness(
             estimator_fn=faithfulness_correlation,
             kwargs={
                 "subset_size": min(20, n_patches // 2),
-                "nr_runs": nr_runs
+                "nr_runs": nr_runs,
+                "n_patches": n_patches
             }
         ),
         FaithfulnessEstimatorConfig(
@@ -389,10 +600,10 @@ def calc_faithfulness(
 
     results_by_estimator = {}
 
-    # Suppress quantus logging
+    # Set quantus logging to WARNING to catch important issues
     quantus_logger = logging.getLogger('quantus')
     original_level = quantus_logger.level
-    quantus_logger.setLevel(logging.ERROR)
+    quantus_logger.setLevel(logging.WARNING)  # Show warnings, not just errors
 
     for estimator_config in estimator_configs:
         print(f"Running estimator: {estimator_config.name}")
@@ -438,7 +649,7 @@ def _run_estimator_trials(
                 y_batch=y_batch,
                 a_batch=a_batch_expl,
                 device=str(device),
-                batch_size=2048
+                batch_size=32
             )
 
             # Process results
@@ -446,7 +657,16 @@ def _run_estimator_trials(
             all_results.append(scores)
 
         except Exception as e:
+            import traceback
             print(f"Error in trial {trial} for {estimator_config.name}: {e}")
+            print(f"Full traceback:\n{traceback.format_exc()}")
+
+            # Check for CUDA memory issues specifically
+            if "CUDA out of memory" in str(e) or "RuntimeError" in str(type(e).__name__):
+                print("CUDA memory issue detected. Consider reducing batch_size or nr_runs.")
+                torch.cuda.empty_cache()
+                gc.collect()
+
             all_results.append(np.full(len(y_batch), np.nan))
         finally:
             np.random.set_state(original_state)
@@ -481,34 +701,31 @@ def _process_estimator_output(output: Any, expected_length: int) -> np.ndarray:
 
 
 def convert_patch_attribution_to_image(attribution, n_patches=196):
-    """
-    Convert patch attribution to 224x224 image format for quantus compatibility.
-    Uses efficient array operations to avoid explicit loops.
-    """
+    """Convert attribution to a flat patch vector of length ``n_patches``."""
     patch_size = 32 if n_patches == 49 else 16
     grid_size = int(np.sqrt(n_patches))
 
-    # Ensure correct shape
-    if attribution.ndim == 1:
-        attribution = attribution[:n_patches]
-        attr_grid = attribution.reshape(grid_size, grid_size)
-    else:
-        attr_grid = attribution
+    attr = np.asarray(attribution)
 
-    # Upsample to 224x224 using repeat (more efficient than interpolation)
-    attr_image = np.repeat(np.repeat(attr_grid, patch_size, axis=0), patch_size, axis=1)
+    # Drop redundant channel dimension if present.
+    if attr.ndim == 3 and attr.shape[0] == 3:
+        attr = attr[0]
 
-    # Ensure correct size for B-32 models (7*32=224 works perfectly)
-    if attr_image.shape[0] != 224:
-        # This shouldn't happen but handle it just in case
-        from scipy.ndimage import zoom
-        zoom_factor = 224 / attr_image.shape[0]
-        attr_image = zoom(attr_image, zoom_factor, order=1)
+    # Downsample spatial attributions to patch level.
+    if attr.shape == (224, 224):
+        attr = attr.reshape(grid_size, patch_size, grid_size, patch_size).mean(axis=(1, 3))
 
-    # Expand to 3 channels to match input format (C, H, W)
-    attr_image_3c = np.stack([attr_image] * 3, axis=0)
+    if attr.ndim == 2 and attr.shape != (grid_size, grid_size):
+        if attr.shape[0] * attr.shape[1] == n_patches:
+            attr = attr.reshape(grid_size, grid_size)
 
-    return attr_image_3c
+    attr = attr.reshape(-1)[:n_patches]
+
+    if attr.shape[0] != n_patches:
+        print(f"Warning: Expected {n_patches} features, got {attr.shape[0]}")
+        return None
+
+    return attr.astype(np.float32)
 
 
 def evaluate_faithfulness_for_results(

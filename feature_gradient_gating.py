@@ -14,7 +14,7 @@ def compute_feature_gradient_gate(
     sae_decoder: torch.Tensor,
     top_k: int = 5,
     normalize_decoder: bool = True,
-    denoise_gradient: bool = True,
+    denoise_gradient: bool = False,
     kappa: float = 3.0,
     clamp_min: float = 0.2,
     clamp_max: float = 5.0,
@@ -51,7 +51,7 @@ def compute_feature_gradient_gate(
     """
     device = residual_grad.device
     n_patches = residual_grad.shape[0]
-    
+
     # Handle top_k=None case (use all features)
     if top_k is None:
         top_k = sae_codes.shape[1]
@@ -226,7 +226,7 @@ def apply_feature_gradient_gating(
     kappa = config.get('kappa', 10.0)
     clamp_min = config.get('clamp_min', 0.5)
     clamp_max = config.get('clamp_max', 2.0)
-    denoise_gradient = config.get('denoise_gradient', True)
+    denoise_gradient = config.get('denoise_gradient', False)
     gate_construction = config.get('gate_construction', 'combined')
     shuffle_decoder = config.get('shuffle_decoder', False)
 
