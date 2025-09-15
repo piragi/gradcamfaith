@@ -96,6 +96,8 @@ class BoostingConfig:
     enable_feature_gradients: bool = False  # Enable feature gradient gating
     feature_gradient_layers: List[int] = field(default_factory=lambda: [9, 10])  # Which layers to apply
     kappa: int = 10
+    gate_construction: str = "combined"  # Type of gate: "activation_only", "gradient_only", or "combined"
+    shuffle_decoder: bool = False  # Shuffle decoder columns to break semantic alignment
 
 
 @dataclass

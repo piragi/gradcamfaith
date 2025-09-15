@@ -18,6 +18,8 @@ def compute_feature_gradient_gate(
     kappa: float = 3.0,
     clamp_min: float = 0.2,
     clamp_max: float = 5.0,
+    gate_construction: str = "combined",
+    shuffle_decoder: bool = False,
     debug: bool = False
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """
@@ -39,6 +41,8 @@ def compute_feature_gradient_gate(
         kappa: Scaling factor for exponential mapping
         clamp_min: Minimum multiplier value
         clamp_max: Maximum multiplier value
+        gate_construction: Gate construction type: "activation_only", "gradient_only", or "combined"
+        shuffle_decoder: Whether to shuffle decoder columns to break semantic alignment
         debug: Whether to return debug information
         
     Returns:
@@ -47,12 +51,29 @@ def compute_feature_gradient_gate(
     """
     device = residual_grad.device
     n_patches = residual_grad.shape[0]
+    
+    # Handle top_k=None case (use all features)
+    if top_k is None:
+        top_k = sae_codes.shape[1]
+
+    # --- Stable shuffle (if requested) ---
+    if shuffle_decoder:
+        # If a perm was not provided, create one deterministically ONCE
+        # Be deterministic across calls in this process:
+        g = torch.Generator(device=sae_decoder.device)
+        g.manual_seed(12345)  # or pass from config
+        shuffle_perm = torch.randperm(sae_decoder.shape[1], generator=g, device=sae_decoder.device)
+        sae_decoder_shuffled = sae_decoder[:, shuffle_perm]
+        # IMPORTANT: shuffling + denoising cancels the effect; turn it off when shuffled
+        denoise_gradient = False
+    else:
+        sae_decoder_shuffled = sae_decoder
 
     # Normalize decoder columns for stability
     if normalize_decoder:
-        decoder_norm = sae_decoder / (sae_decoder.norm(dim=0, keepdim=True) + 1e-8)
+        decoder_norm = sae_decoder_shuffled / (sae_decoder_shuffled.norm(dim=0, keepdim=True) + 1e-8)
     else:
-        decoder_norm = sae_decoder
+        decoder_norm = sae_decoder_shuffled
 
     # Optional: Denoise gradient by projecting onto decoder subspace
     if denoise_gradient:
@@ -63,17 +84,29 @@ def compute_feature_gradient_gate(
     # Compute feature gradients: h = D^T g
     feature_grads = residual_grad @ decoder_norm  # [n_patches, n_features]
 
-    # Get top-K features per patch by activation magnitude
-    top_vals, top_idx = torch.topk(sae_codes, k=min(top_k, sae_codes.shape[1]), dim=1)
+    # Compute per-patch scalar based on gate construction type
+    if gate_construction == "activation_only":
+        # Activation-only: sum of top-K activations
+        top_vals, top_idx = torch.topk(sae_codes, k=min(top_k, sae_codes.shape[1]), dim=1)
+        s_t = top_vals.sum(dim=1)  # [n_patches]
+        contributions = top_vals  # For debug info
 
-    # Gather feature gradients for top-K features
-    h_top = torch.gather(feature_grads, 1, top_idx)  # [n_patches, top_k]
+    elif gate_construction == "gradient_only":
+        # Gradient-only: sum of top-K absolute gradients in feature space
+        abs_feature_grads = torch.abs(feature_grads)
+        top_vals, top_idx = torch.topk(abs_feature_grads, k=min(top_k, abs_feature_grads.shape[1]), dim=1)
+        s_t = top_vals.sum(dim=1)  # [n_patches]
+        contributions = top_vals  # For debug info
 
-    # Compute feature contributions: s = h * f (gradient * activation)
-    contributions = h_top * top_vals  # [n_patches, top_k]
+    elif gate_construction == "combined":
+        # Combined (default): gradient * activation for top-K features by activation
+        top_vals, top_idx = torch.topk(sae_codes, k=min(top_k, sae_codes.shape[1]), dim=1)
+        h_top = torch.gather(feature_grads, 1, top_idx)  # [n_patches, top_k]
+        contributions = h_top * top_vals  # [n_patches, top_k]
+        s_t = contributions.sum(dim=1)  # [n_patches]
 
-    # Sum contributions across features to get per-patch scalar
-    s_t = contributions.sum(dim=1)  # [n_patches]
+    else:
+        raise ValueError(f"Unknown gate_construction type: {gate_construction}")
 
     # Normalize across patches (z-score normalization)
     s_mean = s_t.mean()
@@ -194,6 +227,8 @@ def apply_feature_gradient_gating(
     clamp_min = config.get('clamp_min', 0.5)
     clamp_max = config.get('clamp_max', 2.0)
     denoise_gradient = config.get('denoise_gradient', True)
+    gate_construction = config.get('gate_construction', 'combined')
+    shuffle_decoder = config.get('shuffle_decoder', False)
 
     # Get decoder matrix - handle different SAE implementations
     if hasattr(sae, 'W_dec'):
@@ -213,13 +248,15 @@ def apply_feature_gradient_gating(
         kappa=kappa,
         clamp_min=clamp_min,
         clamp_max=clamp_max,
+        gate_construction=gate_construction,
+        shuffle_decoder=shuffle_decoder,
         debug=debug
     )
 
-    # Optionally compute denoising gate
+    # Optionally compute denoising gate (disabled when decoder is shuffled)
     denoise_gate = None
     denoise_debug = {}
-    if enable_denoising and residuals is not None:
+    if enable_denoising and residuals is not None and not shuffle_decoder:
         with torch.no_grad():
             try:
                 reconstructions = sae.decode(sae_codes)
@@ -227,7 +264,7 @@ def apply_feature_gradient_gating(
                 # SAE decode failed - disable denoising
                 enable_denoising = False
                 denoise_gate = None
-        
+
         if enable_denoising:
             denoise_gate, denoise_debug = compute_reconstruction_denoise_gate(
                 residuals=residuals,

@@ -45,12 +45,12 @@ def load_steering_resources(layers: List[int], dataset_name: Optional[str] = Non
     for layer_idx in layers:
         try:
             if dataset_name == "waterbirds":
-                # Use ImageNet CLIP B-32 SAE for waterbirds
-                sae_path = Path(f"data/sae_waterbirds_clip_b32/layer_{layer_idx}/weights.pt")
+                # Use CLIP Vanilla B-32 SAE for waterbirds
+                sae_path = Path(f"data/sae_clip_vanilla_b32/layer_{layer_idx}/weights.pt")
                 if not sae_path.exists():
-                    print(f"Warning: ImageNet SAE not found at {sae_path}")
+                    print(f"Warning: CLIP Vanilla SAE not found at {sae_path}")
                     continue
-                print(f"Loading ImageNet SAE from {sae_path}")
+                print(f"Loading CLIP Vanilla SAE from {sae_path}")
                 sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
                 sae.cuda().eval()
             else:

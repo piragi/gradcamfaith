@@ -8,22 +8,23 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from vit_prisma.models.base_vit import HookedSAEViT, HookedViT
 from vit_prisma.configs.HookedViTConfig import HookedViTConfig
+from vit_prisma.models.base_vit import HookedSAEViT, HookedViT
 
 from config import PipelineConfig
 from feature_gradient_gating import apply_feature_gradient_gating
 
-def apply_gradient_gating_to_cam(cam_pos_avg: torch.Tensor, layer_idx: int,
-                                gradients: Dict[str, torch.Tensor], residuals: Dict[int, torch.Tensor],
-                                steering_resources: Dict[int, Dict[str, Any]], 
-                                config: PipelineConfig, device: torch.device) -> Tuple[torch.Tensor, Dict[str, Any]]:
+
+def apply_gradient_gating_to_cam(
+    cam_pos_avg: torch.Tensor, layer_idx: int, gradients: Dict[str, torch.Tensor], residuals: Dict[int, torch.Tensor],
+    steering_resources: Dict[int, Dict[str, Any]], config: PipelineConfig, device: torch.device
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """Apply feature gradient gating to a CAM tensor at a specific layer."""
     resid_grad_key = f"blocks.{layer_idx}.hook_resid_post_grad"
-    
+
     if resid_grad_key not in gradients or layer_idx not in residuals:
         return cam_pos_avg, {}
-        
+
     # Get gradient and residual - already on CPU from hooks
     residual_grad_cpu = gradients[resid_grad_key]
     residual_tensor_cpu = residuals[layer_idx]
@@ -57,9 +58,11 @@ def apply_gradient_gating_to_cam(cam_pos_avg: torch.Tensor, layer_idx: int,
         'kappa': getattr(config.classify.boosting, 'kappa', 50.0),
         'clamp_min': 0.2,
         'clamp_max': 5.0,
-        'denoise_gradient': True,
+        'denoise_gradient': False,
         'denoise_alpha': 5.0,
         'denoise_min': 0.6,
+        'gate_construction': getattr(config.classify.boosting, 'gate_construction', 'combined'),
+        'shuffle_decoder': getattr(config.classify.boosting, 'shuffle_decoder', False),
     }
 
     # Get residuals for denoising if available
@@ -79,16 +82,16 @@ def apply_gradient_gating_to_cam(cam_pos_avg: torch.Tensor, layer_idx: int,
     return gated_cam, layer_debug
 
 
-def compute_layer_attribution(model_cfg: HookedViTConfig, activations: Dict[str, torch.Tensor], 
-                             gradients: Dict[str, torch.Tensor], residuals: Dict[int, torch.Tensor],
-                             feature_gradient_layers: List[int],
-                             steering_resources: Optional[Dict[int, Dict[str, Any]]],
-                             config: PipelineConfig, device: torch.device) -> torch.Tensor:
+def compute_layer_attribution(
+    model_cfg: HookedViTConfig, activations: Dict[str, torch.Tensor], gradients: Dict[str, torch.Tensor],
+    residuals: Dict[int, torch.Tensor], feature_gradient_layers: List[int],
+    steering_resources: Optional[Dict[int, Dict[str, Any]]], config: PipelineConfig, device: torch.device
+) -> torch.Tensor:
     """Compute attribution by iterating through layers and applying attention rules."""
     attn_hook_names = [f"blocks.{i}.attn.hook_pattern" for i in range(model_cfg.n_layers)]
     num_tokens = activations[attn_hook_names[0]].shape[-1]
     R_pos = torch.eye(num_tokens, num_tokens, device='cpu')
-    
+
     for i in range(model_cfg.n_layers):
         hname = f"blocks.{i}.attn.hook_pattern"
         grad = gradients[hname + "_grad"]
@@ -96,9 +99,7 @@ def compute_layer_attribution(model_cfg: HookedViTConfig, activations: Dict[str,
         cam_pos_avg = avg_heads(cam, grad)
 
         # Apply feature gradient gating if configured
-        if (i in feature_gradient_layers and 
-            steering_resources is not None and 
-            i in steering_resources):
+        if (i in feature_gradient_layers and steering_resources is not None and i in steering_resources):
             cam_pos_avg, _ = apply_gradient_gating_to_cam(
                 cam_pos_avg, i, gradients, residuals, steering_resources, config, device
             )
@@ -106,7 +107,7 @@ def compute_layer_attribution(model_cfg: HookedViTConfig, activations: Dict[str,
         R_pos = R_pos + apply_self_attention_rules(R_pos, cam_pos_avg)
 
     transformer_attribution_pos = R_pos[0, 1:].clone()
-    
+
     return transformer_attribution_pos
 
 
@@ -127,8 +128,9 @@ def apply_self_attention_rules(R_ss: torch.Tensor, cam_ss: torch.Tensor) -> torc
     return R_ss_addition
 
 
-def run_model_forward_backward(model_prisma: HookedViT, input_tensor: torch.Tensor,
-                              clip_classifier: Optional[Any], device: torch.device) -> Tuple[Dict[str, Any], int]:
+def run_model_forward_backward(
+    model_prisma: HookedViT, input_tensor: torch.Tensor, clip_classifier: Optional[Any], device: torch.device
+) -> Tuple[Dict[str, Any], int]:
     """Run forward and backward pass, return predictions and predicted class."""
     if clip_classifier is not None:
         clip_result = clip_classifier.forward(input_tensor, requires_grad=True)
@@ -147,14 +149,17 @@ def run_model_forward_backward(model_prisma: HookedViT, input_tensor: torch.Tens
     one_hot.requires_grad_(True)
     loss = torch.sum(one_hot * logits)
     loss.backward(retain_graph=False)
-    
+
     prediction_result = {
-        "logits": logits.detach().cpu().numpy(),
-        "probabilities": probabilities.squeeze().cpu().detach().numpy().tolist()
+        "logits":
+        logits.detach().cpu().numpy(),
+        "probabilities":
+        probabilities.squeeze().cpu().detach().numpy().tolist()
         if isinstance(probabilities, torch.Tensor) else probabilities,
-        "predicted_class_idx": predicted_class_idx,
+        "predicted_class_idx":
+        predicted_class_idx,
     }
-    
+
     return prediction_result, int(predicted_class_idx)
 
 
@@ -163,7 +168,7 @@ def setup_hooks(model_prisma: HookedViT, feature_gradient_layers: List[int]) -> 
     gradients = {}
     activations = {}
     residuals = {}
-    
+
     attn_hook_names = [f"blocks.{i}.attn.hook_pattern" for i in range(model_prisma.cfg.n_layers)]
 
     def save_activation_hook(tensor: torch.Tensor, hook: Any):
@@ -179,6 +184,7 @@ def setup_hooks(model_prisma: HookedViT, feature_gradient_layers: List[int]) -> 
     # Add residual hooks for feature gradient layers
     all_resid_layers = set(feature_gradient_layers)
     if all_resid_layers:
+
         def save_resid_hook(tensor, hook):
             layer_idx = int(hook.name.split('.')[1])
             if layer_idx in feature_gradient_layers:
@@ -189,7 +195,7 @@ def setup_hooks(model_prisma: HookedViT, feature_gradient_layers: List[int]) -> 
             resid_hook_name = f"blocks.{layer_idx}.hook_resid_post"
             fwd_hooks.append((resid_hook_name, save_resid_hook))
             bwd_hooks.append((resid_hook_name, save_gradient_hook))
-    
+
     return fwd_hooks, bwd_hooks, gradients, activations, residuals
 
 
@@ -220,9 +226,7 @@ def transmm_prisma_enhanced(
         input_tensor = input_tensor.unsqueeze(0)
 
     # Setup hooks for data collection
-    fwd_hooks, bwd_hooks, gradients, activations, residuals = setup_hooks(
-        model_prisma, feature_gradient_layers
-    )
+    fwd_hooks, bwd_hooks, gradients, activations, residuals = setup_hooks(model_prisma, feature_gradient_layers)
 
     # Run model with hooks to collect gradients and activations
     with model_prisma.hooks(fwd_hooks=fwd_hooks, bwd_hooks=bwd_hooks, reset_hooks_end=True):
@@ -231,22 +235,19 @@ def transmm_prisma_enhanced(
         )
 
     # Add class label to prediction result
-    prediction_result["predicted_class_label"] = idx_to_class.get(
-        predicted_class_idx, f"class_{predicted_class_idx}"
-    )
+    prediction_result["predicted_class_label"] = idx_to_class.get(predicted_class_idx, f"class_{predicted_class_idx}")
 
     if not gradients:
         raise RuntimeError("No gradients captured!")
 
     # Compute attribution
     transformer_attribution_pos = compute_layer_attribution(
-        model_prisma.cfg, activations, gradients, residuals,
-        feature_gradient_layers, steering_resources, config, device
+        model_prisma.cfg, activations, gradients, residuals, feature_gradient_layers, steering_resources, config, device
     )
 
     # Convert to numpy and process attribution map
     raw_patch_map = transformer_attribution_pos.detach().cpu().numpy()
-    
+
     # Reshape and interpolate to image size
     side_len = int(np.sqrt(transformer_attribution_pos.size(0)))
     attribution_reshaped = transformer_attribution_pos.reshape(1, 1, side_len, side_len)
@@ -296,4 +297,3 @@ def generate_attribution_prisma_enhanced(
         "attribution_positive": pos_attr_np,
         "raw_attribution": raw_patch_map,
     }
-

@@ -34,6 +34,8 @@ def run_single_experiment(
             - feature_gradient_layers: List[int] 
             - kappa: float (gating strength parameter)
             - topk_features: int (top-k features per patch)
+            - gate_construction: str ("activation_only", "gradient_only", or "combined")
+            - shuffle_decoder: bool (whether to shuffle decoder columns)
         output_dir: Where to save results
         subset_size: Number of images to process (None for all)
         random_seed: Random seed for reproducibility
@@ -67,6 +69,8 @@ def run_single_experiment(
     # Set kappa and topk_features in boosting config
     pipeline_config.classify.boosting.kappa = experiment_params.get('kappa', 50.0)
     pipeline_config.classify.boosting.top_k_features = experiment_params.get('topk_features', 5)
+    pipeline_config.classify.boosting.gate_construction = experiment_params.get('gate_construction', 'combined')
+    pipeline_config.classify.boosting.shuffle_decoder = experiment_params.get('shuffle_decoder', False)
 
     # No steering layers since we're not using SAE boosting
     pipeline_config.classify.boosting.steering_layers = []
@@ -139,6 +143,8 @@ def run_parameter_sweep(
     layer_combinations: List[List[int]],
     kappa_values: List[float],
     topk_values: List[int],
+    gate_constructions: List[str] = ["combined"],
+    shuffle_decoder_options: List[bool] = [False],
     output_base_dir: Optional[Path] = None,
     subset_size: Optional[int] = None,
     random_seed: int = 42
@@ -151,6 +157,8 @@ def run_parameter_sweep(
         layer_combinations: List of layer combinations to test (e.g., [[4], [9], [4,9]])
         kappa_values: List of kappa values to test (gating strength)
         topk_values: List of top-k features per patch to test
+        gate_constructions: List of gate construction types to test
+        shuffle_decoder_options: List of shuffle decoder options (True/False)
         output_base_dir: Base directory for output (auto-generated if None)
         subset_size: Number of images per dataset (None for all)
         random_seed: Random seed for reproducibility
@@ -170,6 +178,8 @@ def run_parameter_sweep(
         'layer_combinations': layer_combinations,
         'kappa_values': kappa_values,
         'topk_values': topk_values,
+        'gate_constructions': gate_constructions,
+        'shuffle_decoder_options': shuffle_decoder_options,
         'subset_size': subset_size,
         'random_seed': random_seed,
         'timestamp': datetime.now().isoformat()
@@ -196,30 +206,37 @@ def run_parameter_sweep(
 
         # First run vanilla TransLRP (baseline)
         print("\nRunning vanilla TransLRP (baseline)...")
-        exp_params = {'use_feature_gradients': False, 'feature_gradient_layers': [], 'kappa': 0, 'topk_features': 0}
-        
+        exp_params = {
+            'use_feature_gradients': False,
+            'feature_gradient_layers': [],
+            'kappa': 0,
+            'topk_features': 0,
+            'gate_construction': 'combined',
+            'shuffle_decoder': False
+        }
+
         exp_dir = output_base_dir / dataset_name / "vanilla"
         result = run_single_experiment(
-        dataset_name=dataset_name,
-        source_path=source_path,
-        experiment_params=exp_params,
-        output_dir=exp_dir,
-        subset_size=subset_size,
-        random_seed=random_seed
+            dataset_name=dataset_name,
+            source_path=source_path,
+            experiment_params=exp_params,
+            output_dir=exp_dir,
+            subset_size=subset_size,
+            random_seed=random_seed
         )
-        
+
         # Don't keep full results in memory - just save minimal info
         summary = {
-        'name': 'vanilla',
-        'status': result.get('status'),
-        'n_images': result.get('n_images', 0),
-        'error': result.get('error') if result.get('status') == 'error' else None
+            'name': 'vanilla',
+            'status': result.get('status'),
+            'n_images': result.get('n_images', 0),
+            'error': result.get('error') if result.get('status') == 'error' else None
         }
         dataset_results.append(summary)
-        
+
         # Explicitly delete the full result to free memory
         del result
-        
+
         # Force garbage collection
         import gc
         gc.collect()
@@ -227,21 +244,26 @@ def run_parameter_sweep(
 
         if torch.cuda.is_available():
             print(
-            f"GPU Memory after vanilla: {torch.cuda.memory_allocated()/1024**2:.1f} MB allocated, "
-            f"{torch.cuda.memory_reserved()/1024**2:.1f} MB reserved"
+                f"GPU Memory after vanilla: {torch.cuda.memory_allocated()/1024**2:.1f} MB allocated, "
+                f"{torch.cuda.memory_reserved()/1024**2:.1f} MB reserved"
             )
 
         # Run feature gradient gating experiments
-        for layers, kappa, topk in product(layer_combinations, kappa_values, topk_values):
+        for layers, kappa, topk, gate_construction, shuffle_decoder in product(
+            layer_combinations, kappa_values, topk_values, gate_constructions, shuffle_decoder_options
+        ):
             layers_str = '_'.join(map(str, layers))
-            exp_name = f"layers_{layers_str}_kappa_{kappa}_topk_{topk}"
+            shuffle_suffix = "_shuffled" if shuffle_decoder else ""
+            exp_name = f"layers_{layers_str}_kappa_{kappa}_topk_{topk}_{gate_construction}{shuffle_suffix}"
             print(f"\nRunning {exp_name}...")
 
             exp_params = {
                 'use_feature_gradients': True,
                 'feature_gradient_layers': layers,
                 'kappa': kappa,
-                'topk_features': topk
+                'topk_features': topk,
+                'gate_construction': gate_construction,
+                'shuffle_decoder': shuffle_decoder
             }
 
             exp_dir = output_base_dir / dataset_name / exp_name
@@ -297,14 +319,13 @@ def main():
     """
     # Define datasets to test
     datasets = [
-        # ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
-        # ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
+        ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
+        ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
         ("covidquex", Path("./data/covidquex/data/lung/")),
     ]
 
     # Define parameter grid
     layer_combinations = [
-        [1],
         [2],
         [3],
         [4],
@@ -314,14 +335,20 @@ def main():
         [8],
         [9],
         [10],
-        [1, 2, 3],  # Multiple early layers
+        [1, 2, 3],
         [4, 5, 6],
-        [7, 8, 9],  # Multiple late layers
-        # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        [7, 8, 9],
+        [8, 9, 10],
     ]
 
-    kappa_values = [10.0, 30.0]  # Gating strength
-    topk_values = [3, 10]  # Top-k features per patch
+    kappa_values = [10.0, 20., 50.]  # Gating strength
+    topk_values = [1, 4, 16, 64, 128, None]  # Top-k features per patch
+
+    # Gate construction types for interaction ablation
+    gate_constructions = ["gradient_only", "combined", "activation_only"]
+
+    # Decoder shuffling options for semantic alignment ablation
+    shuffle_decoder_options = [False]  # Test both normal and shuffled - WARNING: works only with combined
 
     # Run sweep
     results = run_parameter_sweep(
@@ -329,7 +356,9 @@ def main():
         layer_combinations=layer_combinations,
         kappa_values=kappa_values,
         topk_values=topk_values,
-        subset_size=5,  # Use 100 images for quick testing, set to None for full dataset
+        gate_constructions=gate_constructions,
+        shuffle_decoder_options=shuffle_decoder_options,
+        subset_size=None,  # Use 100 images for quick testing, set to None for full dataset
         random_seed=42
     )
 

@@ -237,34 +237,63 @@ def download_covidquex(data_dir: Path, models_dir: Path) -> None:
 def download_sae_checkpoints(data_dir: Path) -> None:
     """Download SAE checkpoints from HuggingFace for all layers."""
     print("\n" + "=" * 50)
-    print("Downloading SAE Checkpoints from HuggingFace")
+    print("Downloading CLIP Vanilla SAE Checkpoints from HuggingFace")
     print("=" * 50)
     
-    # Map each layer to its specific repository
+    # Previous waterbirds SAE mapping (commented out)
+    # layer_repo_map = {
+    #     1: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_1-hook_resid_post-64-82",
+    #     2: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_2-hook_resid_post-64-80",
+    #     3: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_3-hook_resid_post-64-80",
+    #     4: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_4-hook_resid_post-64-80",
+    #     5: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_5-hook_resid_post-64-81",
+    #     6: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_6-hook_resid_post-64-81",
+    #     7: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_7-hook_resid_post-64-83",
+    #     8: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_8-hook_resid_post-64-84",
+    #     9: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_9-hook_resid_post-64-86",
+    #     10: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_10-hook_resid_post-64-85"
+    # }
+    
+    # CLIP Vanilla SAEs (resid_post only) - all patches
     layer_repo_map = {
-        1: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_1-hook_resid_post-64-82",
-        2: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_2-hook_resid_post-64-80",
-        3: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_3-hook_resid_post-64-80",
-        4: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_4-hook_resid_post-64-80",
-        5: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_5-hook_resid_post-64-81",
-        6: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_6-hook_resid_post-64-81",
-        7: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_7-hook_resid_post-64-83",
-        8: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_8-hook_resid_post-64-84",
-        9: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_9-hook_resid_post-64-86",
-        10: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_10-hook_resid_post-64-85"
+        0: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-0-hook_resid_post-l1-1e-05",
+        1: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-1-hook_resid_post-l1-1e-05",
+        2: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-2-hook_resid_post-l1-5e-05",
+        3: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-3-hook_resid_post-l1-1e-05",
+        4: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-4-hook_resid_post-l1-1e-05",
+        5: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-5-hook_resid_post-l1-1e-05",
+        6: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-6-hook_resid_post-l1-1e-05",
+        7: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-7-hook_resid_post-l1-1e-05",
+        8: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-8-hook_resid_post-l1-1e-05",
+        9: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-9-hook_resid_post-l1-1e-05",
+        10: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-10-hook_resid_post-l1-1e-05",
+        11: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-11-hook_resid_post-l1-1e-05"
     }
     
-    sae_base_dir = data_dir / "sae_waterbirds_clip_b32"
+    sae_base_dir = data_dir / "sae_clip_vanilla_b32"
     successful_layers = []
     
     for layer_num, repo_id in layer_repo_map.items():
         print(f"Downloading Layer {layer_num} SAE checkpoint...")
         
         try:
-            downloaded_path = hf_hub_download(repo_id=repo_id, filename="weights.pt", cache_dir="./hf_cache")
+            # List files in the repository to find the .pt file
+            from huggingface_hub import list_repo_files
+            files = list_repo_files(repo_id)
+            pt_files = [f for f in files if f.endswith(".pt")]
+            
+            if not pt_files:
+                print(f"✗ Layer {layer_num} failed: No .pt file found in repository")
+                continue
+            
+            # Download the .pt file
+            pt_filename = pt_files[0]
+            
+            downloaded_path = hf_hub_download(repo_id=repo_id, filename=pt_filename, cache_dir="./hf_cache")
             target_dir = sae_base_dir / f"layer_{layer_num}"
             target_dir.mkdir(parents=True, exist_ok=True)
             
+            # Save as weights.pt for compatibility
             shutil.copy(downloaded_path, target_dir / "weights.pt")
             
             # Download config if available
@@ -280,7 +309,7 @@ def download_sae_checkpoints(data_dir: Path) -> None:
         except Exception as e:
             print(f"✗ Layer {layer_num} failed: {str(e)}")
     
-    print(f"\nDownloaded {len(successful_layers)}/10 SAE layers to {sae_base_dir}")
+    print(f"\nDownloaded {len(successful_layers)}/12 SAE layers to {sae_base_dir}")
 
 
 # =============================================================================
