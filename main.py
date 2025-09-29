@@ -12,7 +12,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 import config
-from pipeline import run_unified_pipeline
+from dataset_config import get_dataset_config
+from pipeline import (load_model_for_dataset, load_steering_resources, run_unified_pipeline)
 
 
 def run_single_experiment(
@@ -20,26 +21,32 @@ def run_single_experiment(
     source_path: Path,
     experiment_params: Dict[str, Any],
     output_dir: Path,
+    model: torch.nn.Module,
+    steering_resources: Dict[int, Dict[str, Any]],
+    clip_classifier: Optional[Any] = None,
     subset_size: Optional[int] = None,
     random_seed: int = 42
 ) -> Dict[str, Any]:
     """
     Run a single experiment with specified parameters.
-    
+
     Args:
         dataset_name: Name of the dataset
         source_path: Path to dataset source
         experiment_params: Dictionary containing:
             - use_feature_gradients: bool
-            - feature_gradient_layers: List[int] 
+            - feature_gradient_layers: List[int]
             - kappa: float (gating strength parameter)
             - topk_features: int (top-k features per patch)
             - gate_construction: str ("activation_only", "gradient_only", or "combined")
             - shuffle_decoder: bool (whether to shuffle decoder columns)
         output_dir: Where to save results
+        model: Pre-loaded model to use
+        steering_resources: Pre-loaded SAE resources
+        clip_classifier: Pre-loaded CLIP classifier (None for non-CLIP models)
         subset_size: Number of images to process (None for all)
         random_seed: Random seed for reproducibility
-    
+
     Returns:
         Dictionary with results and metadata
     """
@@ -97,7 +104,10 @@ def run_single_experiment(
             prepared_data_path=Path(f"./data/{dataset_name}_unified/"),
             force_prepare=False,
             subset_size=subset_size,
-            random_seed=random_seed
+            random_seed=random_seed,
+            model=model,
+            steering_resources=steering_resources,
+            clip_classifier=clip_classifier
         )
 
         # Save results with SaCo data
@@ -202,6 +212,31 @@ def run_parameter_sweep(
                 f"{torch.cuda.memory_reserved()/1024**2:.1f} MB reserved"
             )
 
+        # Load model and SAE resources once for this dataset
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dataset_config = get_dataset_config(dataset_name)
+
+        # Create temporary pipeline config to get CLIP settings
+        temp_config = config.PipelineConfig()
+        temp_config.file.set_dataset(dataset_name)
+        if dataset_name in ["waterbirds"]:
+            temp_config.classify.use_clip = True
+            temp_config.classify.clip_model_name = "open-clip:laion/CLIP-ViT-B-32-DataComp.XL-s13B-b90K"
+            if dataset_name == "waterbirds":
+                temp_config.classify.clip_text_prompts = ["a photo of a terrestrial bird", "a photo of an aquatic bird"]
+
+        print(f"Loading model for {dataset_name}...")
+        model, clip_classifier = load_model_for_dataset(dataset_config, device, temp_config)
+        model = model.to(device)  # Ensure model is on correct device
+
+        # Determine all layers that might need SAE resources
+        all_layers_needed = set()
+        for layers in layer_combinations:
+            all_layers_needed.update(layers)
+
+        print(f"Loading SAE resources for layers: {sorted(all_layers_needed)}")
+        steering_resources = load_steering_resources(list(all_layers_needed), dataset_name=dataset_name)
+
         dataset_results = []
 
         # First run vanilla TransLRP (baseline)
@@ -221,6 +256,9 @@ def run_parameter_sweep(
             source_path=source_path,
             experiment_params=exp_params,
             output_dir=exp_dir,
+            model=model,
+            steering_resources=steering_resources,
+            clip_classifier=clip_classifier,
             subset_size=subset_size,
             random_seed=random_seed
         )
@@ -272,6 +310,9 @@ def run_parameter_sweep(
                 source_path=source_path,
                 experiment_params=exp_params,
                 output_dir=exp_dir,
+                model=model,
+                steering_resources=steering_resources,
+                clip_classifier=clip_classifier,
                 subset_size=subset_size,
                 random_seed=random_seed
             )
@@ -301,6 +342,50 @@ def run_parameter_sweep(
                 )
 
         all_results[dataset_name] = dataset_results
+
+        # Clean up model and SAE resources after dataset
+        print(f"Cleaning up model and SAE resources for {dataset_name}...")
+
+        # Clean up model
+        if hasattr(model, 'to'):
+            model.to("cpu")
+        del model
+
+        # Clean up CLIP classifier if it exists
+        if clip_classifier is not None:
+            if hasattr(clip_classifier, 'text_model') and clip_classifier.text_model is not None:
+                if hasattr(clip_classifier.text_model, 'to'):
+                    clip_classifier.text_model.to("cpu")
+                del clip_classifier.text_model
+            del clip_classifier
+
+        # Clean up SAE resources
+        for layer_idx, resources in steering_resources.items():
+            if 'sae' in resources:
+                if hasattr(resources['sae'], 'to'):
+                    resources['sae'].to("cpu")
+                del resources['sae']
+        del steering_resources
+
+        # Also clean up dataset config to free any cached data
+        del dataset_config
+        del temp_config
+
+        # Force garbage collection multiple times
+        import gc
+        for _ in range(5):
+            gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # Force another round after sync
+            for _ in range(2):
+                gc.collect()
+            torch.cuda.empty_cache()
+            print(
+                f"GPU Memory after cleanup: {torch.cuda.memory_allocated()/1024**2:.1f} MB allocated, "
+                f"{torch.cuda.memory_reserved()/1024**2:.1f} MB reserved"
+            )
 
     # Save summary of all results
     with open(output_base_dir / 'sweep_results.json', 'w') as f:
@@ -335,14 +420,19 @@ def main():
         [8],
         [9],
         [10],
-        [1, 2, 3],
-        [4, 5, 6],
-        [7, 8, 9],
-        [8, 9, 10],
     ]
 
-    kappa_values = [10., 20., 30.]  # Gating strength
-    topk_values = [1, 4, 16, 64, None]  # Top-k features per patch
+    # covidquex
+    # [3, 4, 5]
+
+    # hyprkvasir
+    # [4, 6]
+
+    # waterbirds
+    # [6, 7, 8, 9]
+
+    kappa_values = [0.5, 1.]  # Gating strength
+    topk_values = [None]  # Top-k features per patch
 
     # Gate construction types for interaction ablation
     gate_constructions = ["combined", "gradient_only", "activation_only"]
@@ -358,7 +448,7 @@ def main():
         topk_values=topk_values,
         gate_constructions=gate_constructions,
         shuffle_decoder_options=shuffle_decoder_options,
-        subset_size=None,  # Use 100 images for quick testing, set to None for full dataset
+        subset_size=500,  # Use 100 images for quick testing, set to None for full dataset
         random_seed=42
     )
 
@@ -377,3 +467,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # run_best_performers(subset_size=500)

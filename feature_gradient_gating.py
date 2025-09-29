@@ -109,13 +109,19 @@ def compute_feature_gradient_gate(
         raise ValueError(f"Unknown gate_construction type: {gate_construction}")
 
     # Normalize across patches (z-score normalization)
-    s_mean = s_t.mean()
-    s_std = s_t.std() + 1e-6
-    s_norm = (s_t - s_mean) / s_std
+    s_median = s_t.median()
+    s_mad = (s_t - s_median).abs().median()
 
-    # Map to multiplier using exponential with clamping
-    gate = torch.clamp(torch.exp(kappa * s_norm), clamp_min,
-                       clamp_max).detach()  # Detach to prevent gradient accumulation
+    s_norm = (s_t - s_median) / (1.4826 * s_mad)
+    # Map tanh output from [-1, 1] to [0.1, 10]
+    gate_min = 0.1
+    gate_max = 10.0
+    gate_center = (gate_min + gate_max) / 2  # 5.05
+    gate_range = (gate_max - gate_min) / 2  # 4.95
+
+    temperature = kappa
+    gate = gate_center + gate_range * torch.tanh(s_norm * temperature)
+    gate = gate.detach()
 
     # Collect debug information
     debug_info = {}

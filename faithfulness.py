@@ -441,6 +441,77 @@ def handle_array_values(arr):
     return arr
 
 
+def create_patch_mask(patch_indices, image_shape, n_patches, patch_size):
+    """
+    Create binary mask for specified patches.
+
+    Args:
+        patch_indices: Indices of patches to mask
+        image_shape: Shape of the image (C, H, W)
+        n_patches: Total number of patches
+        patch_size: Size of each patch in pixels
+
+    Returns:
+        Binary mask with True for patches to perturb
+    """
+    C, H, W = image_shape
+    grid_size = int(np.sqrt(n_patches))
+
+    # Initialize mask as False (don't perturb)
+    mask = np.zeros(image_shape, dtype=bool)
+
+    for patch_idx in patch_indices:
+        if patch_idx >= n_patches:
+            continue
+
+        # Convert patch index to grid coordinates
+        row = patch_idx // grid_size
+        col = patch_idx % grid_size
+
+        # Calculate pixel boundaries for this patch
+        start_row = row * patch_size
+        end_row = min(start_row + patch_size, H)
+        start_col = col * patch_size
+        end_col = min(start_col + patch_size, W)
+
+        # Set mask to True for all channels in this patch
+        mask[:, start_row:end_row, start_col:end_col] = True
+
+    return mask
+
+
+def apply_baseline_perturbation(image, mask, perturb_baseline):
+    """
+    Apply baseline perturbation to image using mask.
+
+    Args:
+        image: Image array to perturb
+        mask: Binary mask indicating where to perturb
+        perturb_baseline: Type of baseline ("black", "white", "mean", "uniform", or numeric)
+
+    Returns:
+        Perturbed image
+    """
+    arr = image.copy()
+
+    # Get baseline value
+    if perturb_baseline == "black":
+        baseline_value = arr.min()
+    elif perturb_baseline == "white":
+        baseline_value = arr.max()
+    elif perturb_baseline == "mean":
+        baseline_value = arr.mean()
+    elif perturb_baseline == "uniform":
+        baseline_value = np.random.uniform(0.0, 1.0, size=arr.shape)
+    elif isinstance(perturb_baseline, (int, float)):
+        baseline_value = float(perturb_baseline)
+    else:
+        baseline_value = 0.0  # Default fallback
+
+    # Apply perturbation using np.where
+    return np.where(mask, baseline_value, arr)
+
+
 def evaluate_and_report_faithfulness(
     config: PipelineConfig,
     model,
@@ -586,33 +657,6 @@ class PatchPixelFlipping:
         self.features_in_step = features_in_step
         self.perturb_baseline = perturb_baseline
 
-    def create_patch_mask(self, patch_indices, image_shape):
-        """Create binary mask for specified patches."""
-        C, H, W = image_shape
-        grid_size = int(np.sqrt(self.n_patches))
-
-        # Initialize mask as False (don't perturb)
-        mask = np.zeros(image_shape, dtype=bool)
-
-        for patch_idx in patch_indices:
-            if patch_idx >= self.n_patches:
-                continue
-
-            # Convert patch index to grid coordinates
-            row = patch_idx // grid_size
-            col = patch_idx % grid_size
-
-            # Calculate pixel boundaries for this patch
-            start_row = row * self.patch_size
-            end_row = min(start_row + self.patch_size, H)
-            start_col = col * self.patch_size
-            end_col = min(start_col + self.patch_size, W)
-
-            # Set mask to True for all channels in this patch
-            mask[:, start_row:end_row, start_col:end_col] = True
-
-        return mask
-
     def __call__(
         self,
         model,
@@ -696,27 +740,14 @@ class PatchPixelFlipping:
             # Apply perturbation to each sample in the batch
             for batch_idx in range(batch_size):
                 # Create mask for patches to perturb
-                mask = self.create_patch_mask(patches_to_perturb[batch_idx], x_batch.shape[1:])
+                mask = create_patch_mask(
+                    patches_to_perturb[batch_idx], x_batch.shape[1:], self.n_patches, self.patch_size
+                )
 
-                # Standalone baseline replacement
-                arr = x_perturbed[batch_idx]
-
-                # Get baseline value (black=min, white=max, etc.)
-                if self.perturb_baseline == "black":
-                    baseline_value = arr.min()
-                elif self.perturb_baseline == "white":
-                    baseline_value = arr.max()
-                elif self.perturb_baseline == "mean":
-                    baseline_value = arr.mean()
-                elif self.perturb_baseline == "uniform":
-                    baseline_value = np.random.uniform(0.0, 1.0, size=arr.shape)
-                elif isinstance(self.perturb_baseline, (int, float)):
-                    baseline_value = float(self.perturb_baseline)
-                else:
-                    baseline_value = 0.0  # Default fallback
-
-                # Apply perturbation using np.where
-                x_perturbed[batch_idx] = np.where(mask, baseline_value, arr)
+                # Apply baseline perturbation
+                x_perturbed[batch_idx] = apply_baseline_perturbation(
+                    x_perturbed[batch_idx], mask, self.perturb_baseline
+                )
 
             # Get model predictions on perturbed input
             y_pred = _predict_torch_model(model, x_perturbed, y_batch, device)
@@ -817,41 +848,17 @@ class FaithfulnessCorrelation:
         # Compute Spearman correlation row-wise
         correlation = spearmanr(a, b, axis=1)[0]
 
-        # Handle edge case where batch size is 1
-        if correlation.shape:
+        # Handle edge cases
+        if np.isscalar(correlation) or not hasattr(correlation, 'shape'):
+            # Single sample case or constant input (NaN)
+            return np.array([correlation])
+        elif correlation.shape:
             # Extract diagonal elements (correlations between corresponding samples)
             correlation = correlation[:batch_size, batch_size:]
             return np.diag(correlation)
         else:
-            # Single sample case
+            # Fallback
             return np.array([correlation])
-
-    def create_patch_mask(self, patch_indices, image_shape):
-        """Create binary mask for specified patches."""
-        C, H, W = image_shape
-        grid_size = int(np.sqrt(self.n_patches))
-
-        # Initialize mask as False (don't perturb)
-        mask = np.zeros(image_shape, dtype=bool)
-
-        for patch_idx in patch_indices:
-            if patch_idx >= self.n_patches:
-                continue
-
-            # Convert patch index to grid coordinates
-            row = patch_idx // grid_size
-            col = patch_idx % grid_size
-
-            # Calculate pixel boundaries for this patch
-            start_row = row * self.patch_size
-            end_row = min(start_row + self.patch_size, H)
-            start_col = col * self.patch_size
-            end_col = min(start_col + self.patch_size, W)
-
-            # Set mask to True for all channels in this patch
-            mask[:, start_row:end_row, start_col:end_col] = True
-
-        return mask
 
     def __call__(
         self,
@@ -924,27 +931,14 @@ class FaithfulnessCorrelation:
             x_perturbed = x_batch.copy()
             for batch_idx in range(batch_size):
                 # Create mask for selected patches
-                mask = self.create_patch_mask(patch_choices[batch_idx], x_batch.shape[1:])
+                mask = create_patch_mask(
+                    patch_choices[batch_idx], x_batch.shape[1:], self.n_patches, self.patch_size
+                )
 
-                # Standalone baseline replacement
-                arr = x_perturbed[batch_idx]
-
-                # Get baseline value (black=min, white=max, etc.)
-                if self.perturb_baseline == "black":
-                    baseline_value = arr.min()
-                elif self.perturb_baseline == "white":
-                    baseline_value = arr.max()
-                elif self.perturb_baseline == "mean":
-                    baseline_value = arr.mean()
-                elif self.perturb_baseline == "uniform":
-                    baseline_value = np.random.uniform(0.0, 1.0, size=arr.shape)
-                elif isinstance(self.perturb_baseline, (int, float)):
-                    baseline_value = float(self.perturb_baseline)
-                else:
-                    baseline_value = 0.0  # Default fallback
-
-                # Apply perturbation using np.where
-                x_perturbed[batch_idx] = np.where(mask, baseline_value, arr)
+                # Apply baseline perturbation
+                x_perturbed[batch_idx] = apply_baseline_perturbation(
+                    x_perturbed[batch_idx], mask, self.perturb_baseline
+                )
 
             # Get predictions on perturbed images
             y_pred_perturb = _predict_torch_model(model, x_perturbed, y_batch, device)

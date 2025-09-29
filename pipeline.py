@@ -81,21 +81,20 @@ def load_steering_resources(layers: List[int], dataset_name: Optional[str] = Non
 
 def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, config: Optional[PipelineConfig] = None):
     """
-    Load the appropriate model for a given dataset configuration.
-    
+    Load the appropriate model and CLIP classifier for a given dataset configuration.
+
     Args:
         dataset_config: Configuration for the dataset
         device: Device to load the model on
         config: Optional pipeline config for CLIP settings
-        
+
     Returns:
-        Loaded model with appropriate head size (and processor if CLIP)
+        Tuple of (model, clip_classifier) where clip_classifier is None for non-CLIP models
     """
     # Check if we should use CLIP for this dataset
     use_clip = (config and config.classify.use_clip) or dataset_config.name == "waterbirds"
 
     if use_clip:
-        from transformers import CLIPProcessor
         from vit_prisma.models.model_loader import load_hooked_model
 
         print(f"Loading CLIP as HookedViT for {dataset_config.name}")
@@ -109,19 +108,20 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, 
         model = model.to(device)
         model.eval()
 
-        # Also load the processor for text encoding
-        # For OpenCLIP models, use vit_prisma's transforms
-        if "open-clip:" in clip_model_name:
-            from vit_prisma.transforms import get_clip_val_transforms
-            processor = get_clip_val_transforms()
-            print("Using vit_prisma transforms for OpenCLIP model")
-        else:
-            processor_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch32"
-            processor = CLIPProcessor.from_pretrained(processor_name)
-
         print(f"CLIP loaded as HookedViT")
-        # Return tuple for CLIP (model, processor)
-        return (model, processor)
+
+        # Create CLIP classifier for this model
+        from clip_classifier import create_clip_classifier_for_waterbirds
+        print("Creating CLIP classifier...")
+        clip_model_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch32"
+        clip_classifier = create_clip_classifier_for_waterbirds(
+            vision_model=model,
+            device=device,
+            clip_model_name=clip_model_name,
+            custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
+        )
+
+        return model, clip_classifier
 
     # Original ViT loading code
     from vit_prisma.models.base_vit import HookedSAEViT
@@ -164,7 +164,7 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, 
     model.load_state_dict(converted_weights)
 
     model.to(device).eval()
-    return model
+    return model, None  # No CLIP classifier for regular ViT models
 
 def prepare_dataset_if_needed(
     dataset_name: str, source_path: Path, prepared_path: Path, force_prepare: bool = False, **converter_kwargs
@@ -347,6 +347,9 @@ def run_unified_pipeline(
     config: PipelineConfig,
     dataset_name: str,
     source_data_path: Path,
+    model: torch.nn.Module,
+    steering_resources: Dict[int, Dict[str, Any]],
+    clip_classifier: Optional[Any] = None,
     prepared_data_path: Optional[Path] = None,
     device: Optional[torch.device] = None,
     force_prepare: bool = False,
@@ -355,17 +358,20 @@ def run_unified_pipeline(
 ) -> Tuple[List[ClassificationResult], Dict[str, Any]]:
     """
     Run the unified pipeline for any supported dataset.
-    
+
     Args:
         config: Pipeline configuration
         dataset_name: Name of the dataset ('covidquex' or 'hyperkvasir')
         source_data_path: Path to the source dataset
+        model: Pre-loaded model
+        steering_resources: Pre-loaded SAE resources
+        clip_classifier: Pre-loaded CLIP classifier (None for non-CLIP models)
         prepared_data_path: Path for prepared data (default: ./data/{dataset_name}_unified)
         device: Device to use
         force_prepare: Force re-preparation of dataset
         subset_size: If specified, only use this many random images
         random_seed: Random seed for reproducible subset selection
-        
+
     Returns:
         List of classification results
     """
@@ -410,28 +416,9 @@ def run_unified_pipeline(
         for class_name, count in split_stats['class_distribution'].items():
             print(f"  {class_name}: {count}")
 
-    # Load model
-    print(f"\nLoading model for {dataset_name}")
-    model_result = load_model_for_dataset(dataset_config, device, config)
-
-    # Handle CLIP model (returns tuple) vs regular model
-    if isinstance(model_result, tuple):
-        model, processor = model_result
-        print("CLIP model loaded with processor")
-    else:
-        model = model_result
-        processor = None
-
-    # Load steering resources if needed - for BOTH steering and feature gradient layers
-    steering_layers = config.classify.boosting.steering_layers
-    feature_gradient_layers = config.classify.boosting.feature_gradient_layers if config.classify.boosting.enable_feature_gradients else []
-
-    # Combine both layer sets to load all necessary SAEs
-    all_layers_needing_sae = list(set(steering_layers) | set(feature_gradient_layers))
-    steering_resources = load_steering_resources(all_layers_needing_sae, dataset_name=dataset_name)
-    print(
-        f"Steering resources loaded for {dataset_name} layers: {all_layers_needing_sae} (steering: {steering_layers}, gradients: {feature_gradient_layers})"
-    )
+    # Use pre-loaded model and steering resources
+    print(f"\nUsing pre-loaded model for {dataset_name}")
+    print(f"Using pre-loaded SAE resources for {dataset_name}")
 
     # Process images from the specified split (mode)
     split_to_use = config.file.current_mode if config.file.current_mode in ['train', 'val', 'test', 'dev'] else 'test'
@@ -452,17 +439,9 @@ def run_unified_pipeline(
     else:
         print(f"\nProcessing {len(image_data)} {split_to_use} images")
 
-    # Create CLIP classifier once if using CLIP (not per image!)
-    clip_classifier = None
-    if processor is not None:
-        from clip_classifier import create_clip_classifier_for_waterbirds
-        print("Creating CLIP classifier (once for all images)...")
-        clip_classifier = create_clip_classifier_for_waterbirds(
-            vision_model=model,
-            processor=processor,
-            device=device,
-            custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
-        )
+    # Use pre-loaded CLIP classifier (created once per dataset)
+    if clip_classifier is not None:
+        print("Using pre-loaded CLIP classifier")
 
     # Classify and explain
     results = []
@@ -548,12 +527,5 @@ def run_unified_pipeline(
             print(f"  {class_name}: {stats['mean']:.4f} (std={stats['std']:.4f}, n={stats['count']})")
 
     print("\nPipeline complete!")
-
-    #TODO: Why is this not garbage collected?
-    if 'model_for_analysis' in locals():
-        if hasattr(model_for_analysis, 'to'):
-            model_for_analysis.to("cpu")
-        del model_for_analysis
-
 
     return results, saco_results

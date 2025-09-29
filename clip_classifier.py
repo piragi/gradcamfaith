@@ -159,22 +159,31 @@ class CLIPClassifier:
 
 def create_clip_classifier_for_waterbirds(
     vision_model: Any,
-    processor: Any,
     device: torch.device,
+    clip_model_name: str = "open-clip:laion/CLIP-ViT-B-32-DataComp.XL-s13B-b90K",
     custom_prompts: Optional[List[str]] = None
 ) -> CLIPClassifier:
     """
     Create a CLIP classifier specifically for Waterbirds dataset.
-    
+
     Args:
         vision_model: HookedViT vision model
-        processor: CLIP processor
         device: Device to run on
+        clip_model_name: CLIP model name to load processor for
         custom_prompts: Optional custom text prompts
-        
+
     Returns:
         Configured CLIPClassifier
     """
+    # Load processor for text encoding
+    if "open-clip:" in clip_model_name:
+        from vit_prisma.transforms import get_clip_val_transforms
+        processor = get_clip_val_transforms()
+        print("Using vit_prisma transforms for OpenCLIP model")
+    else:
+        from transformers import CLIPProcessor
+        processor = CLIPProcessor.from_pretrained(clip_model_name)
+
     # For OpenCLIP models, load the full model for text encoding
     import open_clip
 
