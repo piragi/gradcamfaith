@@ -7,21 +7,12 @@ import gc
 import json
 import logging
 import math
-from functools import lru_cache
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-import quantus
-from quantus.helpers import utils as quantus_utils
-from quantus.metrics.faithfulness.faithfulness_correlation import (
-    FaithfulnessCorrelation as QuantusFaithfulnessCorrelation,
-)
 import torch
-import torch.nn.functional as F
 from PIL import Image
 
 from config import PipelineConfig
@@ -44,507 +35,6 @@ class FaithfulnessEstimatorConfig:
         return self.estimator_fn()
 
 
-class PatchFaithfulnessCorrelation(QuantusFaithfulnessCorrelation):
-    """Faithfulness correlation that operates on patch attributions directly."""
-
-    def __init__(self, *, n_patches: int = 196, patch_size: int = 16, **kwargs):
-        super().__init__(**kwargs)
-        self.n_patches = n_patches
-        self.patch_size = patch_size
-        # Ensure we never sample more patches than available.
-        self.subset_size = min(self.subset_size, self.n_patches)
-
-    def _a_batch_to_patch_space(self, a_batch: np.ndarray) -> np.ndarray:
-        """Convert (N, C, 224, 224) attributions to (N, n_patches)."""
-        batch_size = a_batch.shape[0]
-        if a_batch.ndim == 2 and a_batch.shape[1] == self.n_patches:
-            return a_batch
-
-        if a_batch.ndim == 3 and a_batch.shape[1] * a_batch.shape[2] == self.n_patches:
-            return a_batch.reshape(batch_size, self.n_patches)
-
-        if a_batch.ndim == 4:
-            spatial = a_batch[:, 0]
-        else:
-            spatial = a_batch
-
-        grid_size = int(np.sqrt(self.n_patches))
-        patch_attributions = spatial[:, :: self.patch_size, :: self.patch_size]
-        return patch_attributions.reshape(batch_size, self.n_patches)
-
-    def __call__(
-        self,
-        model,
-        x_batch: np.ndarray,
-        y_batch: np.ndarray,
-        a_batch: Optional[np.ndarray] = None,
-        batch_size: int = 256,
-        device: Optional[str] = None,
-        softmax: bool = False,
-        **kwargs,
-    ) -> List[float]:
-        if a_batch is None:
-            raise ValueError("Precomputed attributions are required for PatchFaithfulnessCorrelation.")
-
-        if not hasattr(model, "predict") or not hasattr(model, "shape_input"):
-            model = quantus_utils.get_wrapped_model(
-                model=model,
-                channel_first=True,
-                softmax=softmax,
-                device=device,
-                model_predict_kwargs=None,
-            )
-
-        x_batch = np.asarray(x_batch)
-        y_batch = np.asarray(y_batch)
-        a_batch = np.asarray(a_batch)
-
-        scores: List[float] = []
-
-        for start in range(0, len(x_batch), batch_size):
-            end = min(start + batch_size, len(x_batch))
-            xb = x_batch[start:end]
-            yb = y_batch[start:end]
-            ab = a_batch[start:end]
-
-            ab = self._a_batch_to_patch_space(ab)
-
-            if self.normalise:
-                ab = self.normalise_func(ab)
-            if self.abs:
-                ab = np.abs(ab)
-
-            scores.extend(
-                self.evaluate_batch(
-                    model=model,
-                    x_batch=xb,
-                    y_batch=yb,
-                    a_batch=ab,
-                )
-            )
-
-        return scores
-
-    def evaluate_batch(
-        self,
-        model,
-        x_batch: np.ndarray,
-        y_batch: np.ndarray,
-        a_batch: np.ndarray,
-        **kwargs,
-    ) -> List[float]:
-        if x_batch.shape != a_batch.shape:
-            a_batch = self._a_batch_to_patch_space(a_batch)
-
-        batch_size = x_batch.shape[0]
-        a_batch = a_batch.reshape(batch_size, self.n_patches)
-
-        x_shape = x_batch.shape
-        x_flat = x_batch.reshape(batch_size, -1)
-
-        x_input = model.shape_input(x_batch, x_shape, channel_first=True, batched=True)
-        y_pred = model.predict(x_input)[np.arange(batch_size), y_batch]
-
-        patch_to_pixels = _get_patch_to_pixels_mapping(
-            height=x_shape[2],
-            width=x_shape[3],
-            patch_size=self.patch_size,
-            channels=x_shape[1],
-            n_patches=self.n_patches,
-        )
-
-        pixels_per_patch = len(patch_to_pixels[0])
-        max_indices = self.subset_size * pixels_per_patch
-        pred_deltas = []
-        att_sums = []
-
-        for _ in range(self.nr_runs):
-            patch_choices = np.stack(
-                [
-                    np.random.choice(self.n_patches, self.subset_size, replace=False)
-                    for _ in range(batch_size)
-                ],
-                axis=0,
-            )
-
-            pixel_indices = np.full((batch_size, max_indices), np.nan, dtype=float)
-            for idx in range(batch_size):
-                selected = patch_choices[idx]
-                pixels = np.concatenate([patch_to_pixels[int(p)] for p in selected])
-                pixel_indices[idx, : len(pixels)] = pixels
-
-            x_perturbed_flat = self.perturb_func(
-                arr=x_flat,
-                indices=pixel_indices,
-            )
-            x_perturbed = x_perturbed_flat.reshape(x_shape)
-
-            x_input = model.shape_input(x_perturbed, x_shape, channel_first=True, batched=True)
-            y_pred_perturb = model.predict(x_input)[np.arange(batch_size), y_batch]
-            pred_deltas.append(y_pred - y_pred_perturb)
-
-            att_sums.append(a_batch[np.arange(batch_size)[:, None], patch_choices].sum(axis=-1))
-
-        pred_deltas = np.stack(pred_deltas, axis=1)
-        att_sums = np.stack(att_sums, axis=1)
-
-        similarity = self.similarity_func(a=att_sums, b=pred_deltas, batched=True)
-        return similarity.tolist()
-
-
-def faithfulness_correlation(subset_size, nr_runs, n_patches):
-    patch_size = 32 if n_patches == 49 else 16
-    return PatchFaithfulnessCorrelation(
-        perturb_func=batch_patch_level_perturbation,
-        perturb_baseline="black",
-        perturb_func_kwargs={"patch_size": patch_size},
-        similarity_func=quantus.similarity_func.correlation_spearman,
-        subset_size=subset_size,
-        return_aggregate=False,
-        normalise=False,
-        nr_runs=nr_runs,
-        n_patches=n_patches,
-        patch_size=patch_size,
-    )
-
-
-class PatchLevelPixelFlipping(quantus.PixelFlipping):
-    """
-    Custom PixelFlipping that works directly with patch attributions.
-    Avoids expensive sorting of 150k duplicate pixel values by sorting patches directly.
-    
-    Inherits all quantus infrastructure while optimizing for patch-based models.
-    """
-
-    def __init__(
-        self,
-        features_in_step: int = 49,
-        patch_size: int = 16,
-        perturb_baseline: str = "black",
-        n_patches: int = 196,
-        **kwargs
-    ):
-        # Initialize parent with perturbation function
-        super().__init__(
-            features_in_step=features_in_step,
-            perturb_func=patch_level_perturbation,
-            perturb_baseline=perturb_baseline,
-            **kwargs
-        )
-        self.patch_size = patch_size
-        self.baseline_value = perturb_baseline
-        self.n_patches = n_patches
-
-    def __call__(
-        self,
-        model,
-        x_batch: np.ndarray,
-        y_batch: np.ndarray,
-        a_batch: Optional[np.ndarray] = None,
-        batch_size: int = 256,
-        device: Optional[str] = None,
-        softmax: bool = True,
-        **kwargs,
-    ) -> List[float]:
-        if a_batch is None:
-            raise ValueError("Precomputed attributions are required for PatchLevelPixelFlipping.")
-
-        if not hasattr(model, "predict") or not hasattr(model, "shape_input"):
-            model = quantus_utils.get_wrapped_model(
-                model=model,
-                channel_first=True,
-                softmax=softmax,
-                device=device,
-                model_predict_kwargs=None,
-            )
-
-        x_batch = np.asarray(x_batch)
-        y_batch = np.asarray(y_batch)
-        a_batch = np.asarray(a_batch)
-
-        scores: List[float] = []
-        for start in range(0, len(x_batch), batch_size):
-            end = min(start + batch_size, len(x_batch))
-            xb = x_batch[start:end]
-            yb = y_batch[start:end]
-            ab = a_batch[start:end]
-
-            if self.normalise:
-                ab = self.normalise_func(ab)
-            if self.abs:
-                ab = np.abs(ab)
-
-            scores.extend(
-                self.evaluate_batch(
-                    model=model,
-                    x_batch=xb,
-                    y_batch=yb,
-                    a_batch=ab,
-                )
-            )
-
-        return scores
-
-    def evaluate_batch(self, model, x_batch: np.ndarray, y_batch: np.ndarray, a_batch: np.ndarray, **kwargs):
-        """
-        Fast patch-level PixelFlipping: Uses same sorting as standard but patch-level perturbation.
-        """
-        # Extract patch attributions (FAST!)
-        batch_size = a_batch.shape[0]
-        n_patches = self.n_patches
-        patch_size = 32 if n_patches == 49 else 16
-
-        if a_batch.ndim == 2 and a_batch.shape[1] == n_patches:
-            a_batch_patches = a_batch
-        elif a_batch.shape[-1] > n_patches:
-            a_batch_patches = self._extract_patch_attributions_exact(a_batch, n_patches)
-        else:
-            a_batch_patches = a_batch.reshape(batch_size, -1)
-
-        # Sort patches by attribution importance - THE SPEED BOOST
-        patch_indices_sorted = np.argsort(-a_batch_patches, axis=1)
-
-        # Calculate number of perturbation steps
-        n_steps = math.ceil(n_patches / self.features_in_step)
-
-        # Store predictions for each step
-        predictions = []
-        x_perturbed = x_batch.copy()
-
-        # Get patch-to-pixel mapping
-        patch_to_pixels = _get_patch_to_pixels_mapping(patch_size=patch_size, n_patches=n_patches)
-
-        for step in range(n_steps):
-            # Get patches to remove in this step
-            start_idx = step * self.features_in_step
-            end_idx = min((step + 1) * self.features_in_step, n_patches)
-
-            patches_to_remove = patch_indices_sorted[:, start_idx:end_idx]
-
-            # Apply patch-level perturbation (fast!)
-            for i in range(batch_size):
-                valid_patches = patches_to_remove[i][patches_to_remove[i] < n_patches]
-                if len(valid_patches) == 0:
-                    continue
-
-                # Get all pixel indices for this batch sample's patches
-                all_pixel_indices = np.concatenate([
-                    patch_to_pixels[patch_idx] for patch_idx in valid_patches if 0 <= patch_idx < len(patch_to_pixels)
-                ])
-
-                # Apply baseline to all pixels at once
-                x_perturbed_flat = x_perturbed[i].reshape(-1)
-                if self.baseline_value == "black":
-                    x_perturbed_flat[all_pixel_indices] = 0.0
-                elif self.baseline_value == "white":
-                    x_perturbed_flat[all_pixel_indices] = 1.0
-                elif self.baseline_value == "mean":
-                    mean_val = np.mean(x_batch[i])
-                    x_perturbed_flat[all_pixel_indices] = mean_val
-                else:
-                    try:
-                        baseline_val = float(self.baseline_value)
-                        x_perturbed_flat[all_pixel_indices] = baseline_val
-                    except:
-                        x_perturbed_flat[all_pixel_indices] = 0.0
-
-                x_perturbed[i] = x_perturbed_flat.reshape(x_batch.shape[1:])
-
-            # Predict on perturbed input
-            x_input = model.shape_input(x_perturbed, x_batch.shape, channel_first=True, batched=True)
-            y_pred_perturb = model.predict(x_input)[np.arange(batch_size), y_batch]
-            predictions.append(y_pred_perturb)
-
-        # Return in the same format as quantus PixelFlipping
-        if self.return_auc_per_sample:
-            import quantus.helpers.utils as utils
-            return utils.calculate_auc(np.stack(predictions, axis=1), batched=True).tolist()
-
-        return np.stack(predictions, axis=1).tolist()
-
-    def _extract_patch_attributions_exact(self, a_batch, n_patches):
-        """Extract patch attributions by reversing the exact upsampling process."""
-        batch_size = a_batch.shape[0]
-        patch_size = 32 if n_patches == 49 else 16
-        grid_size = int(np.sqrt(n_patches))
-
-        if len(a_batch.shape) == 4:  # (N, 3, 224, 224)
-            # Take first channel since all channels have identical values due to upsampling
-            a_spatial = a_batch[:, 0, :, :]  # (N, 224, 224)
-        else:  # (N, 224, 224)
-            a_spatial = a_batch
-
-        # Reverse the upsampling
-        # Sample every patch_size-th pixel to get back the original grid
-        patch_attributions = a_spatial[:, ::patch_size, ::patch_size]  # (N, grid_size, grid_size)
-
-        return patch_attributions.reshape(batch_size, n_patches)
-
-
-def faithfulness_pixel_flipping_optimized(n_patches=196):
-    """Create optimized patch-level PixelFlipping that avoids sorting bottleneck."""
-    features_in_step = 8 if n_patches == 196 else 4  # Fewer steps for B-32
-    return PatchLevelPixelFlipping(
-        features_in_step=features_in_step, perturb_baseline="black", normalise=False, n_patches=n_patches
-    )
-
-
-@lru_cache(maxsize=None)
-def _get_patch_to_pixels_mapping(height=224, width=224, patch_size=16, channels=3, n_patches=None):
-    """Compute and cache patch-to-pixel mappings for perturbation."""
-    if n_patches is not None:
-        grid_size = int(np.sqrt(n_patches))
-    else:
-        grid_size = width // patch_size
-
-    patch_to_pixels = []
-
-    for patch_idx in range(grid_size * grid_size):
-        row = patch_idx // grid_size
-        col = patch_idx % grid_size
-        start_row, end_row = row * patch_size, (row + 1) * patch_size
-        start_col, end_col = col * patch_size, (col + 1) * patch_size
-
-        # Vectorized pixel index computation
-        c_indices = np.arange(channels)
-        r_indices = np.arange(start_row, end_row)
-        col_indices = np.arange(start_col, end_col)
-
-        # Create meshgrid and flatten
-        c_grid, r_grid, col_grid = np.meshgrid(c_indices, r_indices, col_indices, indexing='ij')
-        flat_indices = c_grid.flatten() * height * width + r_grid.flatten() * width + col_grid.flatten()
-
-        patch_to_pixels.append(flat_indices)
-
-    return tuple(patch_to_pixels)
-
-
-def batch_patch_level_perturbation(arr, indices, perturb_baseline="black", patch_size=16, **kwargs):
-    """
-    Batched custom quantus perturbation function for patch-based models.
-    Converts pixel indices to patch indices and perturbs entire patches.
-    
-    Args:
-        arr: np.ndarray of shape (batch_size, n_features) - flattened images
-        indices: np.ndarray of shape (batch_size, n_indices) - pixel indices to perturb
-        perturb_baseline: baseline value for perturbation
-        patch_size: size of patches (16 for B-16, 32 for B-32)
-        
-    Returns:
-        Perturbed array with entire patches replaced by baseline
-    """
-    from quantus.helpers.utils import get_baseline_value
-    
-    batch_size, n_features = arr.shape
-    
-    # Infer dimensions
-    channels = 3
-    spatial_size = int(np.sqrt(n_features // channels))  # Should be 224
-    height = width = spatial_size
-    grid_size = width // patch_size  # patches per row/col
-    
-    # Get baseline value
-    baseline_value = get_baseline_value(
-        value=perturb_baseline,
-        arr=arr,
-        return_shape=(batch_size, n_features),
-        batched=True,
-        **kwargs
-    )
-    
-    perturbed_arr = arr.copy()
-
-    # Get patch-to-pixel mapping once
-    patch_to_pixels = _get_patch_to_pixels_mapping(height, width, patch_size, channels)
-
-    # Vectorized processing for all samples
-    for batch_idx in range(batch_size):
-        # Get valid indices for this sample (non-NaN)
-        valid_mask = ~np.isnan(indices[batch_idx])
-        if not np.any(valid_mask):
-            continue
-
-        valid_indices = indices[batch_idx][valid_mask].astype(int)
-
-        # Convert pixel indices to patch indices (vectorized)
-        spatial_indices = valid_indices % (height * width)
-        row_indices = (spatial_indices // width) // patch_size
-        col_indices = (spatial_indices % width) // patch_size
-        patch_indices = row_indices * grid_size + col_indices
-
-        # Get unique patches to perturb
-        unique_patches = np.unique(patch_indices)
-        unique_patches = unique_patches[unique_patches < grid_size * grid_size]
-
-        # Collect all pixel indices from the patches
-        if len(unique_patches) > 0:
-            all_pixel_indices = np.concatenate([patch_to_pixels[p] for p in unique_patches])
-            all_pixel_indices = all_pixel_indices[all_pixel_indices < n_features]
-
-            # Apply baseline
-            if baseline_value.ndim == 2:
-                perturbed_arr[batch_idx, all_pixel_indices] = baseline_value[batch_idx, all_pixel_indices]
-            else:
-                perturbed_arr[batch_idx, all_pixel_indices] = baseline_value
-
-    return perturbed_arr
-
-
-def patch_level_perturbation(arr, indices, perturb_baseline="black", patch_size=16, **kwargs):
-    """
-    Custom quantus perturbation function for patch-based models.
-    """
-    from quantus.helpers.utils import get_baseline_value
-
-    batch_size, n_features = arr.shape
-
-    # Infer original image dimensions (assuming 3 channels, square images)
-    channels = 3
-    spatial_size = int(np.sqrt(n_features // channels))  # Should be 224
-    height = width = spatial_size
-    grid_w = width // patch_size  # patches per row
-
-    # Get baseline value
-    baseline_value = get_baseline_value(
-        value=perturb_baseline, arr=arr, return_shape=(batch_size, n_features), batched=True, **kwargs
-    )
-
-    # Copy input array
-    perturbed_arr = arr.copy()
-
-    # Get patch-to-pixel mappings
-    patch_to_pixels = _get_patch_to_pixels_mapping(height, width, patch_size, channels)
-
-    # Process each sample in the batch
-    for i in range(batch_size):
-        # Find unique patches that contain the selected pixels
-        valid_mask = ~np.isnan(indices[i])
-        if not np.any(valid_mask):
-            continue
-
-        valid_indices = indices[i][valid_mask].astype(int)
-
-        # Convert pixel indices to patch indices
-        spatial_indices = valid_indices % (height * width)
-        patch_indices = (spatial_indices // width // patch_size) * grid_w + (spatial_indices % width // patch_size)
-
-        # Get unique patches
-        unique_patches = np.unique(patch_indices)
-        unique_patches = unique_patches[unique_patches < grid_w * grid_w]  # Safety check
-
-        # Perturb all pixels in the identified patches
-        if len(unique_patches) > 0:
-            all_pixel_indices = np.concatenate([patch_to_pixels[patch_idx] for patch_idx in unique_patches])
-            all_pixel_indices = all_pixel_indices[all_pixel_indices < n_features]  # Safety check
-
-            if baseline_value.ndim == 2:  # batched baseline
-                perturbed_arr[i, all_pixel_indices] = baseline_value[i, all_pixel_indices]
-            else:  # single baseline value
-                perturbed_arr[i, all_pixel_indices] = baseline_value
-
-    return perturbed_arr
-
-
 def calc_faithfulness(
     model,  # Can be any model type (HookedSAEViT, CLIP, etc.)
     x_batch: np.ndarray,
@@ -560,7 +50,7 @@ def calc_faithfulness(
     Calculate faithfulness scores with statistical robustness through multiple trials.
     
     Args:
-        model: The model (any type that quantus can wrap)
+        model: PyTorch model (HookedViT, CLIP, or CLIPModelWrapper)
         x_batch: Batch of input images (numpy array)
         y_batch: Batch of target classes (numpy array)
         a_batch_expl: Batch of attributions (numpy array)
@@ -592,18 +82,13 @@ def calc_faithfulness(
             }
         ),
         FaithfulnessEstimatorConfig(
-            name="PixelFlipping_PatchLevel",
-            n_trials=1,  # Fast patch-level version
-            estimator_fn=lambda: faithfulness_pixel_flipping_optimized(n_patches),
+            name="PixelFlipping",
+            n_trials=1,
+            estimator_fn=lambda: faithfulness_pixel_flipping(n_patches),
         ),
     ]
 
     results_by_estimator = {}
-
-    # Set quantus logging to WARNING to catch important issues
-    quantus_logger = logging.getLogger('quantus')
-    original_level = quantus_logger.level
-    quantus_logger.setLevel(logging.WARNING)  # Show warnings, not just errors
 
     for estimator_config in estimator_configs:
         print(f"Running estimator: {estimator_config.name}")
@@ -615,7 +100,6 @@ def calc_faithfulness(
         if estimator_results:
             results_by_estimator[estimator_config.name] = estimator_results
 
-    quantus_logger.setLevel(original_level)
     return results_by_estimator
 
 
@@ -644,12 +128,7 @@ def _run_estimator_trials(
             # Run estimator
             # Larger batch size for better GPU utilization
             faithfulness_estimate = estimator(
-                model=model,
-                x_batch=x_batch,
-                y_batch=y_batch,
-                a_batch=a_batch_expl,
-                device=str(device),
-                batch_size=32
+                model=model, x_batch=x_batch, y_batch=y_batch, a_batch=a_batch_expl, device=str(device), batch_size=32
             )
 
             # Process results
@@ -733,15 +212,13 @@ def evaluate_faithfulness_for_results(
     model,
     device: torch.device,
     classification_results: List[ClassificationResult],
-    batch_size: int = 2048,
-    clip_classifier=None
+    batch_size: int = 512
 ) -> Tuple[Dict[str, Any], np.ndarray]:
     """
     Evaluate faithfulness scores with patch-level attributions.
     Processes data in batches to avoid memory issues.
     Supports both B-16 (196 patches) and B-32 (49 patches) models.
     """
-    import gc
 
     # Detect patch configuration
     is_patch32 = False
@@ -775,19 +252,15 @@ def evaluate_faithfulness_for_results(
         x_batch, y_batch, a_batch = batch_data
 
         # Calculate faithfulness for this batch
-        # Reduce parameters for faster evaluation:
-        # - n_trials: 1 trial is often sufficient
-        # - nr_runs: 10-20 runs gives reasonable estimates
-        # - subset_size: smaller subsets are faster
         batch_faithfulness = calc_faithfulness(
             model=model,
             x_batch=x_batch,
             y_batch=y_batch,
             a_batch_expl=a_batch,
             device=device,
-            n_trials=3,  # Reduced from 3 for speed
-            nr_runs=20,  # Reduced from 50 for speed
-            subset_size=98 if n_patches == 196 else 10,  # Reduced for speed
+            n_trials=3,
+            nr_runs=20,
+            subset_size=98 if n_patches == 196 else 10,
             n_patches=n_patches
         )
 
@@ -802,8 +275,20 @@ def evaluate_faithfulness_for_results(
         gc.collect()
         torch.cuda.empty_cache()
 
-    # Compute final statistics
-    final_results = _compute_final_statistics(all_faithfulness_scores)
+    # Compute final statistics from aggregated scores
+    final_results = {}
+    for estimator_name, data in all_faithfulness_scores.items():
+        mean_scores = np.array(data['mean_scores'])
+        std_scores = np.array(data['std_scores'])
+
+        if len(mean_scores) == 0:
+            continue
+
+        final_results[estimator_name] = {
+            'mean_scores': mean_scores.tolist(),
+            'std_scores': std_scores.tolist(),
+            **data['metadata']
+        }
 
     print(f"\nProcessed {len(all_y_labels)} total samples")
 
@@ -820,9 +305,8 @@ def _prepare_batch_data(config: PipelineConfig,
 
     for result in batch_results:
         try:
-            # Load image directly as numpy array
-            img = Image.open(result.image_path).convert('RGB')
-            img = img.resize((224, 224))
+            # Load and preprocess image
+            img = Image.open(result.image_path).convert('RGB').resize((224, 224))
             img_array = np.array(img, dtype=np.float32) / 255.0
 
             # Convert to CHW format
@@ -835,14 +319,19 @@ def _prepare_batch_data(config: PipelineConfig,
 
             # Load attribution
             attr_map = np.load(result.attribution_paths.raw_attribution_path)
+
             attr_map = _normalize_attribution_format(attr_map, n_patches)
 
             if attr_map is None:
                 continue
 
+            converted_attr = convert_patch_attribution_to_image(attr_map, n_patches)
+            if converted_attr is None:
+                continue
+
             x_list.append(img_array)
             y_list.append(result.prediction.predicted_class_idx)
-            a_list.append(convert_patch_attribution_to_image(attr_map, n_patches))
+            a_list.append(converted_attr)
 
         except Exception as e:
             print(f"Warning: Could not process {result.image_path.name}: {e}")
@@ -901,73 +390,36 @@ def _aggregate_batch_scores(all_scores: Dict[str, Dict], batch_scores: Dict[str,
         all_scores[estimator_name]['std_scores'].extend(std_scores)
 
 
-def _compute_final_statistics(all_scores: Dict[str, Dict]) -> Dict[str, Dict]:
-    """Compute final statistics from aggregated scores."""
-    final_results = {}
-
-    for estimator_name, data in all_scores.items():
-        mean_scores = np.array(data['mean_scores'])
-        std_scores = np.array(data['std_scores'])
-        metadata = data['metadata']
-
-        if len(mean_scores) == 0:
-            final_results[estimator_name] = {
-                'mean_scores': [],
-                'std_scores': [],
-                'overall': {
-                    'mean': 0,
-                    'std': 0,
-                    'median': 0,
-                    'min': 0,
-                    'max': 0,
-                    'count': 0
-                },
-                'error': 'No valid scores collected'
-            }
-        else:
-            final_results[estimator_name] = {
-                'mean_scores': mean_scores.tolist(),
-                'std_scores': std_scores.tolist(),
-                **metadata, 'overall': {
-                    'mean': float(np.mean(mean_scores)),
-                    'std': float(np.std(mean_scores)),
-                    'median': float(np.median(mean_scores)),
-                    'min': float(np.min(mean_scores)),
-                    'max': float(np.max(mean_scores)),
-                    'count': len(mean_scores)
-                }
-            }
-
-    return final_results
-
-
-def calculate_faithfulness_stats_by_class(faithfulness_results: Dict[str, Dict[str, Any]],
-                                          class_labels: np.ndarray) -> Dict[str, Dict[int, Dict[str, float]]]:
+def _compute_statistics_from_scores(scores: np.ndarray,
+                                    stds: np.ndarray,
+                                    class_labels: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """
-    Calculate statistics for faithfulness scores grouped by class.
-    
-    Args:
-        faithfulness_results: Dictionary with faithfulness results per estimator
-        class_labels: Array of class labels
-        
-    Returns:
-        Dictionary with per-class statistics for each estimator
+    Compute statistics from scores array.
+
+    Returns dict with 'overall' stats and optionally 'by_class' stats.
     """
-    stats_by_estimator = {}
+    result = {
+        'overall': {
+            'count': len(scores),
+            'mean': float(np.nanmean(scores)),
+            'median': float(np.nanmedian(scores)),
+            'min': float(np.nanmin(scores)) if len(scores) > 0 else 0,
+            'max': float(np.nanmax(scores)) if len(scores) > 0 else 0,
+            'std': float(np.nanstd(scores)),
+            'avg_trial_std': float(np.nanmean(stds))
+        }
+    }
 
-    for estimator_name, estimator_results in faithfulness_results.items():
-        scores = np.array(estimator_results["mean_scores"])
-        stds = np.array(estimator_results["std_scores"])
-
-        # Group scores by class
-        class_stats = {}
+    # Compute per-class statistics if labels provided
+    if class_labels is not None:
+        result['by_class'] = {}
         for class_idx in np.unique(class_labels):
             mask = class_labels == class_idx
             class_scores = scores[mask]
             class_stds = stds[mask]
 
             if len(class_scores) > 0:
-                class_stats[int(class_idx)] = {
+                result['by_class'][int(class_idx)] = {
                     'count': len(class_scores),
                     'mean': float(np.mean(class_scores)),
                     'median': float(np.median(class_scores)),
@@ -977,48 +429,40 @@ def calculate_faithfulness_stats_by_class(faithfulness_results: Dict[str, Dict[s
                     'avg_trial_std': float(np.mean(class_stds))
                 }
 
-        stats_by_estimator[estimator_name] = class_stats
-
-    return stats_by_estimator
+    return result
 
 
 def handle_array_values(arr):
-    """Helper function to process array-like values and make them JSON serializable."""
+    """Convert numpy arrays to JSON-serializable lists recursively."""
     if hasattr(arr, 'tolist'):
-        arr = arr.tolist()
-
+        return arr.tolist()
     if isinstance(arr, list):
-        # If the array has nested arrays, convert them too
-        return [
-            handle_array_values(item) if hasattr(item, 'tolist') or isinstance(item, list) else item for item in arr
-        ]
-
+        return [handle_array_values(item) for item in arr]
     return arr
 
 
 def evaluate_and_report_faithfulness(
     config: PipelineConfig,
-    model,  # Can be any model type
+    model,
     device: torch.device,
     classification_results: List[ClassificationResult],
-    clip_classifier=None
+    clip_classifier=None  # Kept for backward compatibility but unused
 ) -> Dict[str, Any]:
     """
     Evaluate faithfulness and report statistics.
-    
+
     Args:
         config: Pipeline configuration
-        model: The model (can be HookedSAEViT, CLIP, etc.)
+        model: PyTorch model (HookedViT, CLIP, or CLIPModelWrapper)
         device: Device to run calculations on
         classification_results: List of classification results
-        clip_classifier: Optional CLIP classifier if using CLIP
-        
+
     Returns:
         Dictionary with overall and per-class statistics
     """
     # Evaluate faithfulness
     faithfulness_results, class_labels = evaluate_faithfulness_for_results(
-        config, model, device, classification_results, clip_classifier=clip_classifier
+        config, model, device, classification_results
     )
 
     # Get dataset config for class names
@@ -1045,9 +489,6 @@ def _build_results_structure(
     """Build the results structure with statistics."""
     results = {'dataset': config.file.dataset_name, 'metrics': {}, 'class_labels': class_labels.tolist()}
 
-    # Calculate statistics for each estimator
-    class_stats_all = calculate_faithfulness_stats_by_class(faithfulness_results, class_labels)
-
     for estimator_name, estimator_results in faithfulness_results.items():
         if "mean_scores" not in estimator_results:
             continue
@@ -1055,27 +496,19 @@ def _build_results_structure(
         scores = np.array(estimator_results["mean_scores"])
         stds = np.array(estimator_results.get("std_scores", np.zeros_like(scores)))
 
-        # Overall statistics
-        overall_stats = {
-            'count': len(scores),
-            'mean': float(np.nanmean(scores)),
-            'median': float(np.nanmedian(scores)),
-            'min': float(np.nanmin(scores)),
-            'max': float(np.nanmax(scores)),
-            'std': float(np.nanstd(scores)),
-            'avg_trial_std': float(np.nanmean(stds)),
-            'method_params': {
-                'n_trials': estimator_results.get("n_trials", 3),
-                'nr_runs': estimator_results.get("nr_runs", 50),
-                'subset_size': estimator_results.get("subset_size", 98)
-            }
+        # Compute all statistics at once
+        stats = _compute_statistics_from_scores(scores, stds, class_labels)
+
+        # Add method parameters
+        stats['overall']['method_params'] = {
+            'n_trials': estimator_results.get("n_trials", 3),
+            'nr_runs': estimator_results.get("nr_runs", 50),
+            'subset_size': estimator_results.get("subset_size", 98)
         }
 
         # Store results
         results['metrics'][estimator_name] = {
-            'overall': overall_stats,
-            'by_class': class_stats_all[estimator_name],
-            'mean_scores': handle_array_values(scores),
+            **stats, 'mean_scores': handle_array_values(scores),
             'std_scores': handle_array_values(stds)
         }
 
@@ -1124,3 +557,416 @@ def _save_faithfulness_results(
 
         np.savez(scores_path, **save_dict)
         print(f"Raw scores for {estimator_name} saved to {scores_path}.npz")
+
+
+class PatchPixelFlipping:
+    """
+    Standalone patch-based pixel flipping implementation following Bach et al. (2015).
+
+    Implements the pixel flipping experiment adapted for patch-level attributions:
+    - Progressively perturbs the most important patches based on attribution scores
+    - Measures prediction degradation as patches are removed
+    - Returns AUC scores measuring explanation faithfulness
+
+    This is a complete standalone implementation.
+    """
+
+    def __init__(self, n_patches=196, patch_size=16, features_in_step=1, perturb_baseline="black"):
+        """
+        Initialize patch-based pixel flipping.
+
+        Args:
+            n_patches: Number of patches (196 for ViT-B/16, 49 for ViT-B/32)
+            patch_size: Size of each patch in pixels (16 or 32)
+            features_in_step: Number of patches to perturb at each step
+            perturb_baseline: Baseline for perturbation ("black", "white", "mean", etc.)
+        """
+        self.n_patches = n_patches
+        self.patch_size = patch_size
+        self.features_in_step = features_in_step
+        self.perturb_baseline = perturb_baseline
+
+    def create_patch_mask(self, patch_indices, image_shape):
+        """Create binary mask for specified patches."""
+        C, H, W = image_shape
+        grid_size = int(np.sqrt(self.n_patches))
+
+        # Initialize mask as False (don't perturb)
+        mask = np.zeros(image_shape, dtype=bool)
+
+        for patch_idx in patch_indices:
+            if patch_idx >= self.n_patches:
+                continue
+
+            # Convert patch index to grid coordinates
+            row = patch_idx // grid_size
+            col = patch_idx % grid_size
+
+            # Calculate pixel boundaries for this patch
+            start_row = row * self.patch_size
+            end_row = min(start_row + self.patch_size, H)
+            start_col = col * self.patch_size
+            end_col = min(start_col + self.patch_size, W)
+
+            # Set mask to True for all channels in this patch
+            mask[:, start_row:end_row, start_col:end_col] = True
+
+        return mask
+
+    def __call__(
+        self,
+        model,
+        x_batch: np.ndarray,
+        y_batch: np.ndarray,
+        a_batch: np.ndarray,
+        device: str = None,
+        batch_size: int = 256,
+        **kwargs
+    ):
+        """Main evaluation method - standalone implementation."""
+        x_batch = np.asarray(x_batch)
+        y_batch = np.asarray(y_batch)
+        a_batch = np.asarray(a_batch)
+
+        scores = []
+        for start in range(0, len(x_batch), batch_size):
+            end = min(start + batch_size, len(x_batch))
+            scores.extend(
+                self.evaluate_batch(
+                    model=model,
+                    x_batch=x_batch[start:end],
+                    y_batch=y_batch[start:end],
+                    a_batch=a_batch[start:end],
+                    device=device,
+                    **kwargs
+                )
+            )
+
+        return scores
+
+    def evaluate_batch(
+        self, model, x_batch: np.ndarray, y_batch: np.ndarray, a_batch: np.ndarray, device=None, **kwargs
+    ):
+        """
+        Standalone implementation of patch-based pixel flipping following Bach et al. (2015).
+
+        Progressively perturbs the most important patches and measures prediction degradation.
+        This is a complete standalone implementation that works directly with PyTorch models.
+
+        Args:
+            model: PyTorch model (HookedViT, CLIP, or CLIPModelWrapper)
+            x_batch: Input images (N, C, H, W)
+            y_batch: True labels (N,)
+            a_batch: Patch-level attributions (N, n_patches)
+            device: Device string ("cuda" or "cpu")
+
+        Returns:
+            List of AUC scores measuring explanation faithfulness
+        """
+        import math
+
+        batch_size = a_batch.shape[0]
+
+        # Validate attribution shape
+        if a_batch.shape[1] != self.n_patches:
+            raise ValueError(f"Expected {self.n_patches} patches, got {a_batch.shape[1]}")
+
+        # Sort patches by attribution importance (descending order)
+        # Most important patches get indices 0, 1, 2, ... (will be perturbed first)
+        patch_indices_sorted = np.argsort(-a_batch, axis=1)
+
+        # Calculate number of perturbation steps
+        n_perturbations = math.ceil(self.n_patches / self.features_in_step)
+        predictions = []
+        x_perturbed = x_batch.copy()
+
+        # Get initial predictions on unperturbed input (baseline for the curve)
+        y_pred_initial = _predict_torch_model(model, x_batch, y_batch, device)
+        predictions.append(y_pred_initial)
+
+        # Progressive perturbation following Bach et al. methodology
+        for step in range(n_perturbations):
+            # Determine which patches to perturb in this step
+            start_idx = step * self.features_in_step
+            end_idx = min(start_idx + self.features_in_step, self.n_patches)
+
+            # Get patch indices to perturb for each sample
+            patches_to_perturb = patch_indices_sorted[:, start_idx:end_idx]
+
+            # Apply perturbation to each sample in the batch
+            for batch_idx in range(batch_size):
+                # Create mask for patches to perturb
+                mask = self.create_patch_mask(patches_to_perturb[batch_idx], x_batch.shape[1:])
+
+                # Standalone baseline replacement
+                arr = x_perturbed[batch_idx]
+
+                # Get baseline value (black=min, white=max, etc.)
+                if self.perturb_baseline == "black":
+                    baseline_value = arr.min()
+                elif self.perturb_baseline == "white":
+                    baseline_value = arr.max()
+                elif self.perturb_baseline == "mean":
+                    baseline_value = arr.mean()
+                elif self.perturb_baseline == "uniform":
+                    baseline_value = np.random.uniform(0.0, 1.0, size=arr.shape)
+                elif isinstance(self.perturb_baseline, (int, float)):
+                    baseline_value = float(self.perturb_baseline)
+                else:
+                    baseline_value = 0.0  # Default fallback
+
+                # Apply perturbation using np.where
+                x_perturbed[batch_idx] = np.where(mask, baseline_value, arr)
+
+            # Get model predictions on perturbed input
+            y_pred = _predict_torch_model(model, x_perturbed, y_batch, device)
+            predictions.append(y_pred)
+
+        # Stack predictions: shape (batch_size, n_perturbations)
+        predictions_array = np.stack(predictions, axis=1)
+
+        # Calculate AUC for each sample's prediction curve
+        # AUC measures faithfulness: larger drop in predictions = more faithful explanations
+        # Use trapezoidal rule without normalization
+        auc_scores = []
+        for i in range(batch_size):
+            curve = predictions_array[i]
+            # Trapezoidal rule with dx=1
+            auc = np.trapezoid(curve, dx=1)
+            auc_scores.append(float(auc))
+
+        return auc_scores
+
+
+def _predict_torch_model(model, x_batch, y_batch, device=None):
+    """
+    Shared helper function for direct PyTorch prediction.
+
+    Args:
+        model: PyTorch model (HookedViT, CLIP, or CLIPModelWrapper)
+        x_batch: Input images as numpy array (N, C, H, W)
+        y_batch: True labels as numpy array (N,)
+        device: Device string ("cuda" or "cpu")
+
+    Returns:
+        Predictions as numpy array (N,) - probabilities for target classes
+    """
+    import torch
+
+    model.eval()
+    with torch.no_grad():
+        x_tensor = torch.from_numpy(x_batch).float()
+        if device:
+            x_tensor = x_tensor.to(device)
+
+        outputs = model(x_tensor)
+
+        # Apply softmax to get probabilities
+        if outputs.shape[-1] > 1:
+            probs = torch.softmax(outputs, dim=-1)
+        else:
+            probs = outputs
+
+        # Get predictions for target classes
+        batch_size = len(y_batch)
+        preds = probs[torch.arange(batch_size), y_batch].cpu().numpy()
+
+    return preds
+
+
+def faithfulness_pixel_flipping(n_patches=196):
+    """Create mask-based patch pixel flipping."""
+    patch_size = 32 if n_patches == 49 else 16
+    return PatchPixelFlipping(n_patches=n_patches, patch_size=patch_size, features_in_step=1, perturb_baseline="black")
+
+
+class FaithfulnessCorrelation:
+    """
+    Standalone patch-based faithfulness correlation implementation.
+
+    Measures correlation between attribution scores and prediction changes when
+    random subsets of patches are perturbed. Higher correlation = more faithful explanations.
+
+    Complete standalone implementation that works directly with PyTorch models.
+    """
+
+    def __init__(self, n_patches=196, patch_size=16, subset_size=20, nr_runs=50, perturb_baseline="black"):
+        self.n_patches = n_patches
+        self.patch_size = patch_size
+        self.subset_size = min(subset_size, n_patches)
+        self.nr_runs = nr_runs
+        self.perturb_baseline = perturb_baseline
+
+    def _compute_spearman_correlation(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """
+        Compute Spearman correlation for batched data.
+
+        Args:
+            a: Array of shape (batch_size, nr_runs) - attribution sums
+            b: Array of shape (batch_size, nr_runs) - prediction deltas
+
+        Returns:
+            Array of shape (batch_size,) with correlation coefficients
+        """
+        from scipy.stats import spearmanr
+
+        batch_size = a.shape[0]
+        assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
+        assert len(a.shape) == 2, "Arrays must be 2D (batch_size, nr_runs)"
+
+        # Compute Spearman correlation row-wise
+        correlation = spearmanr(a, b, axis=1)[0]
+
+        # Handle edge case where batch size is 1
+        if correlation.shape:
+            # Extract diagonal elements (correlations between corresponding samples)
+            correlation = correlation[:batch_size, batch_size:]
+            return np.diag(correlation)
+        else:
+            # Single sample case
+            return np.array([correlation])
+
+    def create_patch_mask(self, patch_indices, image_shape):
+        """Create binary mask for specified patches."""
+        C, H, W = image_shape
+        grid_size = int(np.sqrt(self.n_patches))
+
+        # Initialize mask as False (don't perturb)
+        mask = np.zeros(image_shape, dtype=bool)
+
+        for patch_idx in patch_indices:
+            if patch_idx >= self.n_patches:
+                continue
+
+            # Convert patch index to grid coordinates
+            row = patch_idx // grid_size
+            col = patch_idx % grid_size
+
+            # Calculate pixel boundaries for this patch
+            start_row = row * self.patch_size
+            end_row = min(start_row + self.patch_size, H)
+            start_col = col * self.patch_size
+            end_col = min(start_col + self.patch_size, W)
+
+            # Set mask to True for all channels in this patch
+            mask[:, start_row:end_row, start_col:end_col] = True
+
+        return mask
+
+    def __call__(
+        self,
+        model,
+        x_batch: np.ndarray,
+        y_batch: np.ndarray,
+        a_batch: np.ndarray,
+        device: str = None,
+        batch_size: int = 256,
+        **kwargs
+    ):
+        """Main evaluation method - standalone implementation."""
+        x_batch = np.asarray(x_batch)
+        y_batch = np.asarray(y_batch)
+        a_batch = np.asarray(a_batch)
+
+        scores = []
+        for start in range(0, len(x_batch), batch_size):
+            end = min(start + batch_size, len(x_batch))
+            scores.extend(
+                self.evaluate_batch(
+                    model=model,
+                    x_batch=x_batch[start:end],
+                    y_batch=y_batch[start:end],
+                    a_batch=a_batch[start:end],
+                    device=device
+                )
+            )
+
+        return scores
+
+    def evaluate_batch(self, model, x_batch: np.ndarray, y_batch: np.ndarray, a_batch: np.ndarray, device=None):
+        """
+        Standalone implementation of faithfulness correlation.
+
+        Measures correlation between attribution scores and prediction changes when
+        random patch subsets are perturbed. This is a complete standalone implementation.
+
+        Args:
+            model: PyTorch model (HookedViT, CLIP, or CLIPModelWrapper)
+            x_batch: Input images (N, C, H, W)
+            y_batch: True labels (N,)
+            a_batch: Patch-level attributions (N, n_patches)
+            device: Device string ("cuda" or "cpu")
+
+        Returns:
+            List of correlation scores measuring explanation faithfulness
+        """
+        batch_size = a_batch.shape[0]
+
+        # Validate attribution shape
+        if a_batch.shape[1] != self.n_patches:
+            raise ValueError(f"Expected {self.n_patches} patches, got {a_batch.shape[1]}")
+
+        # Get original predictions on unperturbed images
+        y_pred = _predict_torch_model(model, x_batch, y_batch, device)
+
+        pred_deltas = []
+        att_sums = []
+
+        # Run multiple trials with random patch subsets
+        for _ in range(self.nr_runs):
+            # Randomly sample patches for each image in the batch
+            patch_choices = np.stack([
+                np.random.choice(self.n_patches, self.subset_size, replace=False) for _ in range(batch_size)
+            ],
+                                     axis=0)
+
+            # Create perturbed images
+            x_perturbed = x_batch.copy()
+            for batch_idx in range(batch_size):
+                # Create mask for selected patches
+                mask = self.create_patch_mask(patch_choices[batch_idx], x_batch.shape[1:])
+
+                # Standalone baseline replacement
+                arr = x_perturbed[batch_idx]
+
+                # Get baseline value (black=min, white=max, etc.)
+                if self.perturb_baseline == "black":
+                    baseline_value = arr.min()
+                elif self.perturb_baseline == "white":
+                    baseline_value = arr.max()
+                elif self.perturb_baseline == "mean":
+                    baseline_value = arr.mean()
+                elif self.perturb_baseline == "uniform":
+                    baseline_value = np.random.uniform(0.0, 1.0, size=arr.shape)
+                elif isinstance(self.perturb_baseline, (int, float)):
+                    baseline_value = float(self.perturb_baseline)
+                else:
+                    baseline_value = 0.0  # Default fallback
+
+                # Apply perturbation using np.where
+                x_perturbed[batch_idx] = np.where(mask, baseline_value, arr)
+
+            # Get predictions on perturbed images
+            y_pred_perturb = _predict_torch_model(model, x_perturbed, y_batch, device)
+
+            # Store prediction deltas (how much prediction changed)
+            pred_deltas.append(y_pred - y_pred_perturb)
+
+            # Sum attributions for selected patches
+            att_sums.append(a_batch[np.arange(batch_size)[:, None], patch_choices].sum(axis=1))
+
+        # Stack results into arrays
+        pred_deltas = np.stack(pred_deltas, axis=1)  # (batch_size, nr_runs)
+        att_sums = np.stack(att_sums, axis=1)  # (batch_size, nr_runs)
+
+        # Compute Spearman correlation between attribution sums and prediction deltas
+        similarity = self._compute_spearman_correlation(a=att_sums, b=pred_deltas)
+        return similarity.tolist()
+
+
+def faithfulness_correlation(subset_size, nr_runs, n_patches):
+    """Create mask-based faithfulness correlation."""
+    patch_size = 32 if n_patches == 49 else 16
+    return FaithfulnessCorrelation(
+        n_patches=n_patches, patch_size=patch_size, subset_size=subset_size, nr_runs=nr_runs, perturb_baseline="black"
+    )
