@@ -496,7 +496,7 @@ def apply_baseline_perturbation(image, mask, perturb_baseline):
 
     # Get baseline value
     if perturb_baseline == "black":
-        baseline_value = arr.min()
+        baseline_value = 0.0
     elif perturb_baseline == "white":
         baseline_value = arr.max()
     elif perturb_baseline == "mean":
@@ -642,7 +642,7 @@ class PatchPixelFlipping:
     This is a complete standalone implementation.
     """
 
-    def __init__(self, n_patches=196, patch_size=16, features_in_step=1, perturb_baseline="black"):
+    def __init__(self, n_patches=196, patch_size=16, features_in_step=1, perturb_baseline="mean"):
         """
         Initialize patch-based pixel flipping.
 
@@ -725,7 +725,8 @@ class PatchPixelFlipping:
         x_perturbed = x_batch.copy()
 
         # Get initial predictions on unperturbed input (baseline for the curve)
-        y_pred_initial = _predict_torch_model(model, x_batch, y_batch, device)
+        # Use softmax for pixel flipping to get probability curves
+        y_pred_initial = _predict_torch_model(model, x_batch, y_batch, device, use_softmax=True)
         predictions.append(y_pred_initial)
 
         # Progressive perturbation following Bach et al. methodology
@@ -750,7 +751,8 @@ class PatchPixelFlipping:
                 )
 
             # Get model predictions on perturbed input
-            y_pred = _predict_torch_model(model, x_perturbed, y_batch, device)
+            # Use softmax for pixel flipping to get probability curves
+            y_pred = _predict_torch_model(model, x_perturbed, y_batch, device, use_softmax=True)
             predictions.append(y_pred)
 
         # Stack predictions: shape (batch_size, n_perturbations)
@@ -769,7 +771,7 @@ class PatchPixelFlipping:
         return auc_scores
 
 
-def _predict_torch_model(model, x_batch, y_batch, device=None):
+def _predict_torch_model(model, x_batch, y_batch, device=None, use_softmax=False):
     """
     Shared helper function for direct PyTorch prediction.
 
@@ -778,9 +780,10 @@ def _predict_torch_model(model, x_batch, y_batch, device=None):
         x_batch: Input images as numpy array (N, C, H, W)
         y_batch: True labels as numpy array (N,)
         device: Device string ("cuda" or "cpu")
+        use_softmax: If True, return probabilities; if False, return logits
 
     Returns:
-        Predictions as numpy array (N,) - probabilities for target classes
+        Predictions as numpy array (N,) - probabilities or logits for target classes
     """
     import torch
 
@@ -792,15 +795,13 @@ def _predict_torch_model(model, x_batch, y_batch, device=None):
 
         outputs = model(x_tensor)
 
-        # Apply softmax to get probabilities
-        if outputs.shape[-1] > 1:
-            probs = torch.softmax(outputs, dim=-1)
-        else:
-            probs = outputs
+        # Apply softmax if requested (for pixel flipping probability curves)
+        # Otherwise return raw logits (for correlation to avoid saturation)
+        if use_softmax and outputs.shape[-1] > 1:
+            outputs = torch.softmax(outputs, dim=-1)
 
-        # Get predictions for target classes
         batch_size = len(y_batch)
-        preds = probs[torch.arange(batch_size), y_batch].cpu().numpy()
+        preds = outputs[torch.arange(batch_size), y_batch].cpu().numpy()
 
     return preds
 
@@ -808,7 +809,7 @@ def _predict_torch_model(model, x_batch, y_batch, device=None):
 def faithfulness_pixel_flipping(n_patches=196):
     """Create mask-based patch pixel flipping."""
     patch_size = 32 if n_patches == 49 else 16
-    return PatchPixelFlipping(n_patches=n_patches, patch_size=patch_size, features_in_step=1, perturb_baseline="black")
+    return PatchPixelFlipping(n_patches=n_patches, patch_size=patch_size, features_in_step=1, perturb_baseline="mean")
 
 
 class FaithfulnessCorrelation:
@@ -821,7 +822,7 @@ class FaithfulnessCorrelation:
     Complete standalone implementation that works directly with PyTorch models.
     """
 
-    def __init__(self, n_patches=196, patch_size=16, subset_size=20, nr_runs=50, perturb_baseline="black"):
+    def __init__(self, n_patches=196, patch_size=16, subset_size=20, nr_runs=50, perturb_baseline="mean"):
         self.n_patches = n_patches
         self.patch_size = patch_size
         self.subset_size = min(subset_size, n_patches)
@@ -846,19 +847,24 @@ class FaithfulnessCorrelation:
         assert len(a.shape) == 2, "Arrays must be 2D (batch_size, nr_runs)"
 
         # Compute Spearman correlation row-wise
-        correlation = spearmanr(a, b, axis=1)[0]
+        result = spearmanr(a, b, axis=1)
+        correlation = result[0] if isinstance(result, tuple) else result
 
-        # Handle edge cases
-        if np.isscalar(correlation) or not hasattr(correlation, 'shape'):
-            # Single sample case or constant input (NaN)
-            return np.array([correlation])
-        elif correlation.shape:
-            # Extract diagonal elements (correlations between corresponding samples)
-            correlation = correlation[:batch_size, batch_size:]
-            return np.diag(correlation)
+        # Convert to numpy array and handle different shapes
+        correlation = np.asarray(correlation)
+
+        # Handle different return shapes based on batch_size
+        if batch_size == 1:
+            # Single sample: spearmanr returns a scalar or 0-D array
+            return np.atleast_1d(correlation)
+        elif correlation.ndim == 2:
+            # Multiple samples: spearmanr returns a 2D correlation matrix
+            # Extract diagonal from the cross-correlation block
+            correlation_block = correlation[:batch_size, batch_size:]
+            return np.diag(correlation_block)
         else:
-            # Fallback
-            return np.array([correlation])
+            # Unexpected shape - likely all NaN due to no variance
+            return np.full(batch_size, np.nan)
 
     def __call__(
         self,
@@ -914,13 +920,14 @@ class FaithfulnessCorrelation:
             raise ValueError(f"Expected {self.n_patches} patches, got {a_batch.shape[1]}")
 
         # Get original predictions on unperturbed images
-        y_pred = _predict_torch_model(model, x_batch, y_batch, device)
+        # Use logits (not softmax) to avoid saturation at 0/1
+        y_pred = _predict_torch_model(model, x_batch, y_batch, device, use_softmax=False)
 
         pred_deltas = []
         att_sums = []
 
         # Run multiple trials with random patch subsets
-        for _ in range(self.nr_runs):
+        for run_idx in range(self.nr_runs):
             # Randomly sample patches for each image in the batch
             patch_choices = np.stack([
                 np.random.choice(self.n_patches, self.subset_size, replace=False) for _ in range(batch_size)
@@ -941,13 +948,16 @@ class FaithfulnessCorrelation:
                 )
 
             # Get predictions on perturbed images
-            y_pred_perturb = _predict_torch_model(model, x_perturbed, y_batch, device)
+            # Use logits (not softmax) to avoid saturation at 0/1
+            y_pred_perturb = _predict_torch_model(model, x_perturbed, y_batch, device, use_softmax=False)
 
             # Store prediction deltas (how much prediction changed)
-            pred_deltas.append(y_pred - y_pred_perturb)
+            deltas = y_pred - y_pred_perturb
+            pred_deltas.append(deltas)
 
             # Sum attributions for selected patches
-            att_sums.append(a_batch[np.arange(batch_size)[:, None], patch_choices].sum(axis=1))
+            att_sum = a_batch[np.arange(batch_size)[:, None], patch_choices].sum(axis=1)
+            att_sums.append(att_sum)
 
         # Stack results into arrays
         pred_deltas = np.stack(pred_deltas, axis=1)  # (batch_size, nr_runs)
@@ -955,6 +965,7 @@ class FaithfulnessCorrelation:
 
         # Compute Spearman correlation between attribution sums and prediction deltas
         similarity = self._compute_spearman_correlation(a=att_sums, b=pred_deltas)
+
         return similarity.tolist()
 
 
@@ -962,5 +973,5 @@ def faithfulness_correlation(subset_size, nr_runs, n_patches):
     """Create mask-based faithfulness correlation."""
     patch_size = 32 if n_patches == 49 else 16
     return FaithfulnessCorrelation(
-        n_patches=n_patches, patch_size=patch_size, subset_size=subset_size, nr_runs=nr_runs, perturb_baseline="black"
+        n_patches=n_patches, patch_size=patch_size, subset_size=subset_size, nr_runs=nr_runs, perturb_baseline="mean"
     )
