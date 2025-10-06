@@ -72,6 +72,7 @@ class CLIPClassifier:
             text = tokenizer(text_prompts).to(self.device)
             with torch.no_grad():
                 text_features = self.text_model.encode_text(text)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
         else:
             # processor is a full CLIPProcessor
             text_inputs = self.processor(text=text_prompts, return_tensors="pt", padding=True).to(self.device)
@@ -276,4 +277,3 @@ class CLIPModelWrapper(torch.nn.Module):
         if hasattr(self.clip_classifier.vision_model, 'cfg'):
             return self.clip_classifier.vision_model.cfg
         return None
-

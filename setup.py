@@ -159,6 +159,76 @@ def download_waterbirds(data_dir: Path, models_dir: Path) -> None:
         print("⚠ Warning: transformers library not installed. Install with: pip install transformers")
 
 
+def download_imagenet(data_dir: Path, models_dir: Path) -> None:
+    """
+    Download ONLY ImageNet-1k validation split (50k images) from Hugging Face.
+    Avoids touching the training shards entirely by targeting parquet files directly.
+    The validation set will be split into val/test during conversion.
+    """
+    print("\nDownloading ImageNet-1k validation split...")
+    print("Note: Requires HF login & access to ILSVRC/imagenet-1k.")
+    print("Visit https://huggingface.co/datasets/imagenet-1k to request access.")
+
+    # Create imagenet subdirectories
+    in_data_dir = data_dir / "imagenet"
+    raw_dir = in_data_dir / "raw"
+    val_dir = raw_dir / "val"
+
+    # Check if already downloaded
+    if val_dir.exists():
+        print(f"ImageNet raw data already exists at {raw_dir}")
+        return
+
+    val_dir.mkdir(parents=True, exist_ok=True)
+
+    from datasets import load_dataset
+    # --- Load parquet files directly via hf:// so no train files are ever considered ---
+    # Validation (50k, labeled) - will be split into val/test during conversion
+    try:
+        print("\nLoading validation parquet files directly...")
+        val = load_dataset(
+            "parquet",
+            data_files="hf://datasets/ILSVRC/imagenet-1k/data/validation-*.parquet",
+            split="train",  # parquet builder exposes a single 'train' split = the given files
+        )
+
+        # Extract class names from the dataset features
+        if hasattr(val.features['label'], 'names'):
+            class_names = val.features['label'].names
+            print(f"Found {len(class_names)} ImageNet class names")
+
+            # Save class names for later use
+            class_names_file = raw_dir / "class_names.json"
+            import json
+            with open(class_names_file, 'w') as f:
+                json.dump(class_names, f, indent=2)
+            print(f"✓ Saved class names to {class_names_file}")
+
+        print(f"Saving {len(val)} validation images...")
+        for idx, item in enumerate(tqdm(val, desc="Saving val images")):
+            image = item["image"]
+            label = item["label"]
+            class_dir = val_dir / f"class_{label}"
+            class_dir.mkdir(exist_ok=True)
+            img_path = class_dir / f"img_{idx:06d}.JPEG"
+            if hasattr(image, "save"):
+                image.save(img_path)
+
+        print(f"✓ Validation set saved to {val_dir}")
+
+    except Exception as e:
+        import traceback
+        print(f"⚠ Error downloading validation split: {e}")
+        print("\nFull traceback:")
+        traceback.print_exc()
+        print("\nMake sure you:")
+        print("  1. Have accepted terms at https://huggingface.co/datasets/imagenet-1k")
+        print("  2. Are logged in: huggingface-cli login")
+
+    print(f"\n✓ ImageNet validation download complete! 50k images with labels")
+    print(f"  - Will be split into 25k val + 25k test during conversion")
+
+
 def download_covidquex(data_dir: Path, models_dir: Path) -> None:
     """Download CovidQueX dataset and model."""
     print("\nDownloading CovidQueX...")
@@ -239,22 +309,8 @@ def download_sae_checkpoints(data_dir: Path) -> None:
     print("\n" + "=" * 50)
     print("Downloading CLIP Vanilla SAE Checkpoints from HuggingFace")
     print("=" * 50)
-    
-    # Previous waterbirds SAE mapping (commented out)
-    # layer_repo_map = {
-    #     1: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_1-hook_resid_post-64-82",
-    #     2: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_2-hook_resid_post-64-80",
-    #     3: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_3-hook_resid_post-64-80",
-    #     4: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_4-hook_resid_post-64-80",
-    #     5: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_5-hook_resid_post-64-81",
-    #     6: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_6-hook_resid_post-64-81",
-    #     7: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_7-hook_resid_post-64-83",
-    #     8: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_8-hook_resid_post-64-84",
-    #     9: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_9-hook_resid_post-64-86",
-    #     10: "Prisma-Multimodal/waterbirds-sweep-topk-64-patches_all_layers_10-hook_resid_post-64-85"
-    # }
-    
-    # CLIP Vanilla SAEs (resid_post only) - all patches
+
+    # CLIP Vanilla SAEs (resid_post only) - all patches (commented out)
     layer_repo_map = {
         0: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-0-hook_resid_post-l1-1e-05",
         1: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-1-hook_resid_post-l1-1e-05",
@@ -269,52 +325,53 @@ def download_sae_checkpoints(data_dir: Path) -> None:
         10: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-10-hook_resid_post-l1-1e-05",
         11: "prisma-multimodal/sparse-autoencoder-clip-b-32-sae-vanilla-x64-layer-11-hook_resid_post-l1-1e-05"
     }
-    
+
     sae_base_dir = data_dir / "sae_clip_vanilla_b32"
     successful_layers = []
-    
+
     for layer_num, repo_id in layer_repo_map.items():
         print(f"Downloading Layer {layer_num} SAE checkpoint...")
-        
+
         try:
             # List files in the repository to find the .pt file
             from huggingface_hub import list_repo_files
             files = list_repo_files(repo_id)
             pt_files = [f for f in files if f.endswith(".pt")]
-            
+
             if not pt_files:
                 print(f"✗ Layer {layer_num} failed: No .pt file found in repository")
                 continue
-            
+
             # Download the .pt file
             pt_filename = pt_files[0]
-            
+
             downloaded_path = hf_hub_download(repo_id=repo_id, filename=pt_filename, cache_dir="./hf_cache")
             target_dir = sae_base_dir / f"layer_{layer_num}"
             target_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # Save as weights.pt for compatibility
             shutil.copy(downloaded_path, target_dir / "weights.pt")
-            
+
             # Download config if available
             try:
                 config_path = hf_hub_download(repo_id=repo_id, filename="config.json", cache_dir="./hf_cache")
                 shutil.copy(config_path, target_dir / "config.json")
             except:
                 pass
-            
+
             successful_layers.append(layer_num)
             print(f"✓ Layer {layer_num} complete")
-            
+
         except Exception as e:
             print(f"✗ Layer {layer_num} failed: {str(e)}")
-    
+
     print(f"\nDownloaded {len(successful_layers)}/12 SAE layers to {sae_base_dir}")
 
 
 # =============================================================================
 # CONVERSION UTILITIES
 # =============================================================================
+
 
 def _create_output_structure(output_path: Path, num_classes: int) -> None:
     """Create standard output directory structure for all datasets."""
@@ -328,8 +385,15 @@ def _create_conversion_stats(dataset_name: str, config: DatasetConfig) -> Dict:
     return {
         'dataset': dataset_name,
         'total_images': 0,
-        'splits': {'train': 0, 'val': 0, 'test': 0},
-        'classes': {name: 0 for name in config.class_names},
+        'splits': {
+            'train': 0,
+            'val': 0,
+            'test': 0
+        },
+        'classes': {
+            name: 0
+            for name in config.class_names
+        },
         'class_mapping': config.class_to_idx
     }
 
@@ -338,26 +402,28 @@ def _save_metadata(output_path: Path, stats: Dict) -> None:
     """Save conversion metadata to JSON file."""
     with open(output_path / "dataset_metadata.json", 'w') as f:
         json.dump(stats, f, indent=2)
-    
+
     print(f"\nConversion complete!")
     print(f"Total images: {stats['total_images']}")
     print(f"Splits: {stats['splits']}")
     print(f"Classes: {stats['classes']}")
 
 
-def _process_image(img_path: Path, dest_path: Path, stats: Dict, split: str, class_name: str, copy_only: bool = False) -> bool:
+def _process_image(
+    img_path: Path, dest_path: Path, stats: Dict, split: str, class_name: str, copy_only: bool = False
+) -> bool:
     """Process and save a single image, updating statistics. Returns True if successful."""
     try:
         if img_path.stat().st_size == 0:
             print(f"Warning: Skipping empty file: {img_path}")
             return False
-        
+
         if copy_only:
             shutil.copy2(img_path, dest_path)
         else:
             img = Image.open(img_path).convert('RGB')
             img.save(dest_path, 'PNG')
-        
+
         stats['total_images'] += 1
         stats['splits'][split] += 1
         stats['classes'][class_name] += 1
@@ -384,12 +450,12 @@ def split_ids(len_ids):
 def prepare_covidquex(source_path: Path, output_path: Path, config: DatasetConfig = COVIDQUEX_CONFIG) -> Dict:
     """Convert CovidQUEX dataset to unified format."""
     output_path, source_path = Path(output_path), Path(source_path)
-    
+
     _create_output_structure(output_path, config.num_classes)
     conversion_stats = _create_conversion_stats('covidquex', config)
-    
+
     split_mapping = {'Train': 'train', 'Val': 'val', 'Test': 'test'}
-    
+
     for source_split, target_split in split_mapping.items():
         split_dir = source_path / source_split
         if not split_dir.exists():
@@ -400,13 +466,13 @@ def prepare_covidquex(source_path: Path, output_path: Path, config: DatasetConfi
             if not images_dir.exists():
                 print(f"Warning: Images directory {images_dir} not found")
                 continue
-                
+
             images = list(images_dir.glob("*.png")) + list(images_dir.glob("*.jpg"))
             if not images:
                 continue
-                
+
             print(f"Found {len(images)} images in {source_split}/{class_name}")
-            
+
             for idx, img_path in enumerate(tqdm(images, desc=f"{source_split}/{class_name}")):
                 new_name = f"img_{class_idx:02d}_{target_split}_{idx:05d}.png"
                 dest_path = output_path / target_split / f"class_{class_idx}" / new_name
@@ -424,34 +490,31 @@ def prepare_hyperkvasir(
 ) -> Dict:
     """Convert HyperKvasir dataset to unified format using CSV metadata."""
     output_path, source_path = Path(output_path), Path(source_path)
-    
+
     _create_output_structure(output_path, config.num_classes)
     conversion_stats = _create_conversion_stats('hyperkvasir', config)
-    
+
     # Load CSV metadata
     csv_path = csv_path or source_path / "image-labels.csv"
     if not csv_path.exists():
         raise ValueError(f"CSV file not found at {csv_path}")
-    
+
     df = pd.read_csv(csv_path)
-    df_filtered = df[
-        (df['Classification'] == 'anatomical-landmarks') & 
-        (df['Finding'].isin(config.class_names))
-    ].copy()
-    
+    df_filtered = df[(df['Classification'] == 'anatomical-landmarks') & (df['Finding'].isin(config.class_names))].copy()
+
     print(f"Found {len(df_filtered)} images for classes: {config.class_names}")
-    
-    # Create splits using SSL4GIE method  
+
+    # Create splits using SSL4GIE method
     train_idx, test_idx, val_idx = split_ids(len(df_filtered))
     split_indices = {'train': train_idx, 'val': val_idx, 'test': test_idx}
 
     for split, indices in split_indices.items():
         split_df = df_filtered.iloc[indices]
-        
+
         for _, row in tqdm(split_df.iterrows(), desc=f"Processing {split}", total=len(split_df)):
             video_file, finding = row['Video file'], row['Finding']
             class_idx = config.class_to_idx[finding]
-            
+
             # Find the actual image file
             img_path = None
             for ext in ['.jpg', '.jpeg', '.png']:
@@ -461,11 +524,11 @@ def prepare_hyperkvasir(
                 if matches := list(source_path.rglob(f"{video_file}{ext}")):
                     img_path = matches[0]
                     break
-            
+
             if img_path is None:
                 print(f"Warning: Could not find image for {video_file}")
                 continue
-            
+
             img_count = conversion_stats['splits'][split]
             new_name = f"img_{class_idx:02d}_{split}_{img_count:05d}.png"
             dest_path = output_path / split / f"class_{class_idx}" / new_name
@@ -478,59 +541,124 @@ def prepare_hyperkvasir(
 def prepare_waterbirds(source_path: Path, output_path: Path, config: Optional['DatasetConfig'] = None) -> Dict:
     """Convert Waterbirds dataset to unified format."""
     output_path, source_path = Path(output_path), Path(source_path)
-    
+
     if config is None:
         from dataset_config import WATERBIRDS_CONFIG
         config = WATERBIRDS_CONFIG
-    
+
     _create_output_structure(output_path, config.num_classes)
     conversion_stats = _create_conversion_stats('waterbirds', config)
     conversion_stats['groups'] = {'landbird_land': 0, 'landbird_water': 0, 'waterbird_land': 0, 'waterbird_water': 0}
-    
+
     # Load metadata
     metadata_path = source_path / "metadata.csv"
     if not metadata_path.exists():
         raise ValueError(f"Metadata file not found at {metadata_path}")
-    
+
     df = pd.read_csv(metadata_path)
     print(f"Found {len(df)} images in metadata")
-    
+
     split_mapping = {0: 'train', 1: 'val', 2: 'test'}
-    
+
     for _, row in tqdm(df.iterrows(), desc="Processing Waterbirds", total=len(df)):
         y, place, split_idx = int(row['y']), int(row['place']), int(row['split'])
-        
+
         if split_idx not in split_mapping:
             print(f"Warning: Unknown split index {split_idx}, skipping")
             continue
-        
+
         split = split_mapping[split_idx]
         class_name = config.idx_to_class[y]
-        
+
         # Track group statistics (unique to Waterbirds)
         group_name = f"{class_name}_{'land' if place == 0 else 'water'}"
         conversion_stats['groups'][group_name] += 1
-        
+
         img_path = source_path / row['img_filename']
         if not img_path.exists():
             print(f"Warning: Image not found at {img_path}")
             continue
-        
+
         img_count = conversion_stats['splits'][split]
         new_name = f"img_{y:02d}_{split}_{img_count:05d}.jpg"
         dest_path = output_path / split / f"class_{y}" / new_name
         _process_image(img_path, dest_path, conversion_stats, split, class_name, copy_only=True)
-    
+
     # Custom metadata saving for Waterbirds (includes group stats)
     with open(output_path / "dataset_metadata.json", 'w') as f:
         json.dump(conversion_stats, f, indent=2)
-    
+
     print(f"\nConversion complete!")
     print(f"Total images: {conversion_stats['total_images']}")
     print(f"Splits: {conversion_stats['splits']}")
     print(f"Classes: {conversion_stats['classes']}")
     print(f"Groups: {conversion_stats['groups']}")
-    
+
+    return conversion_stats
+
+
+def prepare_imagenet(source_path: Path, output_path: Path, config: Optional['DatasetConfig'] = None) -> Dict:
+    """
+    Convert ImageNet dataset to unified format.
+    Handles both val and test splits from HuggingFace download.
+    """
+    output_path, source_path = Path(output_path), Path(source_path)
+
+    if config is None:
+        from dataset_config import get_imagenet_config
+        config = get_imagenet_config()
+
+    # Optional guard (nice safety net)
+    if "class_0" in config.class_names[0]:
+        print("⚠ Using placeholder ImageNet class names. "
+              "Did you call refresh_imagenet_config() after download?")
+
+    _create_output_structure(output_path, config.num_classes)
+    conversion_stats = _create_conversion_stats('imagenet', config)
+
+    # Process validation split and split into val/test (has real labels organized by class)
+    val_source = source_path / "val"
+    if val_source.exists():
+        print(f"\nProcessing validation split from {val_source}")
+        print("Will split 50k images into 25k val + 25k test")
+
+        # Collect images per class first
+        images_by_class = {}
+        for class_dir in sorted(val_source.iterdir()):
+            if not class_dir.is_dir() or not class_dir.name.startswith("class_"):
+                continue
+            class_idx = int(class_dir.name.split("_")[1])
+            images = list(class_dir.glob("*.JPEG")) + list(class_dir.glob("*.jpg")) + list(class_dir.glob("*.png"))
+            images_by_class[class_idx] = sorted(images)  # Sort for consistent splitting
+
+        # Split each class: first half → val, second half → test
+        print("Splitting images per class (first 25 → val, last 25 → test)...")
+
+        for class_idx, images in tqdm(images_by_class.items(), desc="Processing classes"):
+            class_name = config.idx_to_class[class_idx]
+
+            # Split this class's images in half
+            mid_point = len(images) // 2
+            val_images = images[:mid_point]
+            test_images = images[mid_point:]
+
+            # Process val images
+            for img_path in val_images:
+                img_count = conversion_stats['splits']['val']
+                new_name = f"img_{class_idx:03d}_val_{img_count:06d}.jpeg"
+                dest_path = output_path / "val" / f"class_{class_idx}" / new_name
+                _process_image(img_path, dest_path, conversion_stats, 'val', class_name, copy_only=True)
+
+            # Process test images
+            for img_path in test_images:
+                img_count = conversion_stats['splits']['test']
+                new_name = f"img_{class_idx:03d}_test_{img_count:06d}.jpeg"
+                dest_path = output_path / "test" / f"class_{class_idx}" / new_name
+                _process_image(img_path, dest_path, conversion_stats, 'test', class_name, copy_only=True)
+
+        print(f"✓ Split complete: {conversion_stats['splits']['val']} val, {conversion_stats['splits']['test']} test")
+
+    _save_metadata(output_path, conversion_stats)
     return conversion_stats
 
 
@@ -540,6 +668,7 @@ def convert_dataset(dataset_name: str, source_path: Path, output_path: Path, **k
         'covidquex': prepare_covidquex,
         'hyperkvasir': prepare_hyperkvasir,
         'waterbirds': prepare_waterbirds,
+        'imagenet': prepare_imagenet,
     }
 
     if dataset_name.lower() not in converters:
@@ -578,7 +707,11 @@ def main():
         download_hyperkvasir(data_dir, models_dir)
         download_covidquex(data_dir, models_dir)
         download_waterbirds(data_dir, models_dir)
-        
+        download_imagenet(data_dir, models_dir)
+
+        from dataset_config import refresh_imagenet_config
+        refresh_imagenet_config()
+
         download_sae_checkpoints(data_dir)
         print_summary(data_dir, models_dir)
         print("\nSetup completed successfully.")

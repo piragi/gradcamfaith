@@ -4,6 +4,7 @@ Compares vanilla TransLRP vs feature gradient gating across different configurat
 """
 
 import json
+import re
 from datetime import datetime
 from itertools import product
 from pathlib import Path
@@ -62,12 +63,16 @@ def run_single_experiment(
     pipeline_config.file.base_pipeline_dir = output_dir
 
     # CLIP settings for specific datasets
-    if dataset_name in ["waterbirds"]:
+    if dataset_name in ["waterbirds", "imagenet"]:
         pipeline_config.classify.use_clip = True
         pipeline_config.classify.clip_model_name = "open-clip:laion/CLIP-ViT-B-32-DataComp.XL-s13B-b90K"
 
         if dataset_name == "waterbirds":
             pipeline_config.classify.clip_text_prompts = ["a photo of a terrestrial bird", "a photo of an aquatic bird"]
+        elif dataset_name == "imagenet":
+            # Create prompts for all 1000 ImageNet classes
+            dataset_cfg = get_dataset_config(dataset_name)
+            pipeline_config.classify.clip_text_prompts = [f"a photo of a {cls}" for cls in dataset_cfg.class_names]
 
     # Feature gradient gating settings
     pipeline_config.classify.boosting.enable_feature_gradients = experiment_params['use_feature_gradients']
@@ -215,16 +220,35 @@ def run_parameter_sweep(
         # Load model and SAE resources once for this dataset
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         dataset_config = get_dataset_config(dataset_name)
+        print(dataset_config)
 
         # Create temporary pipeline config to get CLIP settings
         temp_config = config.PipelineConfig()
         temp_config.file.set_dataset(dataset_name)
-        if dataset_name in ["waterbirds"]:
+        if dataset_name in ["waterbirds", "imagenet"]:
             temp_config.classify.use_clip = True
             temp_config.classify.clip_model_name = "open-clip:laion/CLIP-ViT-B-32-DataComp.XL-s13B-b90K"
             if dataset_name == "waterbirds":
                 temp_config.classify.clip_text_prompts = ["a photo of a terrestrial bird", "a photo of an aquatic bird"]
+            elif dataset_name == "imagenet":
 
+                def _first_synonym(name: str) -> str:
+                    # "tench, Tinca tinca" -> "tench"
+                    return name.split(",")[0].strip()
+
+                def _needs_article(s: str) -> bool:
+                    return not re.match(r"^(a|an|the)\b", s, flags=re.I)
+
+                def _article(s: str) -> str:
+                    return "an" if re.match(r"^[aeiou]", s, flags=re.I) else "a"
+
+                imagenet_cfg = get_dataset_config("imagenet")
+                names = imagenet_cfg.class_names  # length 1000
+
+                cleaned = [_first_synonym(n) for n in names]
+                temp_config.classify.clip_text_prompts = [
+                    f"a photo of {(_article(n) + ' ') if _needs_article(n) else ''}{n}" for n in cleaned
+                ]
         print(f"Loading model for {dataset_name}...")
         model, clip_classifier = load_model_for_dataset(dataset_config, device, temp_config)
         model = model.to(device)  # Ensure model is on correct device
@@ -405,8 +429,9 @@ def main():
     # Define datasets to test
     datasets = [
         ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
-        ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
-        ("covidquex", Path("./data/covidquex/data/lung/")),
+        # ("imagenet", Path("./data/imagenet/raw")),
+        # ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
+        # ("covidquex", Path("./data/covidquex/data/lung/")),
     ]
 
     # Define parameter grid
@@ -420,6 +445,8 @@ def main():
         [8],
         [9],
         [10],
+        #[8, 10]
+        # [4, 8]
     ]
 
     # covidquex
@@ -431,7 +458,7 @@ def main():
     # waterbirds
     # [6, 7, 8, 9]
 
-    kappa_values = [0.5, 1.]  # Gating strength
+    kappa_values = [0.5]  # Gating strength
     topk_values = [None]  # Top-k features per patch
 
     # Gate construction types for interaction ablation

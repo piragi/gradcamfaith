@@ -110,7 +110,7 @@ def compute_feature_gradient_gate(
 
     # Normalize across patches (z-score normalization)
     s_median = s_t.median()
-    s_mad = (s_t - s_median).abs().median()
+    s_mad = (s_t - s_median).abs().median() + 1e-8
 
     s_norm = (s_t - s_median) / (1.4826 * s_mad)
     # Map tanh output from [-1, 1] to [0.1, 10]
@@ -228,7 +228,7 @@ def apply_feature_gradient_gating(
         config = {}
 
     # Get configuration parameters
-    top_k = config.get('top_k_features', 15)
+    top_k = None  #config.get('top_k_features', 15)
     kappa = config.get('kappa', 10.0)
     clamp_min = config.get('clamp_min', 0.5)
     clamp_max = config.get('clamp_max', 2.0)
@@ -298,16 +298,12 @@ def apply_feature_gradient_gating(
     # The issue: cam_pos_avg is [197, 197] and combined_gate is [196]
     # We need to properly handle the CLS token dimension
     if cam_pos_avg.shape[0] == combined_gate.shape[0] + 1:
-        # CAM includes CLS token - apply gate to spatial tokens only
-        # Create a copy to avoid gradient accumulation
         gated_cam = cam_pos_avg.clone()
+        gate_col = combined_gate.unsqueeze(0)  # [1, S]
+        gated_cam[:, 1:] = gated_cam[:, 1:] * gate_col
 
-        # Expand gate for broadcasting
-        gate_exp = combined_gate.unsqueeze(0)  # [1, 196]
-        gated_cam[:, 1:] = gated_cam[:, 1:] * gate_exp
-
-        gate_exp = combined_gate.unsqueeze(1)  # [196, 1]
-        gated_cam[1:, :] = gated_cam[1:, :] * gate_exp
+        # row-normalize to keep rows stochastic
+        # gated_cam = gated_cam / (gated_cam.sum(-1, keepdim=True) + 1e-8)
     else:
         # CAM is spatial-only
         gated_cam = cam_pos_avg * combined_gate.unsqueeze(0)

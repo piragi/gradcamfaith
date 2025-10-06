@@ -16,20 +16,18 @@ from tqdm import tqdm
 # Suppress PIL debug logging
 logging.getLogger('PIL').setLevel(logging.WARNING)
 
+from vit_prisma.sae import SparseAutoencoder
+
 import io_utils
-from saco import run_binned_attribution_analysis
 from config import FileConfig, PipelineConfig
-from data_types import (
-    AttributionDataBundle, AttributionOutputPaths, ClassificationPrediction,
-    ClassificationResult
-)
+from data_types import (AttributionDataBundle, AttributionOutputPaths, ClassificationPrediction, ClassificationResult)
 # New imports for unified system
 from dataset_config import DatasetConfig, get_dataset_config
 from faithfulness import evaluate_and_report_faithfulness
+from saco import run_binned_attribution_analysis
 from setup import convert_dataset
 from transmm import generate_attribution_prisma_enhanced
-from unified_dataloader import (create_dataloader, get_single_image_loader)
-from vit_prisma.sae import SparseAutoencoder
+from unified_dataloader import create_dataloader, get_single_image_loader
 
 
 def load_steering_resources(layers: List[int], dataset_name: Optional[str] = None) -> Dict[int, Dict[str, Any]]:
@@ -44,7 +42,7 @@ def load_steering_resources(layers: List[int], dataset_name: Optional[str] = Non
 
     for layer_idx in layers:
         try:
-            if dataset_name == "waterbirds":
+            if dataset_name in ["waterbirds", "imagenet"]:
                 # Use CLIP Vanilla B-32 SAE for waterbirds
                 sae_path = Path(f"data/sae_clip_vanilla_b32/layer_{layer_idx}/weights.pt")
                 if not sae_path.exists():
@@ -79,7 +77,9 @@ def load_steering_resources(layers: List[int], dataset_name: Optional[str] = Non
     return resources
 
 
-def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, config: Optional[PipelineConfig] = None):
+def load_model_for_dataset(
+    dataset_config: DatasetConfig, device: torch.device, config: Optional[PipelineConfig] = None
+):
     """
     Load the appropriate model and CLIP classifier for a given dataset configuration.
 
@@ -138,9 +138,7 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, 
     # Load checkpoint if available
     checkpoint_path = Path(dataset_config.model_checkpoint)
     if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Model checkpoint not found at '{checkpoint_path}'. "
-        )
+        raise FileNotFoundError(f"Model checkpoint not found at '{checkpoint_path}'. ")
 
     print(f"Loading model checkpoint from {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, weights_only=False)
@@ -165,6 +163,7 @@ def load_model_for_dataset(dataset_config: DatasetConfig, device: torch.device, 
 
     model.to(device).eval()
     return model, None  # No CLIP classifier for regular ViT models
+
 
 def prepare_dataset_if_needed(
     dataset_name: str, source_path: Path, prepared_path: Path, force_prepare: bool = False, **converter_kwargs
@@ -258,7 +257,6 @@ def save_attribution_bundle_to_files(
     # Save raw attribution
     np.save(raw_attribution_path, attribution_bundle.raw_attribution)
 
-
     return AttributionOutputPaths(
         attribution_path=attribution_path,
         raw_attribution_path=raw_attribution_path,
@@ -318,7 +316,6 @@ def classify_explain_single_image(
         confidence=float(prediction_data["probabilities"][prediction_data["predicted_class_idx"]]),
         probabilities=prediction_data["probabilities"]
     )
-
 
     # Create attribution bundle
     attribution_bundle = AttributionDataBundle(
@@ -382,7 +379,6 @@ def run_unified_pipeline(
     # Get dataset configuration
     dataset_config = get_dataset_config(dataset_name)
     print(f"Loading configuration for {dataset_name} dataset")
-    print(f"  Classes: {dataset_config.num_classes} - {dataset_config.class_names}")
 
     # Ensure all required directories exist
     io_utils.ensure_directories(config.directories)
@@ -404,17 +400,8 @@ def run_unified_pipeline(
     use_clip = config.classify.use_clip if hasattr(config.classify, 'use_clip') else False
     dataset_loader = create_dataloader(
         dataset_name=dataset_name,
-        data_path=prepared_path,
-        batch_size=getattr(config.classify, 'batch_size', 32),
-        use_clip=use_clip
+        data_path=prepared_path
     )
-
-    # Print dataset statistics
-    stats = dataset_loader.get_statistics()
-    for split, split_stats in stats['splits'].items():
-        print(f"\n{split.upper()}: {split_stats['total_samples']} samples")
-        for class_name, count in split_stats['class_distribution'].items():
-            print(f"  {class_name}: {count}")
 
     # Use pre-loaded model and steering resources
     print(f"\nUsing pre-loaded model for {dataset_name}")
@@ -423,21 +410,20 @@ def run_unified_pipeline(
     # Process images from the specified split (mode)
     split_to_use = config.file.current_mode if config.file.current_mode in ['train', 'val', 'test', 'dev'] else 'test'
 
-    split_dataset = dataset_loader.get_dataset(split_to_use)
-    # Get both image paths and their true labels
-    image_data = [(Path(img_path), label_idx) for img_path, label_idx in split_dataset.samples]
+    image_data = list(dataset_loader.get_numeric_samples(split_to_use))
+    total_samples = len(image_data)
 
     # Apply subset if requested
-    if subset_size is not None and subset_size < len(image_data):
+    if subset_size is not None and subset_size < total_samples:
         import random
         if random_seed is not None:
             random.seed(random_seed)
         image_data = random.sample(image_data, subset_size)
         print(
-            f"\nProcessing {len(image_data)} randomly selected {split_to_use} images (subset of {len(split_dataset.samples)})"
+            f"\nProcessing {len(image_data)} randomly selected {split_to_use} images (subset of {total_samples})"
         )
     else:
-        print(f"\nProcessing {len(image_data)} {split_to_use} images")
+        print(f"\nProcessing {total_samples} {split_to_use} images")
 
     # Use pre-loaded CLIP classifier (created once per dataset)
     if clip_classifier is not None:
@@ -498,7 +484,7 @@ def run_unified_pipeline(
     if hasattr(config.classify, 'clip_model_name') and config.classify.clip_model_name:
         model_name = config.classify.clip_model_name.lower()
         is_patch32 = "patch32" in model_name or "b-32" in model_name or "b32" in model_name
-    n_bins = 20 if is_patch32 else 49
+    n_bins = 13 if is_patch32 else 49
     print(f"Running attribution analysis with {n_bins} bins (patch-{'32' if is_patch32 else '16'})...")
 
     saco_analysis = run_binned_attribution_analysis(config, model_for_analysis, results, device, n_bins=n_bins)
@@ -520,11 +506,6 @@ def run_unified_pipeline(
         # Also include correctness breakdown
         correctness_stats = fc_df.groupby('is_correct')['saco_score'].agg(['mean', 'std', 'count'])
         saco_results['by_correctness'] = correctness_stats.to_dict('index')
-
-        print(f"Mean SaCo score: {saco_results['mean']:.4f} (std={saco_results['std']:.4f})")
-        print(f"Per-class SaCo scores:")
-        for class_name, stats in saco_results['per_class'].items():
-            print(f"  {class_name}: {stats['mean']:.4f} (std={stats['std']:.4f}, n={stats['count']})")
 
     print("\nPipeline complete!")
 

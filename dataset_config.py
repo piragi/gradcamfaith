@@ -8,6 +8,7 @@ IMPORTANT: All preprocessing is centralized here through callable transforms.
 This is the SINGLE SOURCE OF TRUTH for all dataset preprocessing.
 """
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -44,11 +45,11 @@ def create_covidquex_transform(_) -> transforms.Compose:
 def create_hyperkvasir_transform(split: str = 'test') -> transforms.Compose:
     """HyperKvasir transforms: ImageNet normalization + training augmentations."""
     mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
-    
+
     base_transforms = [
         transforms.Resize((224, 224), interpolation=BILINEAR),
     ]
-    
+
     if split == 'train':
         base_transforms.extend([
             transforms.ColorJitter(brightness=0.4, contrast=0.5, saturation=0.25, hue=0.01),
@@ -57,17 +58,20 @@ def create_hyperkvasir_transform(split: str = 'test') -> transforms.Compose:
             transforms.RandomVerticalFlip(),
             transforms.RandomRotation(180),
         ])
-    
-    base_transforms.extend([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std)
-    ])
-    
+
+    base_transforms.extend([transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)])
+
     return transforms.Compose(base_transforms)
 
 
 def create_waterbirds_transform(_) -> transforms.Compose:
     """Waterbirds transforms: CLIP preprocessing."""
+    from vit_prisma.transforms import get_clip_val_transforms
+    return get_clip_val_transforms()
+
+
+def create_imagenet_transform(_) -> transforms.Compose:
+    """ImageNet transforms: CLIP preprocessing (same as waterbirds)."""
     from vit_prisma.transforms import get_clip_val_transforms
     return get_clip_val_transforms()
 
@@ -159,28 +163,68 @@ WATERBIRDS_CONFIG = DatasetConfig(
     transform_fn=create_waterbirds_transform
 )
 
+_IMAGENET_CONFIG = None  # module-level cache
+
+
+def _create_imagenet_config() -> "DatasetConfig":
+    """
+    Build ImageNet-1k config using saved class_names.json if present,
+    otherwise fall back to placeholders (only used until refresh).
+    """
+    class_names_file = Path("./data/imagenet/raw/class_names.json")
+    if class_names_file.exists():
+        with open(class_names_file, "r") as f:
+            class_names = json.load(f)
+        print(f"✓ Loaded {len(class_names)} ImageNet class names from {class_names_file}")
+    else:
+        # Quiet fallback; we'll refresh after download
+        class_names = [f"class_{i}" for i in range(1000)]
+
+    class_to_idx = {name: i for i, name in enumerate(class_names)}
+    idx_to_class = {i: name for i, name in enumerate(class_names)}
+
+    return DatasetConfig(
+        name="imagenet",
+        num_classes=1000,
+        class_names=class_names,
+        class_to_idx=class_to_idx,
+        idx_to_class=idx_to_class,
+        model_checkpoint="",
+        transform_fn=create_imagenet_transform,
+    )
+
+
+def get_imagenet_config() -> "DatasetConfig":
+    """Return cached ImageNet config (build once, then reuse)."""
+    global _IMAGENET_CONFIG
+    if _IMAGENET_CONFIG is None:
+        _IMAGENET_CONFIG = _create_imagenet_config()
+    return _IMAGENET_CONFIG
+
+
+def refresh_imagenet_config() -> None:
+    """Rebuild the cached config (call after download writes class_names.json)."""
+    global _IMAGENET_CONFIG
+    _IMAGENET_CONFIG = _create_imagenet_config()
+
+
 # Dataset registry for easy access
 DATASET_CONFIGS = {
     "covidquex": COVIDQUEX_CONFIG,
     "hyperkvasir": HYPERKVASIR_CONFIG,
     "waterbirds": WATERBIRDS_CONFIG,
+    "imagenet": get_imagenet_config,
 }
 
 
 def get_dataset_config(dataset_name: str) -> DatasetConfig:
     """
-    Get configuration for a specific dataset.
-    
-    Args:
-        dataset_name: Name of the dataset ('covidquex' or 'hyperkvasir')
-        
-    Returns:
-        DatasetConfig object for the specified dataset
-        
-    Raises:
-        ValueError: If dataset_name is not recognized
+    Return a concrete DatasetConfig for the given dataset.
+    Supports both direct objects and callables (lazy factories).
     """
-    if dataset_name.lower() not in DATASET_CONFIGS:
+    key = dataset_name.lower()
+    if key not in DATASET_CONFIGS:
         raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(DATASET_CONFIGS.keys())}")
 
-    return DATASET_CONFIGS[dataset_name.lower()]
+    cfg_or_factory = DATASET_CONFIGS[key]
+    return cfg_or_factory() if callable(cfg_or_factory) else cfg_or_factory

@@ -155,9 +155,13 @@ def _run_estimator_trials(
 
     # Calculate statistics across trials
     all_results = np.stack(all_results, axis=0)
+
+    # Replace any remaining NaN values with 0 for stable statistics
+    all_results = np.nan_to_num(all_results, nan=0.0)
+
     return {
-        "mean_scores": np.nanmean(all_results, axis=0),
-        "std_scores": np.nanstd(all_results, axis=0),
+        "mean_scores": np.mean(all_results, axis=0),
+        "std_scores": np.std(all_results, axis=0),
         "all_trials": all_results,
         "n_trials": n_trials,
         "nr_runs": nr_runs,
@@ -260,7 +264,7 @@ def evaluate_faithfulness_for_results(
             device=device,
             n_trials=3,
             nr_runs=20,
-            subset_size=98 if n_patches == 196 else 10,
+            subset_size=98 if n_patches == 196 else 24,
             n_patches=n_patches
         )
 
@@ -295,36 +299,28 @@ def evaluate_faithfulness_for_results(
     return final_results, np.array(all_y_labels)
 
 
-def _prepare_batch_data(config: PipelineConfig,
-                        batch_results: List[ClassificationResult],
-                        n_patches: int = 196) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Prepare batch data for faithfulness evaluation."""
-    x_list = []
-    y_list = []
-    a_list = []
+def _prepare_batch_data(config: PipelineConfig, batch_results: List[ClassificationResult], n_patches: int = 196):
+    x_list, y_list, a_list = [], [], []
+
+    # fetch the exact eval transforms for this dataset/split
+    from dataset_config import get_dataset_config
+    ds_cfg = get_dataset_config(config.file.dataset_name)
+    transform = ds_cfg.get_transforms('test')
 
     for result in batch_results:
         try:
-            # Load and preprocess image
-            img = Image.open(result.image_path).convert('RGB').resize((224, 224))
-            img_array = np.array(img, dtype=np.float32) / 255.0
+            # load raw PIL
+            img = Image.open(result.image_path).convert('RGB')
 
-            # Convert to CHW format
-            img_array = np.transpose(img_array, (2, 0, 1))
+            # use dataset transforms (produces a torch.Tensor)
+            t = transform(img)  # (C,H,W), normalized for the model
+            img_array = t.cpu().numpy()  # numpy for the estimator path
 
-            # Apply normalization (ImageNet stats)
-            mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
-            std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
-            img_array = (img_array - mean) / std
-
-            # Load attribution
+            # load attribution and normalize to patch format as you already do
             attr_map = np.load(result.attribution_paths.raw_attribution_path)
-
             attr_map = _normalize_attribution_format(attr_map, n_patches)
-
             if attr_map is None:
                 continue
-
             converted_attr = convert_patch_attribution_to_image(attr_map, n_patches)
             if converted_attr is None:
                 continue
@@ -332,7 +328,6 @@ def _prepare_batch_data(config: PipelineConfig,
             x_list.append(img_array)
             y_list.append(result.prediction.predicted_class_idx)
             a_list.append(converted_attr)
-
         except Exception as e:
             print(f"Warning: Could not process {result.image_path.name}: {e}")
             continue
@@ -596,12 +591,12 @@ def _print_faithfulness_summary(metrics: Dict[str, Dict], dataset_config=None):
         print(f"  Count: {overall['count']}")
         print(f"  Avg trial std: {overall['avg_trial_std']:.4f}")
 
-        print(f"\n{estimator_name} per-class statistics:")
-        for class_idx, stats in estimator_data['by_class'].items():
-            class_name = dataset_config.idx_to_class.get(
-                class_idx, f"Class {class_idx}"
-            ) if dataset_config else f"Class {class_idx}"
-            print(f"  {class_name}: mean={stats['mean']:.4f}, count={stats['count']}")
+        # print(f"\n{estimator_name} per-class statistics:")
+        # for class_idx, stats in estimator_data['by_class'].items():
+        # class_name = dataset_config.idx_to_class.get(
+        # class_idx, f"Class {class_idx}"
+        # ) if dataset_config else f"Class {class_idx}"
+        # print(f"  {class_name}: mean={stats['mean']:.4f}, count={stats['count']}")
 
 
 def _save_faithfulness_results(
@@ -846,25 +841,23 @@ class FaithfulnessCorrelation:
         assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
         assert len(a.shape) == 2, "Arrays must be 2D (batch_size, nr_runs)"
 
-        # Compute Spearman correlation row-wise
-        result = spearmanr(a, b, axis=1)
-        correlation = result[0] if isinstance(result, tuple) else result
+        # Check for no variance cases and handle them before calling spearmanr
+        correlations = np.zeros(batch_size)
 
-        # Convert to numpy array and handle different shapes
-        correlation = np.asarray(correlation)
+        for i in range(batch_size):
+            a_row = a[i]
+            b_row = b[i]
 
-        # Handle different return shapes based on batch_size
-        if batch_size == 1:
-            # Single sample: spearmanr returns a scalar or 0-D array
-            return np.atleast_1d(correlation)
-        elif correlation.ndim == 2:
-            # Multiple samples: spearmanr returns a 2D correlation matrix
-            # Extract diagonal from the cross-correlation block
-            correlation_block = correlation[:batch_size, batch_size:]
-            return np.diag(correlation_block)
-        else:
-            # Unexpected shape - likely all NaN due to no variance
-            return np.full(batch_size, np.nan)
+            # Check if either array has no variance (all values identical)
+            if np.std(a_row) < 1e-10 or np.std(b_row) < 1e-10:
+                # No variance means correlation is undefined - use 0 instead of NaN
+                correlations[i] = 0.0
+            else:
+                # Compute Spearman correlation for this sample
+                corr, _ = spearmanr(a_row, b_row)
+                correlations[i] = corr if not np.isnan(corr) else 0.0
+
+        return correlations
 
     def __call__(
         self,
@@ -938,9 +931,7 @@ class FaithfulnessCorrelation:
             x_perturbed = x_batch.copy()
             for batch_idx in range(batch_size):
                 # Create mask for selected patches
-                mask = create_patch_mask(
-                    patch_choices[batch_idx], x_batch.shape[1:], self.n_patches, self.patch_size
-                )
+                mask = create_patch_mask(patch_choices[batch_idx], x_batch.shape[1:], self.n_patches, self.patch_size)
 
                 # Apply baseline perturbation
                 x_perturbed[batch_idx] = apply_baseline_perturbation(
