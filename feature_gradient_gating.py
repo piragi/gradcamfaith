@@ -16,7 +16,6 @@ def compute_feature_gradient_gate(
     normalize_decoder: bool = True,
     denoise_gradient: bool = False,
     kappa: float = 3.0,
-    clamp_min: float = 0.2,
     clamp_max: float = 5.0,
     gate_construction: str = "combined",
     shuffle_decoder: bool = False,
@@ -39,8 +38,7 @@ def compute_feature_gradient_gate(
         normalize_decoder: Whether to normalize decoder columns
         denoise_gradient: Whether to project gradient onto decoder subspace first
         kappa: Scaling factor for exponential mapping
-        clamp_min: Minimum multiplier value
-        clamp_max: Maximum multiplier value
+        clamp_max: Maximum multiplier value (gate range: [1/clamp_max, clamp_max])
         gate_construction: Gate construction type: "activation_only", "gradient_only", or "combined"
         shuffle_decoder: Whether to shuffle decoder columns to break semantic alignment
         debug: Whether to return debug information
@@ -113,14 +111,12 @@ def compute_feature_gradient_gate(
     s_mad = (s_t - s_median).abs().median() + 1e-8
 
     s_norm = (s_t - s_median) / (1.4826 * s_mad)
-    # Map tanh output from [-1, 1] to [0.1, 10]
-    gate_min = 0.1
-    gate_max = 10.0
-    gate_center = (gate_min + gate_max) / 2  # 5.05
-    gate_range = (gate_max - gate_min) / 2  # 4.95
 
-    temperature = kappa
-    gate = gate_center + gate_range * torch.tanh(s_norm * temperature)
+    # Symmetric exponential mapping: gate = clamp_max^(tanh(kappa * s_norm))
+    # Range: [1/clamp_max, clamp_max], centered at 1
+    gate = torch.exp(
+        torch.log(torch.tensor(clamp_max, device=s_norm.device, dtype=s_norm.dtype)) * torch.tanh(kappa * s_norm)
+    )
     gate = gate.detach()
 
     # Collect debug information
@@ -230,8 +226,7 @@ def apply_feature_gradient_gating(
     # Get configuration parameters
     top_k = None  #config.get('top_k_features', 15)
     kappa = config.get('kappa', 10.0)
-    clamp_min = config.get('clamp_min', 0.5)
-    clamp_max = config.get('clamp_max', 2.0)
+    clamp_max = config.get('clamp_max', 5.0)
     denoise_gradient = config.get('denoise_gradient', False)
     gate_construction = config.get('gate_construction', 'combined')
     shuffle_decoder = config.get('shuffle_decoder', False)
@@ -252,7 +247,6 @@ def apply_feature_gradient_gating(
         top_k=top_k,
         denoise_gradient=denoise_gradient,
         kappa=kappa,
-        clamp_min=clamp_min,
         clamp_max=clamp_max,
         gate_construction=gate_construction,
         shuffle_decoder=shuffle_decoder,
