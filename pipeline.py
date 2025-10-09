@@ -434,8 +434,8 @@ def run_unified_pipeline(
 
     for _, (image_path, true_label_idx) in enumerate(tqdm(image_data, desc="Classifying & Explaining")):
         try:
-            # Convert label index to label name
-            true_label = dataset_config.idx_to_class[true_label_idx]
+            # Convert label index to label name (handle unlabeled = -1)
+            true_label = dataset_config.idx_to_class.get(true_label_idx)
 
             result = classify_explain_single_image(
                 config=config,

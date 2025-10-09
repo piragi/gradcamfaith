@@ -57,7 +57,7 @@ def apply_gradient_gating_to_cam(
         'top_k_features': topk_value,
         'kappa': getattr(config.classify.boosting, 'kappa', 50.0),
         'clamp_min': 0.1,
-        'clamp_max': 10.0,
+        'clamp_max': getattr(config.classify.boosting, 'clamp_max', 10.0),
         'denoise_gradient': False,
         'denoise_alpha': 5.0,
         'denoise_min': 0.6,

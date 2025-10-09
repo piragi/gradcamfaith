@@ -54,13 +54,20 @@ class UnifiedMedicalDataset:
             if not any(split_path.glob("class_*/*")):
                 continue
 
-            # Create ImageFolder dataset and cache numeric sample metadata
-            dataset = ImageFolder(
-                root=split_path,
-                transform=self.config.get_transforms(split)
-            )
+            # Special-case: ImageNet test split is unlabeled; use class_-1 only
+            if self.config.name == 'imagenet' and split == 'test':
+                cls_dir = split_path / 'class_-1'
+                files = []
+                for pattern in ('*.JPEG','*.jpeg','*.jpg','*.png'):
+                    files.extend(sorted(cls_dir.glob(pattern)))
+                self.numeric_samples[split] = [(f, -1) for f in files]
+            else:
+                dataset = ImageFolder(
+                    root=split_path,
+                    transform=self.config.get_transforms(split)
+                )
 
-            self.numeric_samples[split] = self._build_numeric_samples(dataset)
+                self.numeric_samples[split] = self._build_numeric_samples(dataset)
     
     def _verify_data_structure(self):
         """Verify that the data path has the expected structure."""
@@ -81,8 +88,12 @@ class UnifiedMedicalDataset:
         for split in existing_splits:
             split_path = self.data_path / split
             class_folders = list(split_path.glob("class_*"))
-            
-            if len(class_folders) != self.config.num_classes:
+            # Allow ImageNet test to include an extra 'class_-1' folder
+            effective_count = len(class_folders)
+            if self.config.name == 'imagenet' and split == 'test' and any(f.name == 'class_-1' for f in class_folders):
+                effective_count -= 1
+
+            if effective_count != self.config.num_classes:
                 print(
                     f"Warning: Expected {self.config.num_classes} classes in {split}, "
                     f"but found {len(class_folders)}"

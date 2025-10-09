@@ -161,72 +161,98 @@ def download_waterbirds(data_dir: Path, models_dir: Path) -> None:
 
 def download_imagenet(data_dir: Path, models_dir: Path) -> None:
     """
-    Download ONLY ImageNet-1k validation split (50k images) from Hugging Face.
-    Avoids touching the training shards entirely by targeting parquet files directly.
-    The validation set will be split into val/test during conversion.
+    Download ImageNet-1k validation and test splits from Hugging Face parquet files.
+    Avoids training shards entirely by targeting parquet files directly.
     """
-    print("\nDownloading ImageNet-1k validation split...")
+    print("Downloading ImageNet-1k validation and test splits...")
     print("Note: Requires HF login & access to ILSVRC/imagenet-1k.")
-    print("Visit https://huggingface.co/datasets/imagenet-1k to request access.")
+    print("Visit https://huggingface.co/datasets/ILSVRC/imagenet-1k to request access.")
 
     # Create imagenet subdirectories
     in_data_dir = data_dir / "imagenet"
     raw_dir = in_data_dir / "raw"
     val_dir = raw_dir / "val"
+    test_dir = raw_dir / "test"
 
-    # Check if already downloaded
-    if val_dir.exists():
-        print(f"ImageNet raw data already exists at {raw_dir}")
+    # Fast path if both splits already exist with content
+    if val_dir.exists() and any(val_dir.glob("class_*/*")) and test_dir.exists() and any(test_dir.glob("class_*/*")):
+        print(f"ImageNet raw splits already exist at {raw_dir}")
         return
 
+    raw_dir.mkdir(parents=True, exist_ok=True)
     val_dir.mkdir(parents=True, exist_ok=True)
+    test_dir.mkdir(parents=True, exist_ok=True)
 
-    from datasets import load_dataset
-    # --- Load parquet files directly via hf:// so no train files are ever considered ---
-    # Validation (50k, labeled) - will be split into val/test during conversion
     try:
-        print("\nLoading validation parquet files directly...")
-        val = load_dataset(
-            "parquet",
-            data_files="hf://datasets/ILSVRC/imagenet-1k/data/validation-*.parquet",
-            split="train",  # parquet builder exposes a single 'train' split = the given files
-        )
+        from datasets import load_dataset
+    except ImportError:
+        print("⚠ Error: datasets library not installed. Install with: pip install datasets")
+        return
 
-        # Extract class names from the dataset features
-        if hasattr(val.features['label'], 'names'):
-            class_names = val.features['label'].names
-            print(f"Found {len(class_names)} ImageNet class names")
+    def _save_split(split_name: str, pattern: str, out_dir: Path):
+        try:
+            print(f"Loading {split_name} parquet files...")
+            ds = load_dataset(
+                "parquet",
+                data_files=pattern,
+                split="train",
+            )
 
-            # Save class names for later use
-            class_names_file = raw_dir / "class_names.json"
-            import json
-            with open(class_names_file, 'w') as f:
-                json.dump(class_names, f, indent=2)
-            print(f"✓ Saved class names to {class_names_file}")
+            # Save class names from validation split
+            if split_name == "validation" and 'label' in ds.features and hasattr(ds.features['label'], 'names'):
+                class_names = ds.features['label'].names
+                print(f"Found {len(class_names)} ImageNet class names")
+                class_names_file = raw_dir / "class_names.json"
+                import json
+                with open(class_names_file, 'w') as f:
+                    json.dump(class_names, f, indent=2)
+                print(f"✓ Saved class names to {class_names_file}")
 
-        print(f"Saving {len(val)} validation images...")
-        for idx, item in enumerate(tqdm(val, desc="Saving val images")):
-            image = item["image"]
-            label = item["label"]
-            class_dir = val_dir / f"class_{label}"
-            class_dir.mkdir(exist_ok=True)
-            img_path = class_dir / f"img_{idx:06d}.JPEG"
-            if hasattr(image, "save"):
-                image.save(img_path)
+            print(f"Saving {len(ds)} {split_name} images...")
+            from tqdm import tqdm
+            saved = 0
+            warned_unlabeled = False
+            for idx, item in enumerate(tqdm(ds, desc=f"Saving {split_name} images")):
+                image = item.get("image")
+                label = item.get("label")
+                # Robust unlabeled handling:
+                # - validation: skip unlabeled samples, keep iterating
+                # - test: put unlabeled samples under class_-1
+                if label is None or (isinstance(label, int) and label < 0):
+                    if split_name.lower().startswith("test"):
+                        label = -1
+                    else:
+                        if not warned_unlabeled:
+                            print(f"⚠ {split_name} sample without label encountered — skipping.")
+                            warned_unlabeled = True
+                        continue
 
-        print(f"✓ Validation set saved to {val_dir}")
+                class_dir = out_dir / f"class_{label}"
+                class_dir.mkdir(exist_ok=True)
+                img_path = class_dir / f"img_{idx:06d}.JPEG"
+                if hasattr(image, "save"):
+                    image.save(img_path)
+                    saved += 1
+            print(f"✓ {split_name.capitalize()} set saved to {out_dir} ({saved} files)")
+        except Exception as e:
+            import traceback
+            print(f"⚠ Error downloading {split_name} split: {e}")
+            print("Full traceback:")
+            traceback.print_exc()
 
-    except Exception as e:
-        import traceback
-        print(f"⚠ Error downloading validation split: {e}")
-        print("\nFull traceback:")
-        traceback.print_exc()
-        print("\nMake sure you:")
-        print("  1. Have accepted terms at https://huggingface.co/datasets/imagenet-1k")
-        print("  2. Are logged in: huggingface-cli login")
+    # Download/prepare validation
+    if not any(val_dir.glob("class_*/*")):
+        _save_split("validation", "hf://datasets/ILSVRC/imagenet-1k/data/validation-*.parquet", val_dir)
+    else:
+        print(f"Validation already present at {val_dir}")
 
-    print(f"\n✓ ImageNet validation download complete! 50k images with labels")
-    print(f"  - Will be split into 25k val + 25k test during conversion")
+    # Download/prepare test
+    if not any(test_dir.glob("class_*/*")):
+        _save_split("test", "hf://datasets/ILSVRC/imagenet-1k/data/test-*.parquet", test_dir)
+    else:
+        print(f"Test already present at {test_dir}")
+
+    print(f"✓ ImageNet raw download complete at {raw_dir}")
 
 
 def download_covidquex(data_dir: Path, models_dir: Path) -> None:
@@ -418,6 +444,9 @@ def _process_image(
             print(f"Warning: Skipping empty file: {img_path}")
             return False
 
+        # Ensure destination directory exists (covers special cases like class_-1)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
         if copy_only:
             shutil.copy2(img_path, dest_path)
         else:
@@ -426,6 +455,8 @@ def _process_image(
 
         stats['total_images'] += 1
         stats['splits'][split] += 1
+        if class_name not in stats['classes']:
+            stats['classes'][class_name] = 0
         stats['classes'][class_name] += 1
         return True
     except Exception as e:
@@ -600,7 +631,7 @@ def prepare_waterbirds(source_path: Path, output_path: Path, config: Optional['D
 def prepare_imagenet(source_path: Path, output_path: Path, config: Optional['DatasetConfig'] = None) -> Dict:
     """
     Convert ImageNet dataset to unified format.
-    Handles both val and test splits from HuggingFace download.
+    If raw/test exists, copy val and test directly. Otherwise, fall back to splitting val in half.
     """
     output_path, source_path = Path(output_path), Path(source_path)
 
@@ -610,52 +641,71 @@ def prepare_imagenet(source_path: Path, output_path: Path, config: Optional['Dat
 
     # Optional guard (nice safety net)
     if "class_0" in config.class_names[0]:
-        print("⚠ Using placeholder ImageNet class names. "
-              "Did you call refresh_imagenet_config() after download?")
+        print("⚠ Using placeholder ImageNet class names. Did you call refresh_imagenet_config() after download?")
 
     _create_output_structure(output_path, config.num_classes)
     conversion_stats = _create_conversion_stats('imagenet', config)
 
-    # Process validation split and split into val/test (has real labels organized by class)
     val_source = source_path / "val"
-    if val_source.exists():
-        print(f"\nProcessing validation split from {val_source}")
-        print("Will split 50k images into 25k val + 25k test")
+    test_source = source_path / "test"
 
-        # Collect images per class first
+    def _copy_split(split_name: str, split_dir: Path):
+        print(f"Processing {split_name} split from {split_dir}")
+        for class_dir in sorted(split_dir.iterdir()):
+            if not class_dir.is_dir() or not class_dir.name.startswith("class_"):
+                continue
+            try:
+                class_idx = int(class_dir.name.split("_")[1])
+            except Exception:
+                continue
+            class_name = config.idx_to_class.get(class_idx, f"class_{class_idx}")
+            images = list(class_dir.glob("*.JPEG")) + list(class_dir.glob("*.jpg")) + list(class_dir.glob("*.png"))
+            images = sorted(images)
+            for img_path in images:
+                img_count = conversion_stats['splits'][split_name]
+                ext = img_path.suffix.lower()
+                if ext not in [".jpeg", ".jpg", ".png"]:
+                    ext = ".jpeg"
+                new_name = f"img_{class_idx:03d}_{split_name}_{img_count:06d}{ext}"
+                dest_path = output_path / split_name / f"class_{class_idx}" / new_name
+                _process_image(img_path, dest_path, conversion_stats, split_name, class_name, copy_only=True)
+        print(f"✓ {split_name.capitalize()} copied: {conversion_stats['splits'][split_name]} images")
+
+    processed_val = False
+    processed_test = False
+    if val_source.exists() and any(val_source.glob("class_*/*")):
+        _copy_split('val', val_source)
+        processed_val = True
+    if test_source.exists() and any(test_source.glob("class_*/*")):
+        _copy_split('test', test_source)
+        processed_test = True
+
+    # If test wasn't processed but we do have validation, derive test from second half of val per class
+    if not processed_test and val_source.exists():
+        print(f"Processing validation split from {val_source}")
+        print("Will split 50k images into 25k val + 25k test")
         images_by_class = {}
         for class_dir in sorted(val_source.iterdir()):
             if not class_dir.is_dir() or not class_dir.name.startswith("class_"):
                 continue
             class_idx = int(class_dir.name.split("_")[1])
             images = list(class_dir.glob("*.JPEG")) + list(class_dir.glob("*.jpg")) + list(class_dir.glob("*.png"))
-            images_by_class[class_idx] = sorted(images)  # Sort for consistent splitting
-
-        # Split each class: first half → val, second half → test
-        print("Splitting images per class (first 25 → val, last 25 → test)...")
-
+            images_by_class[class_idx] = sorted(images)
+        from tqdm import tqdm
+        print("Splitting images per class (first half → val, second half → test)...")
         for class_idx, images in tqdm(images_by_class.items(), desc="Processing classes"):
             class_name = config.idx_to_class[class_idx]
-
-            # Split this class's images in half
             mid_point = len(images) // 2
-            val_images = images[:mid_point]
-            test_images = images[mid_point:]
-
-            # Process val images
-            for img_path in val_images:
+            for img_path in images[:mid_point]:
                 img_count = conversion_stats['splits']['val']
                 new_name = f"img_{class_idx:03d}_val_{img_count:06d}.jpeg"
                 dest_path = output_path / "val" / f"class_{class_idx}" / new_name
                 _process_image(img_path, dest_path, conversion_stats, 'val', class_name, copy_only=True)
-
-            # Process test images
-            for img_path in test_images:
+            for img_path in images[mid_point:]:
                 img_count = conversion_stats['splits']['test']
                 new_name = f"img_{class_idx:03d}_test_{img_count:06d}.jpeg"
                 dest_path = output_path / "test" / f"class_{class_idx}" / new_name
                 _process_image(img_path, dest_path, conversion_stats, 'test', class_name, copy_only=True)
-
         print(f"✓ Split complete: {conversion_stats['splits']['val']} val, {conversion_stats['splits']['test']} test")
 
     _save_metadata(output_path, conversion_stats)
