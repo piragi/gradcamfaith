@@ -23,7 +23,7 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 # ============ SWEEP CONFIG ============
 SWEEP_CONFIG = {
     'dataset': 'covidquex',  # single dataset for sweep
-    'layers': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],  # which layers to train
+    'layers': [4, 5, 6, 7, 8, 9, 10],  # which layers to train
 
     # Hyperparameters to sweep
     'expansion_factors': [64],  # Higher = more features to capture variance
@@ -51,7 +51,7 @@ def train_single_config(dataset_name, layer_idx, expansion_factor, k, lr):
 
     # Load model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    hooked_model = load_model_for_dataset(dataset_config, device)
+    hooked_model, _ = load_model_for_dataset(dataset_config, device)
 
     # Set up data paths
     data_path = Path(f"data/{dataset_name}_unified")
