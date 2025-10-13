@@ -228,7 +228,6 @@ def apply_binned_perturbation(
             # Use consistent grayscale perturbation method
             from PIL import Image, ImageStat
 
-
             # 1. Calculate mean, but take only the first channel for grayscale value
             mean_channels = ImageStat.Stat(original_pil_image).mean
             mean_color_value = int(mean_channels[0])
@@ -317,11 +316,11 @@ class BinImpactResult:
 
 def load_image_and_attributions(classification_result: ClassificationResult, target_size: int = 224) -> ImageData:
     """
-    Load image and attribution data from files.
-    
+    Load image and attribution data - uses cached data when available.
+
     NOTE: We only load the raw PIL image here, no preprocessing.
     Preprocessing will be done after perturbation using dataset-specific transforms.
-    
+
     Separated concern: File I/O and data loading
     """
     # Load raw image without any preprocessing
@@ -329,11 +328,15 @@ def load_image_and_attributions(classification_result: ClassificationResult, tar
     from PIL import Image
     pil_image = Image.open(image_path).convert('RGB')
 
-    # Load attributions
-    attr_path = classification_result.attribution_paths.raw_attribution_path
-    if attr_path is None:
-        raise ValueError(f"No attribution path for {image_path}")
-    raw_attributions = np.load(attr_path)
+    # Use cached attribution if available, otherwise load from disk
+    if classification_result._cached_raw_attribution is not None:
+        raw_attributions = classification_result._cached_raw_attribution
+    else:
+        # Fallback to disk loading
+        attr_path = classification_result.attribution_paths.raw_attribution_path
+        if attr_path is None:
+            raise ValueError(f"No attribution path for {image_path}")
+        raw_attributions = np.load(attr_path)
 
     # Get original prediction info
     original_pred = classification_result.prediction
@@ -493,7 +496,7 @@ def calculate_binned_saco_for_image(
                 patch_size = 32
             else:
                 patch_size = 16  # Default for standard ViT-B-16
-        
+
         if debug:
             print(f"Using patch_size={patch_size} for {dataset_name}")
         perturbation_data = create_binned_perturbations(
@@ -620,9 +623,7 @@ def run_binned_saco_analysis(
     analysis_results["faithfulness_correctness"] = faithfulness_df
 
     # 4. Key Attribution Patterns Analysis
-    patterns_df = analyze_key_attribution_patterns(
-        analysis_results["faithfulness_correctness"], vit_model, config
-    )
+    patterns_df = analyze_key_attribution_patterns(analysis_results["faithfulness_correctness"], vit_model, config)
     analysis_results["attribution_patterns"] = patterns_df
 
     # 5. Summary statistics
@@ -693,8 +694,7 @@ def extract_true_class_from_filename(filename):
 
 
 def analyze_faithfulness_vs_correctness_from_objects(
-    saco_scores: Dict[str, float],
-    original_classification_results: List[ClassificationResult]
+    saco_scores: Dict[str, float], original_classification_results: List[ClassificationResult]
 ) -> pd.DataFrame:
     """
     Analyze the relationship between attribution faithfulness (SaCo) and prediction correctness.
@@ -713,7 +713,9 @@ def analyze_faithfulness_vs_correctness_from_objects(
         saco_score = saco_scores.get(image_path_str)
 
         # Use true_label from ClassificationResult if available, otherwise fall back to extraction
-        true_class_label = original_res.true_label if original_res.true_label else extract_true_class_from_filename(original_res.image_path)
+        true_class_label = original_res.true_label if original_res.true_label else extract_true_class_from_filename(
+            original_res.image_path
+        )
 
         if original_res.prediction is None:
             continue
@@ -744,12 +746,12 @@ def analyze_key_attribution_patterns(df: pd.DataFrame, model, config) -> pd.Data
     """
     # Clean data
     df_clean = df.dropna(subset=['saco_score'])
-    
+
     # Add class column for compatibility
     if 'filename' in df_clean.columns:
         df_clean['class'] = df_clean['true_class']
-    
+
     # Only analyze correct predictions for now
     df_clean = df_clean[df_clean['is_correct']]
-    
+
     return df_clean

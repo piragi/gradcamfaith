@@ -326,12 +326,14 @@ def classify_explain_single_image(
     # Save attribution bundle
     saved_attribution_paths = save_attribution_bundle_to_files(image_path.stem, attribution_bundle, config.file)
 
-    # Create final result
+    # Create final result with cached tensors for efficient faithfulness evaluation
     final_result = ClassificationResult(
         image_path=image_path,
         prediction=current_prediction,
         true_label=true_label,
-        attribution_paths=saved_attribution_paths
+        attribution_paths=saved_attribution_paths,
+        _cached_tensor=input_tensor.cpu().numpy()[0],  # Cache preprocessed tensor (C, H, W)
+        _cached_raw_attribution=raw_attr  # Cache raw attribution
     )
 
     # Cache the result

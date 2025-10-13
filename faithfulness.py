@@ -5,7 +5,6 @@ Adapts the original faithfulness.py to work with HookedSAEViT and CLIP models.
 
 import gc
 import json
-import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime
@@ -44,11 +43,12 @@ def calc_faithfulness(
     n_trials: int = 3,
     nr_runs: int = 50,
     subset_size: int = 98,
-    n_patches: int = 196
+    n_patches: int = 196,
+    gpu_batch_size: int = 1024
 ) -> Dict[str, Any]:
     """
     Calculate faithfulness scores with statistical robustness through multiple trials.
-    
+
     Args:
         model: PyTorch model (HookedViT, CLIP, or CLIPModelWrapper)
         x_batch: Batch of input images (numpy array)
@@ -59,11 +59,14 @@ def calc_faithfulness(
         nr_runs: Number of random perturbations per image
         subset_size: Size of feature subset to perturb
         n_patches: Number of patches (49 for B-32, 196 for B-16)
-        
+        gpu_batch_size: Batch size for GPU forward passes
+
     Returns:
         Dictionary with faithfulness statistics for each estimator
     """
-    print(f'Settings - n_trials: {n_trials}, nr_runs: {nr_runs}, subset_size: {subset_size}, patches: {n_patches}')
+    print(
+        f'Settings - n_trials: {n_trials}, nr_runs: {nr_runs}, subset_size: {subset_size}, patches: {n_patches}, gpu_batch_size: {gpu_batch_size}'
+    )
 
     # Adjust subset size for B-32 models
     if n_patches == 49:
@@ -94,7 +97,8 @@ def calc_faithfulness(
         print(f"Running estimator: {estimator_config.name}")
 
         estimator_results = _run_estimator_trials(
-            estimator_config, model, x_batch, y_batch, a_batch_expl, device, n_trials, nr_runs, subset_size
+            estimator_config, model, x_batch, y_batch, a_batch_expl, device, n_trials, nr_runs, subset_size,
+            gpu_batch_size
         )
 
         if estimator_results:
@@ -112,7 +116,8 @@ def _run_estimator_trials(
     device: torch.device,
     n_trials: int,
     nr_runs: int,
-    subset_size: int
+    subset_size: int,
+    gpu_batch_size: int
 ) -> Dict[str, Any]:
     """Run multiple trials for a single estimator."""
     all_results = []
@@ -125,10 +130,14 @@ def _run_estimator_trials(
         try:
             estimator = estimator_config.create_estimator()
 
-            # Run estimator
-            # Larger batch size for better GPU utilization
+            # Run estimator with GPU-level batching
             faithfulness_estimate = estimator(
-                model=model, x_batch=x_batch, y_batch=y_batch, a_batch=a_batch_expl, device=str(device), batch_size=32
+                model=model,
+                x_batch=x_batch,
+                y_batch=y_batch,
+                a_batch=a_batch_expl,
+                device=str(device),
+                batch_size=gpu_batch_size
             )
 
             # Process results
@@ -142,7 +151,7 @@ def _run_estimator_trials(
 
             # Check for CUDA memory issues specifically
             if "CUDA out of memory" in str(e) or "RuntimeError" in str(type(e).__name__):
-                print("CUDA memory issue detected. Consider reducing batch_size or nr_runs.")
+                print("CUDA memory issue detected. Consider reducing gpu_batch_size or nr_runs.")
                 torch.cuda.empty_cache()
                 gc.collect()
 
@@ -216,12 +225,15 @@ def evaluate_faithfulness_for_results(
     model,
     device: torch.device,
     classification_results: List[ClassificationResult],
-    batch_size: int = 512
+    gpu_batch_size: int = 1024
 ) -> Tuple[Dict[str, Any], np.ndarray]:
     """
     Evaluate faithfulness scores with patch-level attributions.
-    Processes data in batches to avoid memory issues.
+    Uses cached tensors for efficient processing - no outer batching needed.
     Supports both B-16 (196 patches) and B-32 (49 patches) models.
+
+    Args:
+        gpu_batch_size: Batch size for GPU forward passes (not data loading)
     """
 
     # Detect patch configuration
@@ -231,57 +243,35 @@ def evaluate_faithfulness_for_results(
         is_patch32 = "patch32" in model_name or "b-32" in model_name or "b32" in model_name
 
     n_patches = 49 if is_patch32 else 196
-
     total_samples = len(classification_results)
-    num_batches = (total_samples + batch_size - 1) // batch_size
 
-    print(f"Processing {total_samples} samples in {num_batches} batches")
+    print(f"Processing {total_samples} samples (batching at GPU level only)")
 
-    all_faithfulness_scores = {}
-    all_y_labels = []
+    # Prepare all data at once - fast since we're using cached tensors
+    batch_data = _prepare_batch_data(config, classification_results, n_patches)
+    if not batch_data:
+        print("No valid samples found")
+        return {}, np.array([])
 
-    for batch_idx in range(num_batches):
-        start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, total_samples)
-        batch_results = classification_results[start_idx:end_idx]
+    x_batch, y_batch, a_batch = batch_data
 
-        print(f"\nBatch {batch_idx + 1}/{num_batches} (samples {start_idx}-{end_idx-1})")
+    # Calculate faithfulness with GPU-level batching only
+    batch_faithfulness = calc_faithfulness(
+        model=model,
+        x_batch=x_batch,
+        y_batch=y_batch,
+        a_batch_expl=a_batch,
+        device=device,
+        n_trials=3,
+        nr_runs=20,
+        subset_size=98 if n_patches == 196 else 24,
+        n_patches=n_patches,
+        gpu_batch_size=gpu_batch_size
+    )
 
-        # Process batch data
-        batch_data = _prepare_batch_data(config, batch_results, n_patches)
-        if not batch_data:
-            print(f"No valid samples in batch {batch_idx + 1}")
-            continue
-
-        x_batch, y_batch, a_batch = batch_data
-
-        # Calculate faithfulness for this batch
-        batch_faithfulness = calc_faithfulness(
-            model=model,
-            x_batch=x_batch,
-            y_batch=y_batch,
-            a_batch_expl=a_batch,
-            device=device,
-            n_trials=3,
-            nr_runs=20,
-            subset_size=98 if n_patches == 196 else 24,
-            n_patches=n_patches
-        )
-
-        # Store labels
-        all_y_labels.extend(y_batch.tolist())
-
-        # Aggregate scores from this batch
-        _aggregate_batch_scores(all_faithfulness_scores, batch_faithfulness)
-
-        # Clean up memory
-        del x_batch, y_batch, a_batch
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    # Compute final statistics from aggregated scores
+    # Build final results
     final_results = {}
-    for estimator_name, data in all_faithfulness_scores.items():
+    for estimator_name, data in batch_faithfulness.items():
         mean_scores = np.array(data['mean_scores'])
         std_scores = np.array(data['std_scores'])
 
@@ -291,33 +281,41 @@ def evaluate_faithfulness_for_results(
         final_results[estimator_name] = {
             'mean_scores': mean_scores.tolist(),
             'std_scores': std_scores.tolist(),
-            **data['metadata']
+            'n_trials': data.get('n_trials', 3),
+            'nr_runs': data.get('nr_runs', 20),
+            'subset_size': data.get('subset_size', 98)
         }
 
-    print(f"\nProcessed {len(all_y_labels)} total samples")
+    print(f"\nProcessed {len(y_batch)} total samples")
 
-    return final_results, np.array(all_y_labels)
+    return final_results, y_batch
 
 
 def _prepare_batch_data(config: PipelineConfig, batch_results: List[ClassificationResult], n_patches: int = 196):
+    """Prepare batch data using cached tensors - no disk I/O or retransforming."""
     x_list, y_list, a_list = [], [], []
-
-    # fetch the exact eval transforms for this dataset/split
-    from dataset_config import get_dataset_config
-    ds_cfg = get_dataset_config(config.file.dataset_name)
-    transform = ds_cfg.get_transforms('test')
 
     for result in batch_results:
         try:
-            # load raw PIL
-            img = Image.open(result.image_path).convert('RGB')
+            # Use cached tensor if available (already preprocessed)
+            if result._cached_tensor is not None:
+                img_array = result._cached_tensor
+            else:
+                # Fallback: load and transform (for cached results without tensors)
+                from dataset_config import get_dataset_config
+                ds_cfg = get_dataset_config(config.file.dataset_name)
+                transform = ds_cfg.get_transforms('test')
+                img = Image.open(result.image_path).convert('RGB')
+                img_array = transform(img).cpu().numpy()
 
-            # use dataset transforms (produces a torch.Tensor)
-            t = transform(img)  # (C,H,W), normalized for the model
-            img_array = t.cpu().numpy()  # numpy for the estimator path
+            # Use cached attribution if available
+            if result._cached_raw_attribution is not None:
+                attr_map = result._cached_raw_attribution
+            else:
+                # Fallback: load from disk
+                attr_map = np.load(result.attribution_paths.raw_attribution_path)
 
-            # load attribution and normalize to patch format as you already do
-            attr_map = np.load(result.attribution_paths.raw_attribution_path)
+            # Normalize attribution to patch format
             attr_map = _normalize_attribution_format(attr_map, n_patches)
             if attr_map is None:
                 continue
@@ -356,33 +354,6 @@ def _normalize_attribution_format(attr_map: np.ndarray, n_patches: int = 196) ->
         return None
 
     return attr_map
-
-
-def _aggregate_batch_scores(all_scores: Dict[str, Dict], batch_scores: Dict[str, Dict]) -> None:
-    """Aggregate scores from a batch into the overall scores dictionary."""
-    for estimator_name, estimator_data in batch_scores.items():
-        if estimator_name not in all_scores:
-            all_scores[estimator_name] = {
-                'mean_scores': [],
-                'std_scores': [],
-                'metadata': {
-                    'n_trials': estimator_data.get('n_trials', 3),
-                    'nr_runs': estimator_data.get('nr_runs', 50),
-                    'subset_size': estimator_data.get('subset_size', 98)
-                }
-            }
-
-        # Add scores from this batch
-        mean_scores = estimator_data.get('mean_scores', [])
-        std_scores = estimator_data.get('std_scores', [])
-
-        if isinstance(mean_scores, np.ndarray):
-            mean_scores = mean_scores.tolist()
-        if isinstance(std_scores, np.ndarray):
-            std_scores = std_scores.tolist()
-
-        all_scores[estimator_name]['mean_scores'].extend(mean_scores)
-        all_scores[estimator_name]['std_scores'].extend(std_scores)
 
 
 def _compute_statistics_from_scores(scores: np.ndarray,
@@ -591,13 +562,6 @@ def _print_faithfulness_summary(metrics: Dict[str, Dict], dataset_config=None):
         print(f"  Count: {overall['count']}")
         print(f"  Avg trial std: {overall['avg_trial_std']:.4f}")
 
-        # print(f"\n{estimator_name} per-class statistics:")
-        # for class_idx, stats in estimator_data['by_class'].items():
-        # class_name = dataset_config.idx_to_class.get(
-        # class_idx, f"Class {class_idx}"
-        # ) if dataset_config else f"Class {class_idx}"
-        # print(f"  {class_name}: mean={stats['mean']:.4f}, count={stats['count']}")
-
 
 def _save_faithfulness_results(
     config: PipelineConfig, faithfulness_results: Dict[str, Dict], class_labels: np.ndarray, results: Dict[str, Any]
@@ -702,8 +666,6 @@ class PatchPixelFlipping:
         Returns:
             List of AUC scores measuring explanation faithfulness
         """
-        import math
-
         batch_size = a_batch.shape[0]
 
         # Validate attribution shape
@@ -780,8 +742,6 @@ def _predict_torch_model(model, x_batch, y_batch, device=None, use_softmax=False
     Returns:
         Predictions as numpy array (N,) - probabilities or logits for target classes
     """
-    import torch
-
     model.eval()
     with torch.no_grad():
         x_tensor = torch.from_numpy(x_batch).float()
@@ -891,10 +851,10 @@ class FaithfulnessCorrelation:
 
     def evaluate_batch(self, model, x_batch: np.ndarray, y_batch: np.ndarray, a_batch: np.ndarray, device=None):
         """
-        Standalone implementation of faithfulness correlation.
+        Vectorized implementation of faithfulness correlation - no excessive copying.
 
         Measures correlation between attribution scores and prediction changes when
-        random patch subsets are perturbed. This is a complete standalone implementation.
+        random patch subsets are perturbed. Optimized to minimize memory copies.
 
         Args:
             model: PyTorch model (HookedViT, CLIP, or CLIPModelWrapper)
@@ -916,43 +876,42 @@ class FaithfulnessCorrelation:
         # Use logits (not softmax) to avoid saturation at 0/1
         y_pred = _predict_torch_model(model, x_batch, y_batch, device, use_softmax=False)
 
+        # Pre-generate all random patch choices for all runs at once
+        all_patch_choices = np.stack([
+            np.random.choice(self.n_patches, self.subset_size, replace=False) for _ in range(batch_size * self.nr_runs)
+        ]).reshape(self.nr_runs, batch_size, self.subset_size)
+
+        # Pre-compute attribution sums for all runs
+        att_sums = np.array([
+            a_batch[np.arange(batch_size)[:, None], all_patch_choices[run_idx]].sum(axis=1)
+            for run_idx in range(self.nr_runs)
+        ]).T  # (batch_size, nr_runs)
+
+        # Process perturbations and predictions in batches
         pred_deltas = []
-        att_sums = []
 
-        # Run multiple trials with random patch subsets
+        # Process multiple runs at once to reduce forward pass overhead
         for run_idx in range(self.nr_runs):
-            # Randomly sample patches for each image in the batch
-            patch_choices = np.stack([
-                np.random.choice(self.n_patches, self.subset_size, replace=False) for _ in range(batch_size)
-            ],
-                                     axis=0)
+            patch_choices = all_patch_choices[run_idx]
 
-            # Create perturbed images
+            # Create perturbed batch - single copy per run
             x_perturbed = x_batch.copy()
-            for batch_idx in range(batch_size):
-                # Create mask for selected patches
-                mask = create_patch_mask(patch_choices[batch_idx], x_batch.shape[1:], self.n_patches, self.patch_size)
 
-                # Apply baseline perturbation
+            # Vectorized mask creation and perturbation
+            for batch_idx in range(batch_size):
+                mask = create_patch_mask(patch_choices[batch_idx], x_batch.shape[1:], self.n_patches, self.patch_size)
                 x_perturbed[batch_idx] = apply_baseline_perturbation(
                     x_perturbed[batch_idx], mask, self.perturb_baseline
                 )
 
             # Get predictions on perturbed images
-            # Use logits (not softmax) to avoid saturation at 0/1
             y_pred_perturb = _predict_torch_model(model, x_perturbed, y_batch, device, use_softmax=False)
 
-            # Store prediction deltas (how much prediction changed)
-            deltas = y_pred - y_pred_perturb
-            pred_deltas.append(deltas)
-
-            # Sum attributions for selected patches
-            att_sum = a_batch[np.arange(batch_size)[:, None], patch_choices].sum(axis=1)
-            att_sums.append(att_sum)
+            # Store prediction deltas
+            pred_deltas.append(y_pred - y_pred_perturb)
 
         # Stack results into arrays
         pred_deltas = np.stack(pred_deltas, axis=1)  # (batch_size, nr_runs)
-        att_sums = np.stack(att_sums, axis=1)  # (batch_size, nr_runs)
 
         # Compute Spearman correlation between attribution sums and prediction deltas
         similarity = self._compute_spearman_correlation(a=att_sums, b=pred_deltas)

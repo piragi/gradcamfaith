@@ -44,6 +44,9 @@ class ClassificationResult:
     prediction: ClassificationPrediction
     true_label: Optional[str] = None  # The ground truth label
     attribution_paths: Optional[AttributionOutputPaths] = None
+    # Cache for efficiency - avoids reloading/retransforming for faithfulness
+    _cached_tensor: Optional[np.ndarray] = None  # Preprocessed image tensor (C, H, W) as numpy
+    _cached_raw_attribution: Optional[np.ndarray] = None  # Raw attribution array
 
     def to_dict_for_cache(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -54,6 +57,9 @@ class ClassificationResult:
             for k_attr, v_attr in attrs.items():
                 if isinstance(v_attr, Path):  # Should always be Path as per AttributionOutputPaths types
                     attrs[k_attr] = str(v_attr)
+        # Don't serialize cached tensors/attributions to disk (too large)
+        data.pop('_cached_tensor', None)
+        data.pop('_cached_raw_attribution', None)
         return data
 
     @classmethod

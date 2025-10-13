@@ -58,7 +58,7 @@ def run_single_experiment(
     # Basic settings
     pipeline_config.file.use_cached_original = False
     pipeline_config.file.use_cached_perturbed = ""
-    pipeline_config.file.current_mode = "test"
+    pipeline_config.file.current_mode = "val"
     pipeline_config.classify.analysis = True
     pipeline_config.file.set_dataset(dataset_name)
     pipeline_config.file.base_pipeline_dir = output_dir
@@ -436,24 +436,23 @@ def main():
     """
     # Define datasets to test
     datasets = [
-        # ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
-        # ("imagenet", Path("./data/imagenet/raw")),
-        # ("waterbirds", Path("./data/waterbirds/waterbird_complete95_forest2water2")),
+        ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
+        ("imagenet", Path("./data/imagenet/raw")),
         ("covidquex", Path("./data/covidquex/data/lung/")),
     ]
 
     # Define parameter grid
     layer_combinations = [
-        # [2],
-        # [3],
-        # [4],
-        # [5],
-        # [6],
-        # [7],
-        # [8],
-        # [9],
-        # [10],
-        [4, 5, 6],
+        [2],
+        [3],
+        [4],
+        [5],
+        [6],
+        [7],
+        [8],
+        [9],
+        [10],
+        # [4, 5, 6],
     ]
 
     # covidquex
@@ -475,7 +474,7 @@ def main():
     gate_constructions = ["combined"]  #, "gradient_only", "activation_only"]
 
     # Decoder shuffling options for semantic alignment ablation
-    shuffle_decoder_options = [False, True]  # Test both normal and shuffled - WARNING: works only with combined
+    shuffle_decoder_options = [False]  # Test both normal and shuffled - WARNING: works only with combined
 
     # Clamp max values for gate values (range: [1/clamp_max, clamp_max])
     clamp_max_values = [10.0]
@@ -489,7 +488,7 @@ def main():
         gate_constructions=gate_constructions,
         shuffle_decoder_options=shuffle_decoder_options,
         clamp_max_values=clamp_max_values,
-        subset_size=None,
+        subset_size=500,
         random_seed=42
     )
 
