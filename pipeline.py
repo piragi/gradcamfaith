@@ -1,319 +1,514 @@
-import json
+"""
+Unified Pipeline Module
+
+This is the updated pipeline that uses the unified dataloader system.
+It can work with any dataset that has been converted to the standard format.
+"""
+
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
-from diffusers import StableDiffusionInpaintPipeline
-from PIL import Image
+import torch
+from tqdm import tqdm
 
-import perturbation
-import transformer as trans
+# Suppress PIL debug logging
+logging.getLogger('PIL').setLevel(logging.WARNING)
 
-DATA_DIR = "./images"
-OUTPUT_DIR = "./results"
-CACHE_DIR = "./cache"
-PATCH_DIR = "./results/patches"
+from vit_prisma.sae import SparseAutoencoder
+
+import io_utils
+from config import FileConfig, PipelineConfig
+from data_types import (AttributionDataBundle, AttributionOutputPaths, ClassificationPrediction, ClassificationResult)
+# New imports for unified system
+from dataset_config import DatasetConfig, get_dataset_config
+from faithfulness import evaluate_and_report_faithfulness
+from saco import run_binned_attribution_analysis
+from setup import convert_dataset
+from transmm import generate_attribution_prisma_enhanced
+from unified_dataloader import create_dataloader, get_single_image_loader
 
 
-def preprocess_dataset(
-    source_dir: str = "./COVID-QU-Ex",
-    dest_dir: str = "./images",
-    target_size: tuple = (224, 224)) -> List[Path]:
+def load_steering_resources(layers: List[int], dataset_name: Optional[str] = None) -> Dict[int, Dict[str, Any]]:
     """
-    Preprocess JPG images by resizing them to target_size and saving them to dest_dir.
-    Can recursively search through subfolders and filter for frontal X-rays.
+    Loads SAEs for the specified layers for feature gradient gating.
     
     Args:
-        source_dir: Directory containing original images
-        dest_dir: Directory to save resized images
-        target_size: Target size (width, height) for the resized images
-        recursive: If True, search recursively through all subfolders
-        only_frontal: If True, only process images with '_frontal' in the filename
+        layers: List of layer indices to load
+        dataset_name: Name of the dataset ('covidquex', 'hyperkvasir', 'waterbirds', etc.)
+    """
+    resources = {}
+
+    for layer_idx in layers:
+        try:
+            if dataset_name in ["waterbirds", "imagenet"]:
+                # Use CLIP Vanilla B-32 SAE for waterbirds
+                sae_path = Path(f"data/sae_clip_vanilla_b32/layer_{layer_idx}/weights.pt")
+                if not sae_path.exists():
+                    print(f"Warning: CLIP Vanilla SAE not found at {sae_path}")
+                    continue
+                print(f"Loading CLIP Vanilla SAE from {sae_path}")
+                sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
+                sae.cuda().eval()
+            else:
+                # Load SAE for other datasets
+                sae_dir = Path("data") / f"sae_{dataset_name}" / f"layer_{layer_idx}"
+                sae_files = list(sae_dir.glob("**/n_images_*.pt"))
+                # Filter out log_feature_sparsity files
+                sae_files = [f for f in sae_files if 'log_feature_sparsity' not in str(f)]
+
+                if not sae_files:
+                    print(f"Warning: No SAE found for {dataset_name} layer {layer_idx} in {sae_dir}")
+                    continue
+
+                # Use the most recent SAE file
+                sae_path = sorted(sae_files)[-1]
+                print(f"Loading SAE from {sae_path}")
+
+                sae = SparseAutoencoder.load_from_pretrained(str(sae_path))
+                sae.cuda().eval()
+
+            resources[layer_idx] = {"sae": sae}
+
+        except Exception as e:
+            print(f"Error loading SAE for {dataset_name} layer {layer_idx}: {e}")
+
+    return resources
+
+
+def load_model_for_dataset(
+    dataset_config: DatasetConfig, device: torch.device, config: Optional[PipelineConfig] = None
+):
+    """
+    Load the appropriate model and CLIP classifier for a given dataset configuration.
+
+    Args:
+        dataset_config: Configuration for the dataset
+        device: Device to load the model on
+        config: Optional pipeline config for CLIP settings
+
+    Returns:
+        Tuple of (model, clip_classifier) where clip_classifier is None for non-CLIP models
+    """
+    # Check if we should use CLIP for this dataset
+    use_clip = (config and config.classify.use_clip) or dataset_config.name == "waterbirds"
+
+    if use_clip:
+        from vit_prisma.models.model_loader import load_hooked_model
+
+        print(f"Loading CLIP as HookedViT for {dataset_config.name}")
+
+        # Use vit_prisma's load_hooked_model to get CLIP as HookedViT
+        # This automatically converts CLIP weights to HookedViT format
+        clip_model_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch32"
+
+        model = load_hooked_model(clip_model_name, dtype=torch.float32, device=str(device))
+        # Ensure model is on the correct device
+        model = model.to(device)
+        model.eval()
+
+        print(f"CLIP loaded as HookedViT")
+
+        # Create CLIP classifier for this model
+        from clip_classifier import create_clip_classifier_for_waterbirds
+        print("Creating CLIP classifier...")
+        clip_model_name = config.classify.clip_model_name if config else "openai/clip-vit-base-patch32"
+        clip_classifier = create_clip_classifier_for_waterbirds(
+            vision_model=model,
+            device=device,
+            clip_model_name=clip_model_name,
+            custom_prompts=config.classify.clip_text_prompts if config.classify.clip_text_prompts else None
+        )
+
+        return model, clip_classifier
+
+    # Original ViT loading code
+    from vit_prisma.models.base_vit import HookedSAEViT
+    from vit_prisma.models.weight_conversion import convert_timm_weights
+
+    # Create model with correct number of classes (don't load ImageNet weights)
+    model = HookedSAEViT.from_pretrained("vit_base_patch16_224", load_pretrained_model=False)
+
+    # Update the config and recreate the head with the correct number of classes
+    model.cfg.n_classes = dataset_config.num_classes
+    from vit_prisma.models.layers.head import Head
+    model.head = Head(model.cfg)
+
+    # Load checkpoint if available
+    checkpoint_path = Path(dataset_config.model_checkpoint)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Model checkpoint not found at '{checkpoint_path}'. ")
+
+    print(f"Loading model checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
+
+    # Handle different checkpoint formats
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict'].copy()
+    elif 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict'].copy()
+    else:
+        state_dict = checkpoint
+
+    # Rename linear head if needed for compatibility
+    if 'lin_head.weight' in state_dict:
+        state_dict['head.weight'] = state_dict.pop('lin_head.weight')
+    if 'lin_head.bias' in state_dict:
+        state_dict['head.bias'] = state_dict.pop('lin_head.bias')
+
+    # Convert weights to the correct format for the model and load them
+    converted_weights = convert_timm_weights(state_dict, model.cfg)
+    model.load_state_dict(converted_weights)
+
+    model.to(device).eval()
+    return model, None  # No CLIP classifier for regular ViT models
+
+
+def prepare_dataset_if_needed(
+    dataset_name: str, source_path: Path, prepared_path: Path, force_prepare: bool = False, **converter_kwargs
+) -> Path:
+    """
+    Prepare dataset if not already prepared.
+    
+    Args:
+        dataset_name: Name of the dataset
+        source_path: Path to raw dataset
+        prepared_path: Path where prepared dataset should be
+        force_prepare: If True, force re-preparation even if exists
+        **converter_kwargs: Additional arguments for converter
         
     Returns:
-        List of paths to the processed images
+        Path to prepared dataset
     """
-    source_path = Path(source_dir)
-    dest_path = Path(dest_dir)
-    ensure_directories([dest_path])
+    metadata_file = prepared_path / "dataset_metadata.json"
 
-    image_files = list(source_path.glob("**/*.png"))
-    print(f"Found {len(image_files)} frontal X-rays")
+    if not force_prepare and metadata_file.exists():
+        print(f"Dataset already prepared at {prepared_path}")
+        return prepared_path
 
-    processed_paths = []
-    for image_file in image_files:
-        # Create a unique output filename to avoid conflicts from different subfolders
-        output_filename = f"{image_file.name}"
-        output_path = dest_path / output_filename
+    print(f"Preparing {dataset_name} dataset...")
+    print("Images will be preprocessed to 224x224")
+    convert_dataset(dataset_name=dataset_name, source_path=source_path, output_path=prepared_path, **converter_kwargs)
 
-        if output_path.exists():
-            print(
-                f"Skipping {output_path.name} - already exists in {dest_dir}")
-            processed_paths.append(output_path)
-            continue
+    return prepared_path
 
-        try:
-            img = Image.open(image_file)
-            resized_img = img.resize(target_size, Image.LANCZOS)
-            resized_img.save(output_path)
-            processed_paths.append(output_path)
 
-            print(f"Processed: {image_file.name} -> {output_path}")
-        except Exception as e:
-            print(f"Error processing {image_file.name}: {e}")
+def classify_single_image(
+    config: PipelineConfig,
+    dataset_config: DatasetConfig,
+    image_path: Path,
+    model: torch.nn.Module,
+    device: torch.device,
+    true_label: Optional[str] = None
+) -> ClassificationResult:
+    """
+    Classify a single image using the unified system.
+    """
+    cache_path = io_utils.build_cache_path(config.file.cache_dir, image_path, f"_classification_{dataset_config.name}")
 
-    print(
-        f"Preprocessing complete. {len(processed_paths)} images saved to {dest_dir}"
+    # Try to load from cache
+    loaded_result = io_utils.try_load_from_cache(cache_path)
+    if config.file.use_cached_perturbed and loaded_result:
+        return loaded_result
+
+    # Load and preprocess image
+    # Check if we're using CLIP (config might be None in some cases)
+    use_clip = config and config.classify.use_clip
+    input_tensor = get_single_image_loader(image_path, dataset_config, use_clip=use_clip)
+    input_tensor = input_tensor.to(device)
+
+    # Get prediction
+    with torch.no_grad():
+        logits = model(input_tensor)
+        probabilities = torch.softmax(logits, dim=-1)
+        predicted_idx = int(torch.argmax(probabilities, dim=-1).item())
+
+    current_prediction = ClassificationPrediction(
+        predicted_class_label=dataset_config.idx_to_class[predicted_idx],
+        predicted_class_idx=predicted_idx,
+        confidence=float(probabilities[0, predicted_idx].item()),
+        probabilities=probabilities[0].tolist()
     )
-    return processed_paths
 
+    result = ClassificationResult(
+        image_path=image_path, prediction=current_prediction, true_label=true_label, attribution_paths=None
+    )
 
-def ensure_directories(directories: List[Path]) -> None:
-    for directory in directories:
-        directory.mkdir(exist_ok=True, parents=True)
-
-
-def try_load_from_cache(cache_path: Path) -> Optional[Dict[str, Any]]:
-    if cache_path.exists():
-        try:
-            with open(cache_path, 'r') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
-def save_to_cache(cache_path: Path, result: Dict[str, Any]) -> None:
-    with open(cache_path, 'w') as f:
-        json.dump(result, f)
-
-
-def classify_explain_single_image(image_path: Path, vit: trans.ViT,
-                                  dirs: Dict[str, Path],
-                                  output_suffix: str) -> Dict[str, Any]:
-    cache_path = dirs[
-        'cache'] / f"{image_path.stem}_classification{output_suffix}.json"
-    cached_result = try_load_from_cache(cache_path)
-    if cached_result: return cached_result
-
-    image, classification = vit.classify_image(image_path=str(image_path))
-    vis_path = dirs["attribution"] / f"{image_path.stem}_vis.png"
-    image.save(vis_path)
-
-    image, (attribution, attribution_neg) = trans.transmm(
-        vit, image_path, classification['predicted_class_idx'])
-
-    attribution_path = dirs[
-        "attribution"] / f"{image_path.stem}_attribution.npy"
-    np.save(attribution_path, attribution)
-
-    attribution_neg_path = dirs[
-        "attribution"] / f"{image_path.stem}_attribution_neg.npy"
-    np.save(attribution_neg_path, attribution_neg)
-    # explainer.visualize(image, attribution, save_path=str(vis_path))
-
-    vit_input_path = dirs[
-        "vit_inputs"] / f"{image_path.stem}{output_suffix}.png"
-    result = {
-        "image_path":
-        str(image_path),
-        "vit_input_path":
-        str(vit_input_path),
-        "predicted_class":
-        classification["predicted_class_label"],
-        "predicted_class_idx":
-        classification["predicted_class_idx"],
-        "confidence":
-        float(classification["probabilities"][
-            classification["predicted_class_idx"]]),
-        "probabilities":
-        classification["probabilities"].tolist(),
-        "attribution_path":
-        str(attribution_path),
-        "attribution_neg_path":
-        str(attribution_neg_path),
-        "attribution_vis_path":
-        str(vis_path)
-    }
-
-    save_to_cache(cache_path, result)
+    # Cache the result
+    io_utils.save_to_cache(cache_path, result)
 
     return result
 
 
-def classify(data_directory: str, output_suffix: str = "") -> pd.DataFrame:
+def save_attribution_bundle_to_files(
+    image_stem: str, attribution_bundle: AttributionDataBundle, file_config: FileConfig
+) -> AttributionOutputPaths:
+    """Save attribution bundle contents to .npy files."""
+
+    # Ensure attribution directory exists
+    io_utils.ensure_directories([file_config.attribution_dir])
+
+    attribution_path = file_config.attribution_dir / f"{image_stem}_attribution.npy"
+    raw_attribution_path = file_config.attribution_dir / f"{image_stem}_raw_attribution.npy"
+
+    # Save positive attribution
+    np.save(attribution_path, attribution_bundle.positive_attribution)
+    # Save raw attribution
+    np.save(raw_attribution_path, attribution_bundle.raw_attribution)
+
+    return AttributionOutputPaths(
+        attribution_path=attribution_path,
+        raw_attribution_path=raw_attribution_path,
+    )
+
+
+def classify_explain_single_image(
+    config: PipelineConfig,
+    dataset_config: DatasetConfig,
+    image_path: Path,
+    model: torch.nn.Module,
+    device: torch.device,
+    steering_resources: Optional[Dict[int, Dict[str, Any]]],
+    true_label: Optional[str] = None,
+    clip_classifier: Optional[Any] = None,  # Pre-created CLIP classifier
+) -> ClassificationResult:
     """
-    Classify images and generate attribution maps.
-    
+    Classify a single image AND generate explanations using unified system.
+    """
+    cache_path = io_utils.build_cache_path(
+        config.file.cache_dir, image_path, f"_classification_explained_{dataset_config.name}"
+    )
+
+    # Try to load from cache
+    loaded_result = io_utils.try_load_from_cache(cache_path)
+    if config.file.use_cached_original and loaded_result:
+        if loaded_result.attribution_paths is not None:
+            return loaded_result
+
+    # Load and preprocess image
+    # Check if we're using CLIP (config might be None in some cases)
+    use_clip = config and config.classify.use_clip
+    input_tensor = get_single_image_loader(image_path, dataset_config, use_clip=use_clip)
+    input_tensor = input_tensor.to(device)
+
+    raw_attribution_result_dict = generate_attribution_prisma_enhanced(
+        model=model,
+        input_tensor=input_tensor,
+        config=config,
+        idx_to_class=dataset_config.idx_to_class,  # Pass dataset-specific class mapping
+        device=device,
+        steering_resources=steering_resources,
+        enable_feature_gradients=config.classify.boosting.enable_feature_gradients,
+        feature_gradient_layers=config.classify.boosting.feature_gradient_layers
+        if config.classify.boosting.enable_feature_gradients else [],
+        clip_classifier=clip_classifier,
+    )
+
+    # Extract raw attribution
+    raw_attr = raw_attribution_result_dict.get("raw_attribution", np.array([]))
+
+    # Create prediction
+    prediction_data = raw_attribution_result_dict["predictions"]
+    current_prediction = ClassificationPrediction(
+        predicted_class_label=dataset_config.idx_to_class[prediction_data["predicted_class_idx"]],
+        predicted_class_idx=prediction_data["predicted_class_idx"],
+        confidence=float(prediction_data["probabilities"][prediction_data["predicted_class_idx"]]),
+        probabilities=prediction_data["probabilities"]
+    )
+
+    # Create attribution bundle
+    attribution_bundle = AttributionDataBundle(
+        positive_attribution=raw_attribution_result_dict["attribution_positive"],
+        raw_attribution=raw_attr,
+    )
+
+    # Save attribution bundle
+    saved_attribution_paths = save_attribution_bundle_to_files(image_path.stem, attribution_bundle, config.file)
+
+    # Create final result with cached tensors for efficient faithfulness evaluation
+    final_result = ClassificationResult(
+        image_path=image_path,
+        prediction=current_prediction,
+        true_label=true_label,
+        attribution_paths=saved_attribution_paths,
+        _cached_tensor=input_tensor.cpu().numpy()[0],  # Cache preprocessed tensor (C, H, W)
+        _cached_raw_attribution=raw_attr  # Cache raw attribution
+    )
+
+    # Cache the result
+    io_utils.save_to_cache(cache_path, final_result)
+
+    return final_result
+
+
+def run_unified_pipeline(
+    config: PipelineConfig,
+    dataset_name: str,
+    source_data_path: Path,
+    model: torch.nn.Module,
+    steering_resources: Dict[int, Dict[str, Any]],
+    clip_classifier: Optional[Any] = None,
+    prepared_data_path: Optional[Path] = None,
+    device: Optional[torch.device] = None,
+    force_prepare: bool = False,
+    subset_size: Optional[int] = None,
+    random_seed: Optional[int] = None
+) -> Tuple[List[ClassificationResult], Dict[str, Any]]:
+    """
+    Run the unified pipeline for any supported dataset.
+
     Args:
-        data_directory: Optional custom directory containing images to classify.
-                       If None, uses default DATA_DIR.
-        output_suffix: Optional suffix for output files to distinguish different runs
-        
+        config: Pipeline configuration
+        dataset_name: Name of the dataset ('covidquex' or 'hyperkvasir')
+        source_data_path: Path to the source dataset
+        model: Pre-loaded model
+        steering_resources: Pre-loaded SAE resources
+        clip_classifier: Pre-loaded CLIP classifier (None for non-CLIP models)
+        prepared_data_path: Path for prepared data (default: ./data/{dataset_name}_unified)
+        device: Device to use
+        force_prepare: Force re-preparation of dataset
+        subset_size: If specified, only use this many random images
+        random_seed: Random seed for reproducible subset selection
+
     Returns:
-        DataFrame with classification results and paths to attribution maps.
+        List of classification results
     """
-    output_dir = Path(OUTPUT_DIR)
-    cache_dir = Path(CACHE_DIR)
-    attribution_dir = output_dir / f"attributions{output_suffix}"
-    vit_inputs_dir = output_dir / "vit_inputs"
-    data_dir = Path(data_directory)
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-    dirs = {
-        "output": output_dir,
-        "cache": cache_dir,
-        "attribution": attribution_dir,
-        "vit_inputs": vit_inputs_dir
-    }
+    # Get dataset configuration
+    dataset_config = get_dataset_config(dataset_name)
+    print(f"Loading configuration for {dataset_name} dataset")
 
-    ensure_directories(list(dirs.values()))
-    image_paths = list(data_dir.glob("*.png"))
+    # Ensure all required directories exist
+    io_utils.ensure_directories(config.directories)
 
-    vit = trans.ViT(method="transmm")
+    # Prepare dataset if needed
+    if prepared_data_path is None:
+        prepared_data_path = Path(f"./data/{dataset_name}_unified")
+
+    prepared_path = prepare_dataset_if_needed(
+        dataset_name=dataset_name,
+        source_path=source_data_path,
+        prepared_path=prepared_data_path,
+        force_prepare=force_prepare
+    )
+
+    # Create dataloader
+    print(f"Creating dataloader from {prepared_path}")
+    # Check if we're using CLIP for this dataset
+    use_clip = config.classify.use_clip if hasattr(config.classify, 'use_clip') else False
+    dataset_loader = create_dataloader(
+        dataset_name=dataset_name,
+        data_path=prepared_path
+    )
+
+    # Use pre-loaded model and steering resources
+    print(f"\nUsing pre-loaded model for {dataset_name}")
+    print(f"Using pre-loaded SAE resources for {dataset_name}")
+
+    # Process images from the specified split (mode)
+    split_to_use = config.file.current_mode if config.file.current_mode in ['train', 'val', 'test', 'dev'] else 'test'
+
+    image_data = list(dataset_loader.get_numeric_samples(split_to_use))
+    total_samples = len(image_data)
+
+    # Apply subset if requested
+    if subset_size is not None and subset_size < total_samples:
+        import random
+        if random_seed is not None:
+            random.seed(random_seed)
+        image_data = random.sample(image_data, subset_size)
+        print(
+            f"\nProcessing {len(image_data)} randomly selected {split_to_use} images (subset of {total_samples})"
+        )
+    else:
+        print(f"\nProcessing {total_samples} {split_to_use} images")
+
+    # Use pre-loaded CLIP classifier (created once per dataset)
+    if clip_classifier is not None:
+        print("Using pre-loaded CLIP classifier")
+
+    # Classify and explain
     results = []
 
-    for image_path in image_paths:
-        result = classify_explain_single_image(image_path, vit, dirs,
-                                               output_suffix)
-        results.append(result)
+    for _, (image_path, true_label_idx) in enumerate(tqdm(image_data, desc="Classifying & Explaining")):
+        try:
+            # Convert label index to label name (handle unlabeled = -1)
+            true_label = dataset_config.idx_to_class.get(true_label_idx)
 
-    df = pd.DataFrame(results)
-    df.to_csv(output_dir / f"classification_results{output_suffix}.csv",
-              index=False)
+            result = classify_explain_single_image(
+                config=config,
+                dataset_config=dataset_config,
+                image_path=image_path,
+                model=model,
+                device=device,
+                steering_resources=steering_resources,
+                true_label=true_label,
+                clip_classifier=clip_classifier  # Pass pre-created classifier
+            )
+            results.append(result)
 
-    return df
+        except Exception as e:
+            print(f"Error processing {image_path.name}: {e}")
+            continue
 
+    # Save results
+    if results:
+        csv_path = config.file.output_dir / f"results_{dataset_name}_unified.csv"
+        io_utils.save_classification_results_to_csv(results, csv_path)
+        print(f"Results saved to {csv_path}")
 
-def generate_perturbed_identifier(original_filename: str,
-                                  patch_id: int,
-                                  x: int,
-                                  y: int,
-                                  strength: float,
-                                  method: str = "sd") -> str:
-    if method == "sd":
-        return f"{original_filename}_patch{patch_id}_x{x}_y{y}_s{strength}"
-    else:
-        return f"{original_filename}_patch{patch_id}_x{x}_y{y}_mean"
+    # For CLIP models, wrap the classifier for both faithfulness and attribution analysis
+    model_for_analysis = model
+    if clip_classifier is not None:
+        from clip_classifier import CLIPModelWrapper
+        model_for_analysis = CLIPModelWrapper(clip_classifier)
+        print("Using CLIP wrapper for analysis")
 
+    # Run faithfulness evaluation if configured
+    if config.classify.analysis:
+        print("Running faithfulness evaluation...")
+        try:
+            evaluate_and_report_faithfulness(
+                config, model_for_analysis, device, results, clip_classifier=clip_classifier
+            )
+        except Exception as e:
+            print(f"Error in faithfulness evaluation: {e}")
 
-def perturb_single_patch(original_filename: str,
-                         patch_info: Tuple[int, int, int],
-                         sd_pipe: StableDiffusionInpaintPipeline,
-                         output_dirs: Dict[str, Path],
-                         method: str = "sd",
-                         strength: float = 0.2) -> Optional[Path]:
-    patch_id, x, y = patch_info
-    patch_size = 16  # Standard patch size
+    # Run attribution analysis
+    # For B-32: 49 patches total, use fewer bins (e.g., 20)
+    # For B-16: 196 patches total, can use 49 bins
+    # Check for B-32 models (both patch32 and B-32 patterns)
+    is_patch32 = False
+    if hasattr(config.classify, 'clip_model_name') and config.classify.clip_model_name:
+        model_name = config.classify.clip_model_name.lower()
+        is_patch32 = "patch32" in model_name or "b-32" in model_name or "b32" in model_name
+    n_bins = 13 if is_patch32 else 49
+    print(f"Running attribution analysis with {n_bins} bins (patch-{'32' if is_patch32 else '16'})...")
 
-    perturbed_id = generate_perturbed_identifier(original_filename, patch_id,
-                                                 x, y, strength, method)
-    perturbed_image_path = output_dirs["perturbed"] / f'{perturbed_id}.png'
-    mask_path = output_dirs["masks"] / f'{perturbed_id}_mask.npy'
+    saco_analysis = run_binned_attribution_analysis(config, model_for_analysis, results, device, n_bins=n_bins)
 
-    # Skip if already exists
-    if perturbed_image_path.exists():
-        return perturbed_image_path
+    # Extract SaCo scores (overall and per-class)
+    saco_results = {}
+    if saco_analysis and "faithfulness_correctness" in saco_analysis:
+        fc_df = saco_analysis["faithfulness_correctness"]
 
-    try:
-        if method == "sd":
-            result_image, np_mask = perturbation.perturb_single_patch(
-                sd_pipe,
-                original_filename, (x, y, patch_size),
-                strength=strength)
-        else:
-            result_image, np_mask = perturbation.perturb_patch_mean(
-                original_filename, (x, y, patch_size))
+        # Overall statistics
+        saco_results['mean'] = fc_df["saco_score"].mean()
+        saco_results['std'] = fc_df["saco_score"].std()
+        saco_results['n_samples'] = len(fc_df)
 
-        result_image.save(perturbed_image_path)
-        np.save(mask_path, np_mask)
-        return perturbed_image_path
+        # Per-class breakdown
+        per_class_stats = fc_df.groupby('true_class')['saco_score'].agg(['mean', 'std', 'count'])
+        saco_results['per_class'] = per_class_stats.to_dict('index')
 
-    except Exception as e:
-        print(f"Error processing {perturbed_id}: {e}")
-        return None
+        # Also include correctness breakdown
+        correctness_stats = fc_df.groupby('is_correct')['saco_score'].agg(['mean', 'std', 'count'])
+        saco_results['by_correctness'] = correctness_stats.to_dict('index')
 
+    print("\nPipeline complete!")
 
-def perturb_image_patches(image_path: str,
-                          sd_pipe: Optional[StableDiffusionInpaintPipeline],
-                          output_dirs: Dict[str, Path],
-                          patch_size: int = 16,
-                          strength: float = 0.2,
-                          method: str = "mean") -> List[Path]:
-    perturbed_paths = []
-
-    processed_filename = Path(image_path).name
-    original_filename = processed_filename.split('.')[0]
-
-    # Load image and attribution
-    image = Image.open(image_path).convert('RGB')
-    width, height = image.size
-
-    num_patches_x = width // patch_size
-
-    for y in range(0, height - patch_size + 1, patch_size):
-        for x in range(0, width - patch_size + 1, patch_size):
-            patch_id = (y // patch_size) * num_patches_x + (x // patch_size)
-
-            # Process with SD perturbation
-            perturbed_path = perturb_single_patch(
-                original_filename=original_filename,
-                patch_info=(patch_id, x, y),
-                sd_pipe=sd_pipe,
-                output_dirs=output_dirs,
-                method=method,
-                strength=strength)
-            if perturbed_path:
-                perturbed_paths.append(perturbed_path)
-
-    return perturbed_paths
-
-
-def perturb_all_patches(
-        results_df: pd.DataFrame,
-        sd_pipe: Optional[StableDiffusionInpaintPipeline] = None,
-        patch_size: int = 16,
-        strength: float = 0.2,
-        max_images: Optional[int] = None,
-        method: str = "mean") -> List[Path]:
-    """
-    Perturbs patches in all images and saves the results.
-    
-    Args:
-        results_df: DataFrame with classification results
-        sd_pipe: StableDiffusionInpaintPipeline instance
-        patch_size: Size of each patch to perturb
-        strength: Perturbation strength
-        max_images: Maximum number of images to process
-        
-    Returns:
-        List of paths to perturbed images
-    """
-    output_dir = Path(OUTPUT_DIR)
-    perturbed_dir = output_dir / "patches"
-    mask_dir = output_dir / "patch_masks"
-
-    output_dirs = {"perturbed": perturbed_dir, "masks": mask_dir}
-    ensure_directories(list(output_dirs.values()))
-
-    perturbed_image_paths = []
-    processing_df = results_df.head(max_images) if max_images else results_df
-
-    for idx, row in enumerate(processing_df.iterrows()):
-        _, row_data = row
-        image_path = row_data["image_path"]
-
-        print(
-            f"Processing image {idx+1}/{len(processing_df)}: {Path(image_path).name}"
-        )
-
-        image_paths = perturb_image_patches(image_path=image_path,
-                                            sd_pipe=sd_pipe,
-                                            output_dirs=output_dirs,
-                                            patch_size=patch_size,
-                                            strength=strength,
-                                            method=method)
-
-        perturbed_image_paths.extend(image_paths)
-
-    return perturbed_image_paths
+    return results, saco_results

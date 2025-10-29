@@ -1,5 +1,6 @@
 .python-version
 __pycache__/
+.venv
 images/
 explanations/
 uv.lock
@@ -8,4 +9,15 @@ results/
 chexpert/
 *.csv
 *.png
+hyper-kvasir/*
 model/
+models/
+results_transmmplus/
+hyper-kvasir_imagefolder/*
+wandb/
+*.pt
+*.txt
+*.pdf
+/data
+/experiments
+/hf_cache
