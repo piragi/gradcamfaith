@@ -60,6 +60,7 @@ def run_single_experiment(
     pipeline_config.file.use_cached_perturbed = ""
     pipeline_config.file.current_mode = "val"
     pipeline_config.classify.analysis = True
+    pipeline_config.classify.boosting.debug_mode = True
     pipeline_config.file.set_dataset(dataset_name)
     pipeline_config.file.base_pipeline_dir = output_dir
 
@@ -84,7 +85,6 @@ def run_single_experiment(
     pipeline_config.classify.boosting.top_k_features = experiment_params.get('topk_features', 5)
     pipeline_config.classify.boosting.gate_construction = experiment_params.get('gate_construction', 'combined')
     pipeline_config.classify.boosting.shuffle_decoder = experiment_params.get('shuffle_decoder', False)
-    pipeline_config.classify.boosting.clamp_max = experiment_params.get('clamp_max', 5.0)
 
     # No steering layers since we're not using SAE boosting
     pipeline_config.classify.boosting.steering_layers = []
@@ -277,8 +277,6 @@ def run_parameter_sweep(
             'topk_features': 0,
             'gate_construction': 'combined',
             'shuffle_decoder': False,
-            'clamp_min': 0.2,
-            'clamp_max': 5.0
         }
 
         exp_dir = output_base_dir / dataset_name / "vanilla"
@@ -436,23 +434,14 @@ def main():
     """
     # Define datasets to test
     datasets = [
-        ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
-        ("imagenet", Path("./data/imagenet/raw")),
+        # ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
+        # ("imagenet", Path("./data/imagenet/raw")),
         ("covidquex", Path("./data/covidquex/data/lung/")),
     ]
 
     # Define parameter grid
     layer_combinations = [
-        [2],
-        [3],
-        [4],
-        [5],
-        [6],
-        [7],
-        [8],
-        [9],
-        [10],
-        # [4, 5, 6],
+        [2, 3, 4],
     ]
 
     # covidquex
@@ -488,7 +477,7 @@ def main():
         gate_constructions=gate_constructions,
         shuffle_decoder_options=shuffle_decoder_options,
         clamp_max_values=clamp_max_values,
-        subset_size=500,
+        subset_size=10000,
         random_seed=42
     )
 

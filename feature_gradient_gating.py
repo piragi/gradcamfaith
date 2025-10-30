@@ -47,14 +47,6 @@ def compute_feature_gradient_gate(
         gate: Per-patch multipliers [n_patches]
         debug_info: Dictionary with debug information
     """
-    device = residual_grad.device
-    n_patches = residual_grad.shape[0]
-
-    # Handle top_k=None case (use all features)
-    if top_k is None:
-        top_k = sae_codes.shape[1]
-
-    # --- Stable shuffle (if requested) ---
     if shuffle_decoder:
         # If a perm was not provided, create one deterministically ONCE
         # Be deterministic across calls in this process:
@@ -62,45 +54,26 @@ def compute_feature_gradient_gate(
         g.manual_seed(12345)  # or pass from config
         shuffle_perm = torch.randperm(sae_decoder.shape[1], generator=g, device=sae_decoder.device)
         sae_decoder_shuffled = sae_decoder[:, shuffle_perm]
-        # IMPORTANT: shuffling + denoising cancels the effect; turn it off when shuffled
-        denoise_gradient = False
     else:
         sae_decoder_shuffled = sae_decoder
 
-    # Normalize decoder columns for stability
-    if normalize_decoder:
-        decoder_norm = sae_decoder_shuffled / (sae_decoder_shuffled.norm(dim=0, keepdim=True) + 1e-8)
-    else:
-        decoder_norm = sae_decoder_shuffled
-
-    # Optional: Denoise gradient by projecting onto decoder subspace
-    if denoise_gradient:
-        # Project: g' = D(D^T g) - removes components not in SAE basis
-        feature_proj = residual_grad @ decoder_norm  # [n_patches, n_features]
-        residual_grad = feature_proj @ decoder_norm.t()  # [n_patches, d_model]
+    decoder_norm = sae_decoder_shuffled
 
     # Compute feature gradients: h = D^T g
     feature_grads = residual_grad @ decoder_norm  # [n_patches, n_features]
 
     # Compute per-patch scalar based on gate construction type
     if gate_construction == "activation_only":
-        # Activation-only: sum of top-K activations
-        top_vals, top_idx = torch.topk(sae_codes, k=min(top_k, sae_codes.shape[1]), dim=1)
-        s_t = top_vals.sum(dim=1)  # [n_patches]
-        contributions = top_vals  # For debug info
+        s_t = sae_codes.sum(dim=1)  # [n_patches]
+        contributions = sae_codes  # For debug info
 
     elif gate_construction == "gradient_only":
-        # Gradient-only: sum of top-K absolute gradients in feature space
         abs_feature_grads = torch.abs(feature_grads)
-        top_vals, top_idx = torch.topk(abs_feature_grads, k=min(top_k, abs_feature_grads.shape[1]), dim=1)
-        s_t = top_vals.sum(dim=1)  # [n_patches]
-        contributions = top_vals  # For debug info
+        s_t = abs_feature_grads.sum(dim=1)  # [n_patches]
+        contributions = abs_feature_grads  # For debug info
 
     elif gate_construction == "combined":
-        # Combined (default): gradient * activation for top-K features by activation
-        top_vals, top_idx = torch.topk(sae_codes, k=min(top_k, sae_codes.shape[1]), dim=1)
-        h_top = torch.gather(feature_grads, 1, top_idx)  # [n_patches, top_k]
-        contributions = h_top * top_vals  # [n_patches, top_k]
+        contributions = sae_codes * feature_grads  # [n_patches, n_features]
         s_t = contributions.sum(dim=1)  # [n_patches]
 
     else:
@@ -122,14 +95,24 @@ def compute_feature_gradient_gate(
     # Collect debug information
     debug_info = {}
     if debug:
+        # Collect sparse features (activation > 0.1)
+        active_mask = sae_codes > 0.1
+        sparse_indices = []
+        sparse_activations = []
+        sparse_gradients = []
+
+        for patch_idx in range(sae_codes.shape[0]):
+            mask = active_mask[patch_idx]
+            indices = torch.where(mask)[0]
+            sparse_indices.append(indices.detach().cpu().numpy())
+            sparse_activations.append(sae_codes[patch_idx, mask].detach().cpu().numpy())
+            sparse_gradients.append(feature_grads[patch_idx, mask].detach().cpu().numpy())
+
         debug_info = {
-            'raw_contributions': s_t.detach().cpu().numpy(),
-            'normalized_contributions': s_norm.detach().cpu().numpy(),
             'gate_values': gate.detach().cpu().numpy(),
-            'top_features_per_patch': top_idx.detach().cpu().numpy(),
-            'feature_contributions': contributions.detach().cpu().numpy(),
-            'n_positive': (s_t > 0).sum().item(),
-            'n_negative': (s_t < 0).sum().item(),
+            'sparse_features_indices': sparse_indices,
+            'sparse_features_activations': sparse_activations,
+            'sparse_features_gradients': sparse_gradients,
             'mean_gate': gate.mean().item(),
             'std_gate': gate.std().item(),
         }
@@ -142,62 +125,12 @@ def compute_feature_gradient_gate(
     return gate, debug_info
 
 
-def compute_reconstruction_denoise_gate(
-    residuals: torch.Tensor,
-    reconstructions: torch.Tensor,
-    alpha: float = 5.0,
-    min_gate: float = 0.6,
-    debug: bool = False
-) -> Tuple[torch.Tensor, Dict[str, Any]]:
-    """
-    Compute per-patch denoising gate based on reconstruction quality.
-    
-    Patches that are poorly reconstructed by the SAE are likely noise,
-    so we downweight them.
-    
-    Args:
-        residuals: Original residual vectors [n_patches, d_model]
-        reconstructions: SAE reconstructions [n_patches, d_model]
-        alpha: Sensitivity parameter for sigmoid
-        min_gate: Minimum gate value
-        debug: Whether to return debug information
-        
-    Returns:
-        gate: Per-patch denoising multipliers [n_patches]
-        debug_info: Dictionary with debug information
-    """
-    # Compute reconstruction error per patch
-    recon_error = (residuals - reconstructions).norm(dim=1)
-    residual_norm = residuals.norm(dim=1) + 1e-8
-
-    # Normalized reconstruction error
-    rel_error = recon_error / residual_norm
-
-    # Map to gate using sigmoid (high error -> low gate)
-    gate = torch.sigmoid(-alpha * rel_error)
-    gate = torch.clamp(gate, min=min_gate, max=1.0)
-
-    debug_info = {}
-    if debug:
-        debug_info = {
-            'reconstruction_errors': rel_error.detach().cpu().numpy(),
-            'gate_values': gate.detach().cpu().numpy(),
-            'mean_error': rel_error.mean().item(),
-            'mean_gate': gate.mean().item(),
-            'n_suppressed': (gate < 0.9).sum().item(),
-        }
-
-    return gate, debug_info
-
-
 def apply_feature_gradient_gating(
     cam_pos_avg: torch.Tensor,
     residual_grad: torch.Tensor,
     sae_codes: torch.Tensor,
-    sae: Any,  # SAE model with decoder
+    sae: Any,
     config: Optional[Dict[str, Any]] = None,
-    enable_denoising: bool = False,
-    residuals: Optional[torch.Tensor] = None,
     debug: bool = False
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """
@@ -253,60 +186,25 @@ def apply_feature_gradient_gating(
         debug=debug
     )
 
-    # Optionally compute denoising gate (disabled when decoder is shuffled)
-    denoise_gate = None
-    denoise_debug = {}
-    if enable_denoising and residuals is not None and not shuffle_decoder:
-        with torch.no_grad():
-            try:
-                reconstructions = sae.decode(sae_codes)
-            except Exception as e:
-                # SAE decode failed - disable denoising
-                enable_denoising = False
-                denoise_gate = None
-
-        if enable_denoising:
-            denoise_gate, denoise_debug = compute_reconstruction_denoise_gate(
-                residuals=residuals,
-                reconstructions=reconstructions,
-                alpha=config.get('denoise_alpha', 5.0),
-                min_gate=config.get('denoise_min', 0.6),
-                debug=debug
-            )
-
-    # Combine gates
-    if denoise_gate is not None:
-        combined_gate = feature_gate * denoise_gate
-    else:
-        combined_gate = feature_gate
-
-    # Apply gate to CAM
-    # Note: cam_pos_avg shape is [n_patches, n_patches] where first is CLS
-    # We gate the spatial tokens (1:) in the second dimension
-
     # Ensure both tensors are on the same device
     device = cam_pos_avg.device
-    combined_gate = combined_gate.to(device)
+    feature_gate = feature_gate.to(device)
 
     # Create a new tensor to avoid in-place modification issues
     # The issue: cam_pos_avg is [197, 197] and combined_gate is [196]
     # We need to properly handle the CLS token dimension
-    if cam_pos_avg.shape[0] == combined_gate.shape[0] + 1:
+    if cam_pos_avg.shape[0] == feature_gate.shape[0] + 1:
         gated_cam = cam_pos_avg.clone()
-        gate_col = combined_gate.unsqueeze(0)  # [1, S]
+        gate_col = feature_gate.unsqueeze(0)  # [1, S]
         gated_cam[:, 1:] = gated_cam[:, 1:] * gate_col
-
-        # row-normalize to keep rows stochastic
-        # gated_cam = gated_cam / (gated_cam.sum(-1, keepdim=True) + 1e-8)
     else:
         # CAM is spatial-only
-        gated_cam = cam_pos_avg * combined_gate.unsqueeze(0)
+        gated_cam = cam_pos_avg * feature_gate.unsqueeze(0)
 
     # Compile debug info
     debug_info = {
         'feature_gating': feature_debug,
-        'denoising': denoise_debug,
-        'combined_gate': combined_gate.detach().cpu().numpy() if debug else None,
+        'combined_gate': feature_gate.detach().cpu().numpy() if debug else None,
     }
 
     return gated_cam, debug_info

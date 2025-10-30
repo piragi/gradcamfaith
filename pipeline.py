@@ -272,9 +272,10 @@ def classify_explain_single_image(
     steering_resources: Optional[Dict[int, Dict[str, Any]]],
     true_label: Optional[str] = None,
     clip_classifier: Optional[Any] = None,  # Pre-created CLIP classifier
-) -> ClassificationResult:
+) -> Tuple[ClassificationResult, Dict[int, Dict[str, Any]]]:
     """
     Classify a single image AND generate explanations using unified system.
+    Returns classification result and debug info (if debug mode is enabled).
     """
     cache_path = io_utils.build_cache_path(
         config.file.cache_dir, image_path, f"_classification_explained_{dataset_config.name}"
@@ -284,7 +285,7 @@ def classify_explain_single_image(
     loaded_result = io_utils.try_load_from_cache(cache_path)
     if config.file.use_cached_original and loaded_result:
         if loaded_result.attribution_paths is not None:
-            return loaded_result
+            return loaded_result, {}  # No debug info from cache
 
     # Load and preprocess image
     # Check if we're using CLIP (config might be None in some cases)
@@ -305,8 +306,9 @@ def classify_explain_single_image(
         clip_classifier=clip_classifier,
     )
 
-    # Extract raw attribution
+    # Extract raw attribution and debug info
     raw_attr = raw_attribution_result_dict.get("raw_attribution", np.array([]))
+    debug_info = raw_attribution_result_dict.get("debug_info", {})
 
     # Create prediction
     prediction_data = raw_attribution_result_dict["predictions"]
@@ -339,7 +341,7 @@ def classify_explain_single_image(
     # Cache the result
     io_utils.save_to_cache(cache_path, final_result)
 
-    return final_result
+    return final_result, debug_info
 
 
 def run_unified_pipeline(
@@ -400,10 +402,7 @@ def run_unified_pipeline(
     print(f"Creating dataloader from {prepared_path}")
     # Check if we're using CLIP for this dataset
     use_clip = config.classify.use_clip if hasattr(config.classify, 'use_clip') else False
-    dataset_loader = create_dataloader(
-        dataset_name=dataset_name,
-        data_path=prepared_path
-    )
+    dataset_loader = create_dataloader(dataset_name=dataset_name, data_path=prepared_path)
 
     # Use pre-loaded model and steering resources
     print(f"\nUsing pre-loaded model for {dataset_name}")
@@ -421,9 +420,7 @@ def run_unified_pipeline(
         if random_seed is not None:
             random.seed(random_seed)
         image_data = random.sample(image_data, subset_size)
-        print(
-            f"\nProcessing {len(image_data)} randomly selected {split_to_use} images (subset of {total_samples})"
-        )
+        print(f"\nProcessing {len(image_data)} randomly selected {split_to_use} images (subset of {total_samples})")
     else:
         print(f"\nProcessing {total_samples} {split_to_use} images")
 
@@ -434,12 +431,16 @@ def run_unified_pipeline(
     # Classify and explain
     results = []
 
+    # Initialize debug data accumulators if debug mode is enabled
+    debug_mode = config.classify.boosting.debug_mode
+    debug_data_per_layer = {}  # {layer_idx: {key: list of values per image}}
+
     for _, (image_path, true_label_idx) in enumerate(tqdm(image_data, desc="Classifying & Explaining")):
         try:
             # Convert label index to label name (handle unlabeled = -1)
             true_label = dataset_config.idx_to_class.get(true_label_idx)
 
-            result = classify_explain_single_image(
+            result, debug_info = classify_explain_single_image(
                 config=config,
                 dataset_config=dataset_config,
                 image_path=image_path,
@@ -451,6 +452,30 @@ def run_unified_pipeline(
             )
             results.append(result)
 
+            # Accumulate debug data
+            if debug_mode and debug_info:
+                for layer_idx, layer_debug in debug_info.items():
+                    # Extract feature_gating nested dict
+                    feature_gating = layer_debug.get('feature_gating', {})
+
+                    if layer_idx not in debug_data_per_layer:
+                        debug_data_per_layer[layer_idx] = {
+                            'sparse_indices': [],
+                            'sparse_activations': [],
+                            'sparse_gradients': [],
+                            'gate_values': [],
+                        }
+                    debug_data_per_layer[layer_idx]['sparse_indices'].append(
+                        feature_gating.get('sparse_features_indices', [])
+                    )
+                    debug_data_per_layer[layer_idx]['sparse_activations'].append(
+                        feature_gating.get('sparse_features_activations', [])
+                    )
+                    debug_data_per_layer[layer_idx]['sparse_gradients'].append(
+                        feature_gating.get('sparse_features_gradients', [])
+                    )
+                    debug_data_per_layer[layer_idx]['gate_values'].append(feature_gating.get('gate_values', np.array([])))
+
         except Exception as e:
             print(f"Error processing {image_path.name}: {e}")
             continue
@@ -460,6 +485,26 @@ def run_unified_pipeline(
         csv_path = config.file.output_dir / f"results_{dataset_name}_unified.csv"
         io_utils.save_classification_results_to_csv(results, csv_path)
         print(f"Results saved to {csv_path}")
+
+    # Save debug data if collected
+    if debug_mode and debug_data_per_layer:
+        debug_dir = config.file.output_dir / "debug_data"
+        debug_dir.mkdir(exist_ok=True, parents=True)
+
+        for layer_idx, layer_data in debug_data_per_layer.items():
+            debug_file = debug_dir / f"layer_{layer_idx}_debug.npz"
+
+            # Convert gate_values list to numpy array
+            gate_values_array = np.array(layer_data['gate_values'])
+
+            # Save with numpy - object arrays for sparse data
+            np.savez_compressed(
+                debug_file,
+                sparse_indices=np.array(layer_data['sparse_indices'], dtype=object),
+                sparse_activations=np.array(layer_data['sparse_activations'], dtype=object),
+                sparse_gradients=np.array(layer_data['sparse_gradients'], dtype=object),
+                gate_values=gate_values_array
+            )
 
     # For CLIP models, wrap the classifier for both faithfulness and attribution analysis
     model_for_analysis = model

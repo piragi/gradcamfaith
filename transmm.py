@@ -17,7 +17,7 @@ from feature_gradient_gating import apply_feature_gradient_gating
 
 def apply_gradient_gating_to_cam(
     cam_pos_avg: torch.Tensor, layer_idx: int, gradients: Dict[str, torch.Tensor], residuals: Dict[int, torch.Tensor],
-    steering_resources: Dict[int, Dict[str, Any]], config: PipelineConfig, device: torch.device
+    steering_resources: Dict[int, Dict[str, Any]], config: PipelineConfig, device: torch.device, debug: bool = False
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """Apply feature gradient gating to a CAM tensor at a specific layer."""
     resid_grad_key = f"blocks.{layer_idx}.hook_resid_post_grad"
@@ -58,15 +58,9 @@ def apply_gradient_gating_to_cam(
         'kappa': getattr(config.classify.boosting, 'kappa', 50.0),
         'clamp_min': 0.1,
         'clamp_max': getattr(config.classify.boosting, 'clamp_max', 10.0),
-        'denoise_gradient': False,
-        'denoise_alpha': 5.0,
-        'denoise_min': 0.6,
         'gate_construction': getattr(config.classify.boosting, 'gate_construction', 'combined'),
         'shuffle_decoder': getattr(config.classify.boosting, 'shuffle_decoder', False),
     }
-
-    # Get residuals for denoising if available
-    layer_residuals = None  # Disable denoising for now
 
     gated_cam, layer_debug = apply_feature_gradient_gating(
         cam_pos_avg=cam_pos_avg,
@@ -74,9 +68,7 @@ def apply_gradient_gating_to_cam(
         sae_codes=codes_gpu,
         sae=sae,
         config=gating_config,
-        enable_denoising=False,  # Disabled due to shape issues
-        residuals=layer_residuals,
-        debug=False  # Disable debug to avoid storing large arrays
+        debug=debug
     )
 
     return gated_cam, layer_debug
@@ -85,12 +77,15 @@ def apply_gradient_gating_to_cam(
 def compute_layer_attribution(
     model_cfg: HookedViTConfig, activations: Dict[str, torch.Tensor], gradients: Dict[str, torch.Tensor],
     residuals: Dict[int, torch.Tensor], feature_gradient_layers: List[int],
-    steering_resources: Optional[Dict[int, Dict[str, Any]]], config: PipelineConfig, device: torch.device
-) -> torch.Tensor:
+    steering_resources: Optional[Dict[int, Dict[str, Any]]], config: PipelineConfig, device: torch.device,
+    debug: bool = False
+) -> Tuple[torch.Tensor, Dict[int, Dict[str, Any]]]:
     """Compute attribution by iterating through layers and applying attention rules."""
     attn_hook_names = [f"blocks.{i}.attn.hook_pattern" for i in range(model_cfg.n_layers)]
     num_tokens = activations[attn_hook_names[0]].shape[-1]
     R_pos = torch.eye(num_tokens, num_tokens, device='cpu')
+
+    debug_info_per_layer = {}
 
     for i in range(model_cfg.n_layers):
         hname = f"blocks.{i}.attn.hook_pattern"
@@ -100,15 +95,17 @@ def compute_layer_attribution(
 
         # Apply feature gradient gating if configured
         if (i in feature_gradient_layers and steering_resources is not None and i in steering_resources):
-            cam_pos_avg, _ = apply_gradient_gating_to_cam(
-                cam_pos_avg, i, gradients, residuals, steering_resources, config, device
+            cam_pos_avg, layer_debug = apply_gradient_gating_to_cam(
+                cam_pos_avg, i, gradients, residuals, steering_resources, config, device, debug=debug
             )
+            if debug:
+                debug_info_per_layer[i] = layer_debug
 
         R_pos = R_pos + apply_self_attention_rules(R_pos, cam_pos_avg)
 
     transformer_attribution_pos = R_pos[0, 1:].clone()
 
-    return transformer_attribution_pos
+    return transformer_attribution_pos, debug_info_per_layer
 
 
 def avg_heads(cam: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
@@ -210,7 +207,8 @@ def transmm_prisma_enhanced(
     enable_feature_gradients: bool = True,
     feature_gradient_layers: Optional[List[int]] = None,
     clip_classifier: Optional[Any] = None,
-) -> Tuple[Dict[str, Any], np.ndarray, np.ndarray]:
+    debug: bool = False,
+) -> Tuple[Dict[str, Any], np.ndarray, np.ndarray, Dict[int, Dict[str, Any]]]:
     """
     TransMM with feature gradient gating for improved faithfulness.
     """
@@ -241,8 +239,9 @@ def transmm_prisma_enhanced(
         raise RuntimeError("No gradients captured!")
 
     # Compute attribution
-    transformer_attribution_pos = compute_layer_attribution(
-        model_prisma.cfg, activations, gradients, residuals, feature_gradient_layers, steering_resources, config, device
+    transformer_attribution_pos, debug_info_per_layer = compute_layer_attribution(
+        model_prisma.cfg, activations, gradients, residuals, feature_gradient_layers, steering_resources, config, device,
+        debug=debug
     )
 
     # Convert to numpy and process attribution map
@@ -259,7 +258,7 @@ def transmm_prisma_enhanced(
     normalize_fn = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x) + 1e-8) if (np.max(x) - np.min(x)) > 1e-8 else x
     attribution_pos_np = normalize_fn(attribution_pos_np)
 
-    return (prediction_result, attribution_pos_np, raw_patch_map)
+    return (prediction_result, attribution_pos_np, raw_patch_map, debug_info_per_layer)
 
 
 def generate_attribution_prisma_enhanced(
@@ -281,7 +280,10 @@ def generate_attribution_prisma_enhanced(
 
     input_tensor = input_tensor.to(device)
 
-    (pred_dict, pos_attr_np, raw_patch_map) = transmm_prisma_enhanced(
+    # Get debug flag from config
+    debug = getattr(config.classify.boosting, 'debug_mode', False)
+
+    (pred_dict, pos_attr_np, raw_patch_map, debug_info_per_layer) = transmm_prisma_enhanced(
         model_prisma=model,
         input_tensor=input_tensor,
         steering_resources=steering_resources,
@@ -290,10 +292,12 @@ def generate_attribution_prisma_enhanced(
         feature_gradient_layers=feature_gradient_layers,
         idx_to_class=idx_to_class,
         clip_classifier=clip_classifier,
+        debug=debug,
     )
 
     return {
         "predictions": pred_dict,
         "attribution_positive": pos_attr_np,
         "raw_attribution": raw_patch_map,
+        "debug_info": debug_info_per_layer if debug else {},
     }

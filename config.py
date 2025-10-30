@@ -99,6 +99,9 @@ class BoostingConfig:
     gate_construction: str = "combined"  # Type of gate: "activation_only", "gradient_only", or "combined"
     shuffle_decoder: bool = False  # Shuffle decoder columns to break semantic alignment
 
+    # Debug mode - collect detailed feature data
+    debug_mode: bool = False  # If True, collect sparse features, gradients, and gate values per image
+
 
 @dataclass
 class ClassificationConfig:
