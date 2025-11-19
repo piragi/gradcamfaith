@@ -100,6 +100,7 @@ def compute_feature_gradient_gate(
         sparse_indices = []
         sparse_activations = []
         sparse_gradients = []
+        sparse_contributions = []
 
         for patch_idx in range(sae_codes.shape[0]):
             mask = active_mask[patch_idx]
@@ -107,12 +108,19 @@ def compute_feature_gradient_gate(
             sparse_indices.append(indices.detach().cpu().numpy())
             sparse_activations.append(sae_codes[patch_idx, mask].detach().cpu().numpy())
             sparse_gradients.append(feature_grads[patch_idx, mask].detach().cpu().numpy())
+            sparse_contributions.append(contributions[patch_idx, mask].detach().cpu().numpy())
+
+        # Compute total contribution magnitude per patch (for cancellation analysis)
+        total_contribution_magnitude = torch.abs(contributions).sum(dim=1)  # [n_patches]
 
         debug_info = {
             'gate_values': gate.detach().cpu().numpy(),
             'sparse_features_indices': sparse_indices,
             'sparse_features_activations': sparse_activations,
             'sparse_features_gradients': sparse_gradients,
+            'sparse_features_contributions': sparse_contributions,
+            'contribution_sum': s_t.detach().cpu().numpy(),  # Net sum (can be canceled)
+            'total_contribution_magnitude': total_contribution_magnitude.detach().cpu().numpy(),  # Total magnitude
             'mean_gate': gate.mean().item(),
             'std_gate': gate.std().item(),
         }
@@ -201,10 +209,25 @@ def apply_feature_gradient_gating(
         # CAM is spatial-only
         gated_cam = cam_pos_avg * feature_gate.unsqueeze(0)
 
+    # Compute attribution delta (how much did gating change the CAM?)
+    cam_delta = gated_cam - cam_pos_avg
+
+    # Extract per-patch attribution deltas (signed sum of changes per column)
+    # Positive = boosted attribution, Negative = deboosted attribution
+    # This represents the net change in each patch's incoming attention
+    if cam_pos_avg.shape[0] == feature_gate.shape[0] + 1:
+        # Has CLS token, compute delta for spatial patches only
+        patch_attribution_deltas = cam_delta[:, 1:].sum(dim=0)  # [196]
+    else:
+        # Spatial only
+        patch_attribution_deltas = cam_delta.sum(dim=0)  # [196]
+
     # Compile debug info
     debug_info = {
         'feature_gating': feature_debug,
         'combined_gate': feature_gate.detach().cpu().numpy() if debug else None,
+        'cam_delta': cam_delta.detach().cpu().numpy() if debug else None,
+        'patch_attribution_deltas': patch_attribution_deltas.detach().cpu().numpy() if debug else None,
     }
 
     return gated_cam, debug_info

@@ -463,7 +463,11 @@ def run_unified_pipeline(
                             'sparse_indices': [],
                             'sparse_activations': [],
                             'sparse_gradients': [],
+                            'sparse_contributions': [],
                             'gate_values': [],
+                            'patch_attribution_deltas': [],
+                            'contribution_sum': [],
+                            'total_contribution_magnitude': [],
                         }
                     debug_data_per_layer[layer_idx]['sparse_indices'].append(
                         feature_gating.get('sparse_features_indices', [])
@@ -474,7 +478,19 @@ def run_unified_pipeline(
                     debug_data_per_layer[layer_idx]['sparse_gradients'].append(
                         feature_gating.get('sparse_features_gradients', [])
                     )
+                    debug_data_per_layer[layer_idx]['sparse_contributions'].append(
+                        feature_gating.get('sparse_features_contributions', [])
+                    )
                     debug_data_per_layer[layer_idx]['gate_values'].append(feature_gating.get('gate_values', np.array([])))
+                    debug_data_per_layer[layer_idx]['patch_attribution_deltas'].append(
+                        layer_debug.get('patch_attribution_deltas', np.array([]))
+                    )
+                    debug_data_per_layer[layer_idx]['contribution_sum'].append(
+                        feature_gating.get('contribution_sum', np.array([]))
+                    )
+                    debug_data_per_layer[layer_idx]['total_contribution_magnitude'].append(
+                        feature_gating.get('total_contribution_magnitude', np.array([]))
+                    )
 
         except Exception as e:
             print(f"Error processing {image_path.name}: {e}")
@@ -494,8 +510,11 @@ def run_unified_pipeline(
         for layer_idx, layer_data in debug_data_per_layer.items():
             debug_file = debug_dir / f"layer_{layer_idx}_debug.npz"
 
-            # Convert gate_values list to numpy array
+            # Convert lists to numpy arrays
             gate_values_array = np.array(layer_data['gate_values'])
+            patch_attribution_deltas_array = np.array(layer_data['patch_attribution_deltas'])
+            contribution_sum_array = np.array(layer_data['contribution_sum'])
+            total_contribution_magnitude_array = np.array(layer_data['total_contribution_magnitude'])
 
             # Save with numpy - object arrays for sparse data
             np.savez_compressed(
@@ -503,7 +522,11 @@ def run_unified_pipeline(
                 sparse_indices=np.array(layer_data['sparse_indices'], dtype=object),
                 sparse_activations=np.array(layer_data['sparse_activations'], dtype=object),
                 sparse_gradients=np.array(layer_data['sparse_gradients'], dtype=object),
-                gate_values=gate_values_array
+                sparse_contributions=np.array(layer_data['sparse_contributions'], dtype=object),
+                gate_values=gate_values_array,
+                patch_attribution_deltas=patch_attribution_deltas_array,
+                contribution_sum=contribution_sum_array,
+                total_contribution_magnitude=total_contribution_magnitude_array
             )
 
     # For CLIP models, wrap the classifier for both faithfulness and attribution analysis

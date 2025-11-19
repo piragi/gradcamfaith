@@ -58,7 +58,7 @@ def run_single_experiment(
     # Basic settings
     pipeline_config.file.use_cached_original = False
     pipeline_config.file.use_cached_perturbed = ""
-    pipeline_config.file.current_mode = "val"
+    pipeline_config.file.current_mode = "test"
     pipeline_config.classify.analysis = True
     pipeline_config.classify.boosting.debug_mode = True
     pipeline_config.file.set_dataset(dataset_name)
@@ -435,13 +435,13 @@ def main():
     # Define datasets to test
     datasets = [
         # ("hyperkvasir", Path("./data/hyperkvasir/labeled-images/")),
-        # ("imagenet", Path("./data/imagenet/raw")),
-        ("covidquex", Path("./data/covidquex/data/lung/")),
+        ("imagenet", Path("./data/imagenet/raw")),
+        # ("covidquex", Path("./data/covidquex/data/lung/")),
     ]
 
     # Define parameter grid
     layer_combinations = [
-        [2, 3, 4],
+        [6, 9, 10],
     ]
 
     # covidquex
