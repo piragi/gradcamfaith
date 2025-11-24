@@ -330,6 +330,46 @@ def download_covidquex(data_dir: Path, models_dir: Path) -> None:
             print(f"Warning: Could not check/extract model file: {e}")
 
 
+def download_thesis_saes(data_dir: Path) -> None:
+    """
+    Download thesis-trained SAE checkpoints from Google Drive.
+    Downloads sae_hyperkvasir and sae_covidquex folders (layers 1-10 each).
+    """
+    print("\n" + "=" * 50)
+    print("Downloading Thesis SAE Checkpoints from Google Drive")
+    print("=" * 50)
+
+    # Google Drive folder ID from the provided link
+    folder_id = "1yYgZ0WbfECnqFcXiY_qrM9TENaTfkYEn"
+    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+
+    try:
+        print(f"Downloading SAE folders (sae_hyperkvasir and sae_covidquex)...")
+        print(f"This includes layers 1-10 for each dataset.")
+
+        # Download entire folder structure to data directory
+        gdown.download_folder(url=folder_url, output=str(data_dir), quiet=False, use_cookies=False)
+
+        # Check what was downloaded
+        hyperkvasir_sae = data_dir / "sae_hyperkvasir"
+        covidquex_sae = data_dir / "sae_covidquex"
+
+        if hyperkvasir_sae.exists():
+            num_layers = len(list(hyperkvasir_sae.glob("layer_*")))
+            print(f"✓ sae_hyperkvasir downloaded ({num_layers} layers)")
+
+        if covidquex_sae.exists():
+            num_layers = len(list(covidquex_sae.glob("layer_*")))
+            print(f"✓ sae_covidquex downloaded ({num_layers} layers)")
+
+        print(f"✓ Thesis SAEs downloaded successfully")
+
+    except Exception as e:
+        print(f"✗ Failed to download thesis SAEs: {str(e)}")
+        print(f"  You can manually download from: {folder_url}")
+        print(f"  And extract sae_hyperkvasir/ and sae_covidquex/ to: {data_dir}")
+
+
 def download_sae_checkpoints(data_dir: Path) -> None:
     """Download SAE checkpoints from HuggingFace for all layers."""
     print("\n" + "=" * 50)
@@ -762,6 +802,7 @@ def main():
         from dataset_config import refresh_imagenet_config
         refresh_imagenet_config()
 
+        download_thesis_saes(data_dir)
         download_sae_checkpoints(data_dir)
         print_summary(data_dir, models_dir)
         print("\nSetup completed successfully.")
