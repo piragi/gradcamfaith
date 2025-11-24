@@ -225,7 +225,6 @@ def run_parameter_sweep(
         # Load model and SAE resources once for this dataset
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         dataset_config = get_dataset_config(dataset_name)
-        print(dataset_config)
 
         # Create temporary pipeline config to get CLIP settings
         temp_config = config.PipelineConfig()
@@ -477,7 +476,7 @@ def main():
         gate_constructions=gate_constructions,
         shuffle_decoder_options=shuffle_decoder_options,
         clamp_max_values=clamp_max_values,
-        subset_size=10000,
+        subset_size=10,
         random_seed=42
     )
 

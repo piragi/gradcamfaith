@@ -204,16 +204,3 @@ def get_single_image_loader(
     
     # Add batch dimension
     return image_tensor.unsqueeze(0)
-
-
-# Example usage
-if __name__ == "__main__":
-    dataset = create_dataloader("covidquex", Path("./data/covidquex_unified"))
-    stats = dataset.get_statistics()
-    print(f"Dataset: {stats['dataset_name']}")
-    print(f"Classes: {stats['num_classes']} - {stats['class_names']}")
-    
-    for split, split_stats in stats['splits'].items():
-        print(f"{split}: {split_stats['total_samples']} samples")
-        for class_name, count in split_stats['class_distribution'].items():
-            print(f"  {class_name}: {count}")

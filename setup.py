@@ -29,7 +29,7 @@ from dataset_config import COVIDQUEX_CONFIG, HYPERKVASIR_CONFIG, DatasetConfig
 def download_with_progress(url: str, filename: Path) -> None:
     """Download file with progress bar using requests."""
     try:
-        response = requests.get(url, stream=True)
+        response = requests.get(url, stream=True, verify=False)
         response.raise_for_status()
         total_size = int(response.headers.get('content-length', 0))
 
@@ -54,7 +54,8 @@ def download_from_gdrive(file_id: str, output_path: Path, description: str) -> N
 
     url = f"https://drive.google.com/uc?id={file_id}"
     try:
-        gdown.download(url, str(output_path), quiet=False)
+        # fuzzy=True handles virus scan confirmation for large files
+        gdown.download(url, str(output_path), quiet=False, fuzzy=True)
     except Exception as e:
         raise
 
@@ -97,8 +98,8 @@ def download_hyperkvasir(data_dir: Path, models_dir: Path) -> None:
 
     if not dataset_path.exists():
         try:
-            # Try wget first (faster for large files)
-            subprocess.run(["wget", "-O", str(dataset_path), dataset_url], check=True)
+            # Try wget first (faster for large files) - disable cert check for Simula server
+            subprocess.run(["wget", "--no-check-certificate", "-O", str(dataset_path), dataset_url], check=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
             # Fallback to requests if wget is not available
             download_with_progress(dataset_url, dataset_path)
@@ -117,46 +118,6 @@ def download_hyperkvasir(data_dir: Path, models_dir: Path) -> None:
 
     output_path = hk_models_dir / model_info["name"]
     download_from_gdrive(model_info["id"], output_path, model_info["description"])
-
-
-def download_waterbirds(data_dir: Path, models_dir: Path) -> None:
-    """Download Waterbirds dataset."""
-    print("\nDownloading Waterbirds...")
-
-    # Create waterbirds subdirectories
-    wb_data_dir = data_dir / "waterbirds"
-    wb_models_dir = models_dir / "waterbirds"
-    wb_data_dir.mkdir(exist_ok=True, parents=True)
-    wb_models_dir.mkdir(exist_ok=True, parents=True)
-
-    # Download Waterbirds dataset
-    # The dataset is available from the group_DRO repository
-    dataset_url = "https://nlp.stanford.edu/data/dro/waterbird_complete95_forest2water2.tar.gz"
-    dataset_path = wb_data_dir / "waterbird_complete95_forest2water2.tar.gz"
-
-    if not dataset_path.exists():
-        print(f"Downloading Waterbirds dataset from {dataset_url}")
-        try:
-            # Try wget first (faster for large files)
-            subprocess.run(["wget", "-O", str(dataset_path), dataset_url], check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            # Fallback to requests if wget is not available
-            download_with_progress(dataset_url, dataset_path)
-
-    # Extract dataset
-    extracted_dir = wb_data_dir / "waterbird_complete95_forest2water2"
-    if not extracted_dir.exists():
-        print("Extracting Waterbirds dataset...")
-        extract_tar_gz(dataset_path, wb_data_dir)
-        print(f"Dataset extracted to {extracted_dir}")
-
-    # Download CLIP model (will be cached by transformers library)
-    # We don't need to download it manually, but we'll check if transformers is installed
-    try:
-        import transformers
-        print("✓ Transformers library available for CLIP model loading")
-    except ImportError:
-        print("⚠ Warning: transformers library not installed. Install with: pip install transformers")
 
 
 def download_imagenet(data_dir: Path, models_dir: Path) -> None:
@@ -268,7 +229,7 @@ def download_covidquex(data_dir: Path, models_dir: Path) -> None:
     # Download CovidQueX dataset
     dataset_info = {
         "name": "covidquex_data.tar.gz",
-        "id": "1XrCWP3ICQvurchnJjyVweYy2jHQM0BHO",
+        "id": "1XrCWP3ICQvurchnJjyVweYy2jHQM0BHO&confirm=t",
         "description": "CovidQueX dataset (tar.gz)"
     }
 
@@ -284,7 +245,7 @@ def download_covidquex(data_dir: Path, models_dir: Path) -> None:
     # Download CovidQueX model
     model_info = {
         "name": "covidquex_model.pth",
-        "id": "1JZM5ZRncaV3iFX9L6NFT1P0-APyHbBV0",
+        "id": "1JZM5ZRncaV3iFX9L6NFT1P0-APyHbBV0&confirm=t",
         "description": "CovidQueX model"
     }
 
@@ -332,43 +293,54 @@ def download_covidquex(data_dir: Path, models_dir: Path) -> None:
 
 def download_thesis_saes(data_dir: Path) -> None:
     """
-    Download thesis-trained SAE checkpoints from Google Drive.
-    Downloads sae_hyperkvasir and sae_covidquex folders (layers 1-10 each).
+    Download thesis-trained SAE checkpoints from Google Drive zips.
     """
     print("\n" + "=" * 50)
-    print("Downloading Thesis SAE Checkpoints from Google Drive")
+    print("Downloading Thesis SAE Checkpoints (Zip Archives)")
     print("=" * 50)
 
-    # Google Drive folder ID from the provided link
-    folder_id = "1yYgZ0WbfECnqFcXiY_qrM9TENaTfkYEn"
-    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+    # Map: 'Folder Name' -> 'Google Drive File ID'
+    # Added &confirm=t to ensure large file download works smoothly
+    sae_zips = {
+        "sae_covidquex": "1Kncxk-tfQQFdLG_mFL5fJ1I-rDdcqLGy&confirm=t",
+        "sae_hyperkvasir": "1nVAvXoJxOKNy7ROMA2XLfAG3diUw5XFf&confirm=t"
+    }
 
-    try:
-        print(f"Downloading SAE folders (sae_hyperkvasir and sae_covidquex)...")
-        print(f"This includes layers 1-10 for each dataset.")
+    for folder_name, file_id in sae_zips.items():
+        target_dir = data_dir / folder_name
+        
+        # 1. Check if the folder already exists
+        if target_dir.exists():
+            print(f"✓ {folder_name} already exists. Skipping download.")
+            continue
+            
+        print(f"Processing {folder_name}...")
+        
+        # 2. Download the zip file
+        zip_filename = f"{folder_name}.zip"
+        zip_path = data_dir / zip_filename
+        
+        download_from_gdrive(
+            file_id=file_id, 
+            output_path=zip_path, 
+            description=f"{folder_name} zip"
+        )
+        
+        # 3. Extract and cleanup
+        # Assumes the zip was created by zipping the *folder*, not the files inside.
+        # If the zip contains just files, change extract_to=data_dir to extract_to=target_dir
+        if zip_path.exists():
+            print(f"Extracting {zip_filename}...")
+            extract_zip(zip_path, data_dir, remove_after=True)
+            
+            if target_dir.exists():
+                print(f"✓ {folder_name} installed successfully.")
+            else:
+                print(f"⚠ Warning: Extraction finished but {target_dir} was not found.")
+        else:
+            print(f"✗ Failed to download {zip_filename}")
 
-        # Download entire folder structure to data directory
-        gdown.download_folder(url=folder_url, output=str(data_dir), quiet=False, use_cookies=False)
-
-        # Check what was downloaded
-        hyperkvasir_sae = data_dir / "sae_hyperkvasir"
-        covidquex_sae = data_dir / "sae_covidquex"
-
-        if hyperkvasir_sae.exists():
-            num_layers = len(list(hyperkvasir_sae.glob("layer_*")))
-            print(f"✓ sae_hyperkvasir downloaded ({num_layers} layers)")
-
-        if covidquex_sae.exists():
-            num_layers = len(list(covidquex_sae.glob("layer_*")))
-            print(f"✓ sae_covidquex downloaded ({num_layers} layers)")
-
-        print(f"✓ Thesis SAEs downloaded successfully")
-
-    except Exception as e:
-        print(f"✗ Failed to download thesis SAEs: {str(e)}")
-        print(f"  You can manually download from: {folder_url}")
-        print(f"  And extract sae_hyperkvasir/ and sae_covidquex/ to: {data_dir}")
-
+    print(f"✓ Thesis SAE setup complete.")
 
 def download_sae_checkpoints(data_dir: Path) -> None:
     """Download SAE checkpoints from HuggingFace for all layers."""
@@ -472,7 +444,6 @@ def _save_metadata(output_path: Path, stats: Dict) -> None:
     print(f"\nConversion complete!")
     print(f"Total images: {stats['total_images']}")
     print(f"Splits: {stats['splits']}")
-    print(f"Classes: {stats['classes']}")
 
 
 def _process_image(
@@ -794,13 +765,12 @@ def main():
 
     try:
         # Download datasets (uncomment as needed)
-        download_hyperkvasir(data_dir, models_dir)
-        download_covidquex(data_dir, models_dir)
-        download_waterbirds(data_dir, models_dir)
-        download_imagenet(data_dir, models_dir)
-
-        from dataset_config import refresh_imagenet_config
-        refresh_imagenet_config()
+        # download_hyperkvasir(data_dir, models_dir)
+        # download_covidquex(data_dir, models_dir)
+        # download_imagenet(data_dir, models_dir)
+# 
+        # from dataset_config import refresh_imagenet_config
+        # refresh_imagenet_config()
 
         download_thesis_saes(data_dir)
         download_sae_checkpoints(data_dir)
