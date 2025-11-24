@@ -5,14 +5,13 @@ This module handles both dataset downloads and conversion to unified format.
 Combines functionality from setup.py and dataset_converters.py.
 """
 import json
-import os
 import shutil
 import subprocess
 import sys
 import tarfile
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import gdown
 import numpy as np
@@ -43,7 +42,7 @@ def download_with_progress(url: str, filename: Path) -> None:
                         percent = (downloaded / total_size) * 100
                         print(f"\rDownloading: {percent:.1f}%", end='')
         print()  # New line after download
-    except Exception as e:
+    except Exception:
         raise
 
 
@@ -56,7 +55,7 @@ def download_from_gdrive(file_id: str, output_path: Path, description: str) -> N
     try:
         # fuzzy=True handles virus scan confirmation for large files
         gdown.download(url, str(output_path), quiet=False, fuzzy=True)
-    except Exception as e:
+    except Exception:
         raise
 
 
@@ -67,7 +66,7 @@ def extract_zip(zip_path: Path, extract_to: Path, remove_after: bool = True) -> 
             zip_ref.extractall(extract_to)
         if remove_after:
             zip_path.unlink()
-    except Exception as e:
+    except Exception:
         raise
 
 
@@ -78,7 +77,7 @@ def extract_tar_gz(tar_path: Path, extract_to: Path, remove_after: bool = True) 
             tar_ref.extractall(extract_to)
         if remove_after:
             tar_path.unlink()
-    except Exception as e:
+    except Exception:
         raise
 
 
@@ -477,8 +476,8 @@ def _process_image(
 
 def split_ids(len_ids):
     """Reproduce the exact same split as in the SSL4GIE paper."""
-    train_size = int(round((80 / 100) * len_ids))
-    valid_size = int(round((10 / 100) * len_ids))
+    int(round((80 / 100) * len_ids))
+    int(round((10 / 100) * len_ids))
     test_size = int(round((10 / 100) * len_ids))
     train_indices, test_indices = train_test_split(
         np.linspace(0, len_ids - 1, len_ids).astype("int"),
@@ -682,11 +681,9 @@ def prepare_imagenet(source_path: Path, output_path: Path, config: Optional['Dat
                 _process_image(img_path, dest_path, conversion_stats, split_name, class_name, copy_only=True)
         print(f"✓ {split_name.capitalize()} copied: {conversion_stats['splits'][split_name]} images")
 
-    processed_val = False
     processed_test = False
     if val_source.exists() and any(val_source.glob("class_*/*")):
         _copy_split('val', val_source)
-        processed_val = True
     if test_source.exists() and any(test_source.glob("class_*/*")):
         _copy_split('test', test_source)
         processed_test = True
@@ -791,7 +788,7 @@ if __name__ == "__main__":
         import gdown
         import requests
         from huggingface_hub import hf_hub_download
-    except ImportError as e:
+    except ImportError:
         print("Missing required package. Install: pip install gdown requests huggingface-hub")
         sys.exit(1)
 

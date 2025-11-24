@@ -1,15 +1,11 @@
-import copy
 import gc
 import itertools
 import json
 import logging
-import os
-import subprocess
 from pathlib import Path
 
 import torch
 import torchvision
-from vit_prisma.models.base_vit import HookedSAEViT
 from vit_prisma.sae import VisionSAETrainer
 from vit_prisma.sae.config import VisionModelSAERunnerConfig
 

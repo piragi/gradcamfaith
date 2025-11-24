@@ -480,8 +480,7 @@ def evaluate_and_report_faithfulness(
     config: PipelineConfig,
     model,
     device: torch.device,
-    classification_results: List[ClassificationResult],
-    clip_classifier=None  # Kept for backward compatibility but unused
+    classification_results: List[ClassificationResult]
 ) -> Dict[str, Any]:
     """
     Evaluate faithfulness and report statistics.
@@ -518,8 +517,7 @@ def evaluate_and_report_faithfulness(
 def _build_results_structure(
     config: PipelineConfig,
     faithfulness_results: Dict[str, Dict],
-    class_labels: np.ndarray,
-    dataset_config=None
+    class_labels: np.ndarray
 ) -> Dict[str, Any]:
     """Build the results structure with statistics."""
     results = {'dataset': config.file.dataset_name, 'metrics': {}, 'class_labels': class_labels.tolist()}
@@ -550,7 +548,7 @@ def _build_results_structure(
     return results
 
 
-def _print_faithfulness_summary(metrics: Dict[str, Dict], dataset_config=None):
+def _print_faithfulness_summary(metrics: Dict[str, Dict]):
     """Print a summary of faithfulness metrics."""
     for estimator_name, estimator_data in metrics.items():
         overall = estimator_data['overall']
@@ -621,8 +619,7 @@ class PatchPixelFlipping:
         y_batch: np.ndarray,
         a_batch: np.ndarray,
         device: str = None,
-        batch_size: int = 256,
-        **kwargs
+        batch_size: int = 256
     ):
         """Main evaluation method - standalone implementation."""
         x_batch = np.asarray(x_batch)
@@ -646,7 +643,7 @@ class PatchPixelFlipping:
         return scores
 
     def evaluate_batch(
-        self, model, x_batch: np.ndarray, y_batch: np.ndarray, a_batch: np.ndarray, device=None, **kwargs
+        self, model, x_batch: np.ndarray, y_batch: np.ndarray, a_batch: np.ndarray, device=None
     ):
         """
         Standalone implementation of patch-based pixel flipping following Bach et al. (2015).
@@ -829,8 +826,7 @@ class FaithfulnessCorrelation:
         y_batch: np.ndarray,
         a_batch: np.ndarray,
         device: str = None,
-        batch_size: int = 256,
-        **kwargs
+        batch_size: int = 256
     ):
         """Main evaluation method - standalone implementation."""
         x_batch = np.asarray(x_batch)

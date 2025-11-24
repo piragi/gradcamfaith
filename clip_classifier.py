@@ -5,9 +5,8 @@ This module provides a wrapper to use CLIP's vision encoder (loaded as HookedViT
 for zero-shot classification, maintaining compatibility with the attribution pipeline.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 

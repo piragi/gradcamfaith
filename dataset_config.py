@@ -11,7 +11,7 @@ This is the SINGLE SOURCE OF TRUTH for all dataset preprocessing.
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import torchvision.transforms as transforms
 from PIL import Image

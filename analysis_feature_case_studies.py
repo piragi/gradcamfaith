@@ -637,8 +637,7 @@ def visualize_case_study(
     gated_attribution_dir: Path,
     output_dir: Path,
     n_prototypes: int = 10,
-    prototype_path_mapping: Optional[Dict[int, Path]] = None,
-    mode: str = 'improved'
+    prototype_path_mapping: Optional[Dict[int, Path]] = None
 ):
     """
     Visualize a single case study with feature prototypes.
@@ -827,8 +826,7 @@ def save_case_study_individual_images(
     gated_attribution_dir: Path,
     output_dir: Path,
     n_prototypes: int = 10,
-    prototype_path_mapping: Optional[Dict[int, Path]] = None,
-    mode: str = 'improved'
+    prototype_path_mapping: Optional[Dict[int, Path]] = None
 ):
     """
     Save case study as individual images in a folder with metadata JSON.
@@ -889,7 +887,7 @@ def save_case_study_individual_images(
     gated_norm = (gated_attr - gated_attr.min()) / (gated_attr.max() - gated_attr.min() + 1e-8)
 
     # Save vanilla attribution
-    fig = plt.figure(figsize=(6, 6))
+    plt.figure(figsize=(6, 6))
     ax = plt.gca()
     ax.imshow(main_img_array)
     ax.imshow(vanilla_norm, cmap='jet', alpha=0.3, interpolation='bilinear')
@@ -899,7 +897,7 @@ def save_case_study_individual_images(
     plt.close()
 
     # Save gated attribution with patch highlight
-    fig = plt.figure(figsize=(6, 6))
+    plt.figure(figsize=(6, 6))
     ax = plt.gca()
     ax.imshow(main_img_array)
     ax.imshow(gated_norm, cmap='jet', alpha=0.3, interpolation='bilinear')
@@ -910,7 +908,6 @@ def save_case_study_individual_images(
     ax.add_patch(rect)
 
     final_delta = case['final_patch_delta']
-    change_sign = "↑" if final_delta > 0 else "↓"
     ax.set_title(f"{case['role']} patch Δ: {final_delta:.3f}", fontsize=14, fontweight='bold')
     ax.axis('off')
     plt.tight_layout()
@@ -944,7 +941,7 @@ def save_case_study_individual_images(
             continue
 
         # Save prototype image with highlighted patch
-        fig = plt.figure(figsize=(6, 6))
+        plt.figure(figsize=(6, 6))
         ax = plt.gca()
         ax.imshow(proto_img_array)
 

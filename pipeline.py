@@ -401,7 +401,7 @@ def run_unified_pipeline(
     # Create dataloader
     print(f"Creating dataloader from {prepared_path}")
     # Check if we're using CLIP for this dataset
-    use_clip = config.classify.use_clip if hasattr(config.classify, 'use_clip') else False
+    config.classify.use_clip if hasattr(config.classify, 'use_clip') else False
     dataset_loader = create_dataloader(dataset_name=dataset_name, data_path=prepared_path)
 
     # Use pre-loaded model and steering resources

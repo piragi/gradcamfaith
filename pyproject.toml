@@ -34,3 +34,8 @@ markers = [
     "unit: Unit tests for individual components",
     "integration: Integration tests for full pipeline"
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.6",
+]

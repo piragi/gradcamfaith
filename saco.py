@@ -314,7 +314,7 @@ class BinImpactResult:
 # ============= SEPARATED CONCERN FUNCTIONS =============
 
 
-def load_image_and_attributions(classification_result: ClassificationResult, target_size: int = 224) -> ImageData:
+def load_image_and_attributions(classification_result: ClassificationResult) -> ImageData:
     """
     Load image and attribution data - uses cached data when available.
 
@@ -384,8 +384,7 @@ def measure_bin_impacts(
     perturbation_data: BinnedPerturbationData,
     image_data: ImageData,
     model: Any,
-    device: torch.device,
-    batch_size: int
+    device: torch.device
 ) -> List[Dict]:
     """
     Measure the impact of each bin on model confidence.
@@ -458,8 +457,7 @@ def calculate_binned_saco_for_image(
     config,
     device: torch.device,
     n_bins: int = 20,
-    debug: bool = False,
-    include_patch_level: bool = False
+    debug: bool = False
 ) -> Tuple[float, List[Dict], List[Dict]]:
     """
     Calculate SaCo score using attribution binning for a single image.
@@ -473,8 +471,7 @@ def calculate_binned_saco_for_image(
         device: Device to run inference on
         n_bins: Number of bins to create
         debug: Whether to print debug information
-        include_patch_level: If True, also generate patch-level SaCo scores for compatibility
-    
+
     Returns:
         Tuple of (saco_score, bin_results, patch_results)
     """
@@ -483,7 +480,7 @@ def calculate_binned_saco_for_image(
         dataset_name = config.file.dataset_name if hasattr(config.file, 'dataset_name') else None
 
         # Step 1: Load image and attributions (no preprocessing yet)
-        image_data = load_image_and_attributions(original_result, target_size=config.classify.target_size[0])
+        image_data = load_image_and_attributions(original_result)
 
         # Step 2: Create bins and apply perturbations (with dataset-specific preprocessing)
         # Determine patch_size from model architecture
@@ -509,8 +506,7 @@ def calculate_binned_saco_for_image(
             perturbation_data,
             image_data,
             vit_model,
-            device,
-            batch_size=config.faithfulness.saco_inference_batch_size
+            device
         )
 
         # Step 4: Compute SaCo score and biases
@@ -688,16 +684,6 @@ def run_binned_attribution_analysis(
     return results
 
 
-def extract_true_class_from_filename(filename):
-    """
-    Simple function to extract true class from filename.
-    For the unified dataloader format, the true label is already available in ClassificationResult.
-    This is a fallback that returns None if we can't determine the class.
-    """
-    # Return None - the true_label should be available in ClassificationResult
-    return None
-
-
 def analyze_faithfulness_vs_correctness_from_objects(
     saco_scores: Dict[str, float], original_classification_results: List[ClassificationResult]
 ) -> pd.DataFrame:
@@ -717,10 +703,8 @@ def analyze_faithfulness_vs_correctness_from_objects(
         image_path_str = str(original_res.image_path)
         saco_score = saco_scores.get(image_path_str)
 
-        # Use true_label from ClassificationResult if available, otherwise fall back to extraction
-        true_class_label = original_res.true_label if original_res.true_label else extract_true_class_from_filename(
-            original_res.image_path
-        )
+        # Use true_label from ClassificationResult
+        true_class_label = original_res.true_label
 
         if original_res.prediction is None:
             continue
