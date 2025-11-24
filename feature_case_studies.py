@@ -321,10 +321,14 @@ def extract_case_studies(
     gated_attribution_dir: Path,
     dataset: str,
     n_top_images: int = 100,
-    n_patches_per_image: int = 5
+    n_patches_per_image: int = 5,
+    mode: str = 'improved'
 ) -> pd.DataFrame:
     """
-    Extract case studies from top improved images.
+    Extract case studies from top improved or degraded images.
+
+    Args:
+        mode: Either 'improved' (default) or 'degraded'
 
     Returns a DataFrame with one row per (image, patch, feature) combination.
     """
@@ -338,10 +342,15 @@ def extract_case_studies(
     # We need to add a processing order index to match with debug data
     improvements['debug_idx'] = range(len(improvements))
 
-    # Get top improved images
-    top_images = improvements.nlargest(n_top_images, 'composite_improvement')
+    # Get top improved or degraded images based on mode
+    if mode == 'degraded':
+        top_images = improvements.nsmallest(n_top_images, 'composite_improvement')
+        mode_label = 'degraded'
+    else:
+        top_images = improvements.nlargest(n_top_images, 'composite_improvement')
+        mode_label = 'improved'
 
-    print(f"\nAnalyzing top {n_top_images} improved images:")
+    print(f"\nAnalyzing top {n_top_images} {mode_label} images:")
     print(
         f"  Composite improvement range: [{top_images['composite_improvement'].min():.3f}, "
         f"{top_images['composite_improvement'].max():.3f}]"
@@ -406,7 +415,8 @@ def visualize_case_study(
     output_dir: Path,
     n_prototypes: int = 10,
     dataset: str = 'imagenet',
-    prototype_path_mapping: Optional[Dict[int, Path]] = None
+    prototype_path_mapping: Optional[Dict[int, Path]] = None,
+    mode: str = 'improved'
 ):
     """
     Visualize a single case study with feature prototypes.
@@ -470,7 +480,6 @@ def visualize_case_study(
     ax1.imshow(main_img_array)
     vanilla_norm = (vanilla_attr - vanilla_attr.min()) / (vanilla_attr.max() - vanilla_attr.min() + 1e-8)
     ax1.imshow(vanilla_norm, cmap='jet', alpha=0.3, interpolation='bilinear')
-    ax1.set_title("Vanilla Attribution", fontsize=12, fontweight='bold')
     ax1.axis('off')
 
     # Row 1: Gated attribution with patch highlight
@@ -503,13 +512,7 @@ def visualize_case_study(
 
     # Add text showing the attribution change
     final_delta = case['final_patch_delta']
-    change_sign = "↑" if final_delta > 0 else "↓"
-    ax2.set_title(
-        f"Gated Attribution ({case['role']} patch)\n"
-        f"Final Δ: {final_delta:.3f} {change_sign}",
-        fontsize=11,
-        fontweight='bold'
-    )
+    ax2.set_title(f"{case['role']} patch, Final Δ: {final_delta:.3f}", fontsize=11, fontweight='bold')
     ax2.axis('off')
 
     # Row 2: Info text
@@ -612,7 +615,8 @@ def save_case_study_individual_images(
     output_dir: Path,
     n_prototypes: int = 10,
     dataset: str = 'imagenet',
-    prototype_path_mapping: Optional[Dict[int, Path]] = None
+    prototype_path_mapping: Optional[Dict[int, Path]] = None,
+    mode: str = 'improved'
 ):
     """
     Save case study as individual images in a folder with metadata JSON.
@@ -684,7 +688,6 @@ def save_case_study_individual_images(
     ax = plt.gca()
     ax.imshow(main_img_array)
     ax.imshow(vanilla_norm, cmap='jet', alpha=0.3, interpolation='bilinear')
-    ax.set_title("Vanilla Attribution", fontsize=14, fontweight='bold')
     ax.axis('off')
     plt.tight_layout()
     plt.savefig(case_dir / "vanilla_attribution.png", dpi=150, bbox_inches='tight')
@@ -703,9 +706,7 @@ def save_case_study_individual_images(
 
     final_delta = case['final_patch_delta']
     change_sign = "↑" if final_delta > 0 else "↓"
-    ax.set_title(
-        f"Gated Attribution ({case['role']} patch)\nΔ: {final_delta:.3f} {change_sign}", fontsize=14, fontweight='bold'
-    )
+    ax.set_title(f"{case['role']} patch Δ: {final_delta:.3f}", fontsize=14, fontweight='bold')
     ax.axis('off')
     plt.tight_layout()
     plt.savefig(case_dir / "gated_attribution.png", dpi=150, bbox_inches='tight')
@@ -757,7 +758,7 @@ def save_case_study_individual_images(
                                   edgecolor='yellow',
                                   facecolor='none')
         ax.add_patch(rect)
-        ax.set_title(f"Prototype {proto_idx+1}: Activation={proto_activation:.2f}", fontsize=14, fontweight='bold')
+        ax.set_title(f"Activation={proto_activation:.2f}", fontsize=14, fontweight='bold')
         ax.axis('off')
         plt.tight_layout()
         plt.savefig(case_dir / f"prototype_{proto_idx}.png", dpi=150, bbox_inches='tight')
@@ -860,7 +861,8 @@ def run_case_study_analysis(
     n_patches_per_image: int = 5,
     n_case_visualizations: int = 10,
     n_prototypes: int = 10,
-    validation_activations_path: Optional[Path] = None
+    validation_activations_path: Optional[Path] = None,
+    mode: str = 'improved'
 ):
     """
     Main entry point for case study analysis.
@@ -869,15 +871,17 @@ def run_case_study_analysis(
         validation_activations_path: Optional path to validation set activations for prototypes.
                                      If provided, prototypes will be from validation set,
                                      otherwise they'll be from test set.
+        mode: Either 'improved' (default) or 'degraded' - selects top improved or degraded images
     """
     print(f"\n{'='*80}")
-    print(f"CASE STUDY ANALYSIS: {dataset} / {experiment_config}")
+    print(f"CASE STUDY ANALYSIS: {dataset} / {experiment_config} ({mode})")
     print(f"{'='*80}\n")
 
     # Set paths
     vanilla_path = experiment_path / dataset / "vanilla" / "test"
     gated_path = experiment_path / dataset / experiment_config / "test"
-    output_dir = experiment_path / "case_studies" / experiment_config
+    output_subdir = f"case_studies_{mode}" if mode == 'degraded' else "case_studies"
+    output_dir = experiment_path / output_subdir / experiment_config
 
     # Load data
     print("Loading faithfulness results...")
@@ -972,7 +976,8 @@ def run_case_study_analysis(
             gated_path / "attributions",
             dataset,
             n_top_images=n_top_images,
-            n_patches_per_image=n_patches_per_image
+            n_patches_per_image=n_patches_per_image,
+            mode=mode
         )
 
         all_case_studies.append(case_studies)
@@ -998,7 +1003,8 @@ def run_case_study_analysis(
                 layer_output_dir,
                 n_prototypes=n_prototypes,
                 dataset=dataset,
-                prototype_path_mapping=prototype_paths
+                prototype_path_mapping=prototype_paths,
+                mode=mode
             )
 
         # Summary statistics
@@ -1038,6 +1044,8 @@ if __name__ == "__main__":
     validation_activations_path = Path("./sae_activations/imagenet_val")
 
     # Run analysis
+    # Set mode='improved' for top improved images (default)
+    # Set mode='degraded' for top degraded images
     case_studies = run_case_study_analysis(
         experiment_path=experiment_path,
         dataset=dataset,
@@ -1047,5 +1055,19 @@ if __name__ == "__main__":
         n_patches_per_image=5,
         n_case_visualizations=500,  # Visualize all extracted feature contributions (20 images × 5 patches = ~100)
         n_prototypes=20,
-        validation_activations_path=validation_activations_path
+        validation_activations_path=validation_activations_path,
+        mode='improved'  # Change to 'degraded' to analyze worst-performing images
+    )
+
+    case_studies = run_case_study_analysis(
+        experiment_path=experiment_path,
+        dataset=dataset,
+        experiment_config=experiment_config,
+        layers=layers,
+        n_top_images=100,
+        n_patches_per_image=5,
+        n_case_visualizations=500,  # Visualize all extracted feature contributions (20 images × 5 patches = ~100)
+        n_prototypes=20,
+        validation_activations_path=validation_activations_path,
+        mode='degraded'  # Change to 'degraded' to analyze worst-performing images
     )
