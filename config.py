@@ -83,24 +83,25 @@ class FileConfig:
 @dataclass
 class BoostingConfig:
     """Configuration for SAE-based feature boosting/suppression."""
-    # Top-k filtering
-    top_k_features: Optional[int] = None  # No limit - use all active features
-
     # Random seed (for reproducibility)
     random_seed: int = 42
 
     # SAE layers to apply steering on
     steering_layers: List[int] = field(default_factory=lambda: [6])
 
-    # Feature gradient gating (NEW)
+    # Feature gradient gating
     enable_feature_gradients: bool = False  # Enable feature gradient gating
     feature_gradient_layers: List[int] = field(default_factory=lambda: [9, 10])  # Which layers to apply
-    kappa: int = 10
+    kappa: float = 10.0  # Scaling factor for exponential gate mapping
+    clamp_min: float = 0.1  # Minimum gate value (1/clamp_max)
+    clamp_max: float = 10.0  # Maximum gate value (range: [clamp_min, clamp_max])
     gate_construction: str = "combined"  # Type of gate: "activation_only", "gradient_only", or "combined"
     shuffle_decoder: bool = False  # Shuffle decoder columns to break semantic alignment
+    shuffle_decoder_seed: int = 12345  # Random seed for decoder shuffling (reproducibility)
 
     # Debug mode - collect detailed feature data
     debug_mode: bool = False  # If True, collect sparse features, gradients, and gate values per image
+    active_feature_threshold: float = 0.1  # Threshold for considering a feature "active" in debug mode
 
 
 @dataclass
@@ -142,12 +143,39 @@ class PerturbationConfig:
 
 
 @dataclass
+class FaithfulnessConfig:
+    """Configuration for faithfulness evaluation metrics (includes SaCo and correlation metrics)."""
+    # === Statistical robustness ===
+    n_trials: int = 3  # Number of trials for statistical robustness
+
+    # === Faithfulness correlation parameters ===
+    nr_runs: int = 20  # Number of random perturbations per image
+    subset_size: int = 20  # Size of feature subset to perturb for correlation (adaptive to n_patches)
+    subset_size_b32: int = 10  # Size of feature subset to perturb for B-32 models
+
+    # === Pixel flipping parameters ===
+    features_in_step: int = 1  # Number of patches to perturb at each step
+
+    # === SaCo (binned attribution analysis) parameters ===
+    n_bins: int = 49  # Number of attribution bins (for B-16 models with 196 patches)
+    n_bins_b32: int = 13  # Number of attribution bins (for B-32 models with 49 patches)
+    saco_inference_batch_size: int = 32  # Batch size for model inference during SaCo perturbation
+
+    # === Perturbation settings (shared across all metrics) ===
+    perturb_baseline: str = "mean"  # Baseline for perturbation ("black", "white", "mean", etc.)
+
+    # === GPU batching ===
+    gpu_batch_size: int = 1024  # Batch size for GPU forward passes
+
+
+@dataclass
 class PipelineConfig:
     """Master configuration for the medical image analysis pipeline."""
     # Component configurations
     file: FileConfig = field(default_factory=FileConfig)
     classify: ClassificationConfig = field(default_factory=ClassificationConfig)
     perturb: PerturbationConfig = field(default_factory=PerturbationConfig)
+    faithfulness: FaithfulnessConfig = field(default_factory=FaithfulnessConfig)
 
     @property
     def directories(self) -> List[Path]:

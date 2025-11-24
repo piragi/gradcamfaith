@@ -547,17 +547,9 @@ def run_unified_pipeline(
             print(f"Error in faithfulness evaluation: {e}")
 
     # Run attribution analysis
-    # For B-32: 49 patches total, use fewer bins (e.g., 20)
-    # For B-16: 196 patches total, can use 49 bins
-    # Check for B-32 models (both patch32 and B-32 patterns)
-    is_patch32 = False
-    if hasattr(config.classify, 'clip_model_name') and config.classify.clip_model_name:
-        model_name = config.classify.clip_model_name.lower()
-        is_patch32 = "patch32" in model_name or "b-32" in model_name or "b32" in model_name
-    n_bins = 13 if is_patch32 else 49
-    print(f"Running attribution analysis with {n_bins} bins (patch-{'32' if is_patch32 else '16'})...")
-
-    saco_analysis = run_binned_attribution_analysis(config, model_for_analysis, results, device, n_bins=n_bins)
+    # n_bins is automatically determined from config based on model architecture (B-16 vs B-32)
+    print("Running SaCo attribution analysis...")
+    saco_analysis = run_binned_attribution_analysis(config, model_for_analysis, results, device)
 
     # Extract SaCo scores (overall and per-class)
     saco_results = {}

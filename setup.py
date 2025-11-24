@@ -765,12 +765,12 @@ def main():
 
     try:
         # Download datasets (uncomment as needed)
-        # download_hyperkvasir(data_dir, models_dir)
-        # download_covidquex(data_dir, models_dir)
-        # download_imagenet(data_dir, models_dir)
-# 
-        # from dataset_config import refresh_imagenet_config
-        # refresh_imagenet_config()
+        download_hyperkvasir(data_dir, models_dir)
+        download_covidquex(data_dir, models_dir)
+        download_imagenet(data_dir, models_dir)
+
+        from dataset_config import refresh_imagenet_config
+        refresh_imagenet_config()
 
         download_thesis_saes(data_dir)
         download_sae_checkpoints(data_dir)

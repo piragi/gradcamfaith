@@ -40,11 +40,8 @@ def calc_faithfulness(
     y_batch: np.ndarray,
     a_batch_expl: np.ndarray,
     device: torch.device,
-    n_trials: int = 3,
-    nr_runs: int = 50,
-    subset_size: int = 98,
-    n_patches: int = 196,
-    gpu_batch_size: int = 1024
+    config: PipelineConfig,
+    n_patches: int = 196
 ) -> Dict[str, Any]:
     """
     Calculate faithfulness scores with statistical robustness through multiple trials.
@@ -55,22 +52,23 @@ def calc_faithfulness(
         y_batch: Batch of target classes (numpy array)
         a_batch_expl: Batch of attributions (numpy array)
         device: Device to run calculations on
-        n_trials: Number of trials to run for statistical robustness
-        nr_runs: Number of random perturbations per image
-        subset_size: Size of feature subset to perturb
+        config: Pipeline configuration with faithfulness parameters
         n_patches: Number of patches (49 for B-32, 196 for B-16)
-        gpu_batch_size: Batch size for GPU forward passes
 
     Returns:
         Dictionary with faithfulness statistics for each estimator
     """
+    # Get parameters from config
+    n_trials = config.faithfulness.n_trials
+    nr_runs = config.faithfulness.nr_runs
+    gpu_batch_size = config.faithfulness.gpu_batch_size
+
+    # Use appropriate subset size based on model architecture
+    subset_size = config.faithfulness.subset_size_b32 if n_patches == 49 else config.faithfulness.subset_size
+
     print(
         f'Settings - n_trials: {n_trials}, nr_runs: {nr_runs}, subset_size: {subset_size}, patches: {n_patches}, gpu_batch_size: {gpu_batch_size}'
     )
-
-    # Adjust subset size for B-32 models
-    if n_patches == 49:
-        subset_size = min(subset_size, 25)  # Use fewer patches for B-32
 
     # Define estimators
     estimator_configs = [
@@ -79,15 +77,20 @@ def calc_faithfulness(
             n_trials=n_trials,
             estimator_fn=faithfulness_correlation,
             kwargs={
-                "subset_size": min(20, n_patches // 2),
+                "subset_size": subset_size,
                 "nr_runs": nr_runs,
-                "n_patches": n_patches
+                "n_patches": n_patches,
+                "perturb_baseline": config.faithfulness.perturb_baseline
             }
         ),
         FaithfulnessEstimatorConfig(
             name="PixelFlipping",
             n_trials=1,
-            estimator_fn=lambda: faithfulness_pixel_flipping(n_patches),
+            estimator_fn=lambda: faithfulness_pixel_flipping(
+                n_patches=n_patches,
+                features_in_step=config.faithfulness.features_in_step,
+                perturb_baseline=config.faithfulness.perturb_baseline
+            ),
         ),
     ]
 
@@ -224,16 +227,14 @@ def evaluate_faithfulness_for_results(
     config: PipelineConfig,
     model,
     device: torch.device,
-    classification_results: List[ClassificationResult],
-    gpu_batch_size: int = 1024
+    classification_results: List[ClassificationResult]
 ) -> Tuple[Dict[str, Any], np.ndarray]:
     """
     Evaluate faithfulness scores with patch-level attributions.
     Uses cached tensors for efficient processing - no outer batching needed.
     Supports both B-16 (196 patches) and B-32 (49 patches) models.
 
-    Args:
-        gpu_batch_size: Batch size for GPU forward passes (not data loading)
+    GPU batch size is configured via config.faithfulness.gpu_batch_size
     """
 
     # Detect patch configuration
@@ -262,11 +263,8 @@ def evaluate_faithfulness_for_results(
         y_batch=y_batch,
         a_batch_expl=a_batch,
         device=device,
-        n_trials=3,
-        nr_runs=20,
-        subset_size=98 if n_patches == 196 else 24,
-        n_patches=n_patches,
-        gpu_batch_size=gpu_batch_size
+        config=config,
+        n_patches=n_patches
     )
 
     # Build final results
@@ -761,10 +759,15 @@ def _predict_torch_model(model, x_batch, y_batch, device=None, use_softmax=False
     return preds
 
 
-def faithfulness_pixel_flipping(n_patches=196):
+def faithfulness_pixel_flipping(n_patches=196, features_in_step=1, perturb_baseline="mean"):
     """Create mask-based patch pixel flipping."""
     patch_size = 32 if n_patches == 49 else 16
-    return PatchPixelFlipping(n_patches=n_patches, patch_size=patch_size, features_in_step=1, perturb_baseline="mean")
+    return PatchPixelFlipping(
+        n_patches=n_patches,
+        patch_size=patch_size,
+        features_in_step=features_in_step,
+        perturb_baseline=perturb_baseline
+    )
 
 
 class FaithfulnessCorrelation:
@@ -919,9 +922,13 @@ class FaithfulnessCorrelation:
         return similarity.tolist()
 
 
-def faithfulness_correlation(subset_size, nr_runs, n_patches):
+def faithfulness_correlation(subset_size, nr_runs, n_patches, perturb_baseline="mean"):
     """Create mask-based faithfulness correlation."""
     patch_size = 32 if n_patches == 49 else 16
     return FaithfulnessCorrelation(
-        n_patches=n_patches, patch_size=patch_size, subset_size=subset_size, nr_runs=nr_runs, perturb_baseline="mean"
+        n_patches=n_patches,
+        patch_size=patch_size,
+        subset_size=subset_size,
+        nr_runs=nr_runs,
+        perturb_baseline=perturb_baseline
     )

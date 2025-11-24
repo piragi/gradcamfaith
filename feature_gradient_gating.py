@@ -12,46 +12,43 @@ def compute_feature_gradient_gate(
     residual_grad: torch.Tensor,
     sae_codes: torch.Tensor,
     sae_decoder: torch.Tensor,
-    top_k: int = 5,
-    normalize_decoder: bool = True,
-    denoise_gradient: bool = False,
     kappa: float = 3.0,
     clamp_max: float = 5.0,
     gate_construction: str = "combined",
     shuffle_decoder: bool = False,
+    shuffle_decoder_seed: int = 12345,
+    active_feature_threshold: float = 0.1,
     debug: bool = False
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """
     Compute per-patch gating multipliers using SAE feature gradients.
-    
+
     This implements the feature gradient decomposition:
     1. Project gradient to feature space: h = D^T g
-    2. Weight by activation: s_k = h_k * f_k  
-    3. Sum top-K features: s = Σ_k s_k
+    2. Weight by activation: s_k = h_k * f_k
+    3. Sum all features: s = Σ_k s_k
     4. Map to multiplier: w = exp(κ * normalize(s))
-    
+
     Args:
         residual_grad: Gradient w.r.t. residual [n_patches, d_model]
         sae_codes: SAE feature activations [n_patches, n_features]
         sae_decoder: SAE decoder matrix [d_model, n_features]
-        top_k: Number of top features to use per patch
-        normalize_decoder: Whether to normalize decoder columns
-        denoise_gradient: Whether to project gradient onto decoder subspace first
         kappa: Scaling factor for exponential mapping
         clamp_max: Maximum multiplier value (gate range: [1/clamp_max, clamp_max])
         gate_construction: Gate construction type: "activation_only", "gradient_only", or "combined"
         shuffle_decoder: Whether to shuffle decoder columns to break semantic alignment
+        shuffle_decoder_seed: Random seed for decoder shuffling (for reproducibility)
+        active_feature_threshold: Threshold for considering a feature "active" in debug mode
         debug: Whether to return debug information
-        
+
     Returns:
         gate: Per-patch multipliers [n_patches]
         debug_info: Dictionary with debug information
     """
     if shuffle_decoder:
-        # If a perm was not provided, create one deterministically ONCE
-        # Be deterministic across calls in this process:
+        # Create deterministic shuffle using provided seed
         g = torch.Generator(device=sae_decoder.device)
-        g.manual_seed(12345)  # or pass from config
+        g.manual_seed(shuffle_decoder_seed)
         shuffle_perm = torch.randperm(sae_decoder.shape[1], generator=g, device=sae_decoder.device)
         sae_decoder_shuffled = sae_decoder[:, shuffle_perm]
     else:
@@ -95,8 +92,8 @@ def compute_feature_gradient_gate(
     # Collect debug information
     debug_info = {}
     if debug:
-        # Collect sparse features (activation > 0.1)
-        active_mask = sae_codes > 0.1
+        # Collect sparse features (activation > threshold)
+        active_mask = sae_codes > active_feature_threshold
         sparse_indices = []
         sparse_activations = []
         sparse_gradients = []
@@ -165,12 +162,12 @@ def apply_feature_gradient_gating(
         config = {}
 
     # Get configuration parameters
-    top_k = None  #config.get('top_k_features', 15)
     kappa = config.get('kappa', 10.0)
     clamp_max = config.get('clamp_max', 5.0)
-    denoise_gradient = config.get('denoise_gradient', False)
     gate_construction = config.get('gate_construction', 'combined')
     shuffle_decoder = config.get('shuffle_decoder', False)
+    shuffle_decoder_seed = config.get('shuffle_decoder_seed', 12345)
+    active_feature_threshold = config.get('active_feature_threshold', 0.1)
 
     # Get decoder matrix - handle different SAE implementations
     if hasattr(sae, 'W_dec'):
@@ -185,12 +182,12 @@ def apply_feature_gradient_gating(
         residual_grad=residual_grad,
         sae_codes=sae_codes,
         sae_decoder=decoder,
-        top_k=top_k,
-        denoise_gradient=denoise_gradient,
         kappa=kappa,
         clamp_max=clamp_max,
         gate_construction=gate_construction,
         shuffle_decoder=shuffle_decoder,
+        shuffle_decoder_seed=shuffle_decoder_seed,
+        active_feature_threshold=active_feature_threshold,
         debug=debug
     )
 

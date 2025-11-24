@@ -50,16 +50,14 @@ def apply_gradient_gating_to_cam(
     codes_gpu = codes_gpu[1:]  # Remove CLS
 
     # Apply feature gradient gating - get parameters from config
-    topk_value = getattr(config.classify.boosting, 'top_k_features', 5)
-    if topk_value is None:
-        topk_value = 15  # Default when None
     gating_config = {
-        'top_k_features': topk_value,
-        'kappa': getattr(config.classify.boosting, 'kappa', 50.0),
-        'clamp_min': 0.1,
-        'clamp_max': getattr(config.classify.boosting, 'clamp_max', 10.0),
-        'gate_construction': getattr(config.classify.boosting, 'gate_construction', 'combined'),
-        'shuffle_decoder': getattr(config.classify.boosting, 'shuffle_decoder', False),
+        'kappa': config.classify.boosting.kappa,
+        'clamp_min': config.classify.boosting.clamp_min,
+        'clamp_max': config.classify.boosting.clamp_max,
+        'gate_construction': config.classify.boosting.gate_construction,
+        'shuffle_decoder': config.classify.boosting.shuffle_decoder,
+        'shuffle_decoder_seed': config.classify.boosting.shuffle_decoder_seed,
+        'active_feature_threshold': config.classify.boosting.active_feature_threshold,
     }
 
     gated_cam, layer_debug = apply_feature_gradient_gating(

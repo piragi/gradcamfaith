@@ -1212,8 +1212,8 @@ def run_case_study_analysis(
 
 if __name__ == "__main__":
     # Configuration
-    experiment_path = Path("./experiments/feature_gradient_sweep_20251118_203648")
-    experiment_config = "layers_6_9_10_kappa_0.5_topk_None_combined_clamp_10.0"
+    experiment_path = Path("./experiments/feature_gradient_sweep_") #TODO: Fill out the experiment folder
+    experiment_config = "layers_6_9_10_kappa_0.5_combined_clamp_10.0"
     layers = [6, 9, 10]
 
     # Extract validation set activations for prototypes if not already done

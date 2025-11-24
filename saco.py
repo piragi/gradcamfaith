@@ -385,7 +385,7 @@ def measure_bin_impacts(
     image_data: ImageData,
     model: Any,
     device: torch.device,
-    batch_size: int = 32
+    batch_size: int
 ) -> List[Dict]:
     """
     Measure the impact of each bin on model confidence.
@@ -490,12 +490,8 @@ def calculate_binned_saco_for_image(
         if hasattr(vit_model, 'cfg') and hasattr(vit_model.cfg, 'patch_size'):
             patch_size = vit_model.cfg.patch_size
         else:
-            # Infer from dataset/model type
-            # For CLIP models using B-32 architecture
-            if dataset_name == 'waterbirds':
-                patch_size = 32
-            else:
-                patch_size = 16  # Default for standard ViT-B-16
+            # Default for standard ViT-B-16
+            patch_size = 16
 
         if debug:
             print(f"Using patch_size={patch_size} for {dataset_name}")
@@ -509,7 +505,13 @@ def calculate_binned_saco_for_image(
 
         # Step 3: Measure impacts through model inference
         vit_model.eval()
-        bin_results = measure_bin_impacts(perturbation_data, image_data, vit_model, device, batch_size=32)
+        bin_results = measure_bin_impacts(
+            perturbation_data,
+            image_data,
+            vit_model,
+            device,
+            batch_size=config.faithfulness.saco_inference_batch_size
+        )
 
         # Step 4: Compute SaCo score and biases
         impact_result = compute_saco_from_impacts(bin_results, compute_bias=True)
@@ -582,7 +584,7 @@ def run_binned_saco_analysis(
     original_results: List[ClassificationResult],
     vit_model,
     device: torch.device,
-    n_bins: int = 20,
+    n_bins: int,
 ) -> Dict[str, pd.DataFrame]:
     """
     Run binned SaCo analysis for entire dataset, with optional caching.
@@ -663,13 +665,23 @@ def run_binned_attribution_analysis(
     vit_model,
     original_results: List[ClassificationResult],
     device: torch.device,
-    n_bins: int = 20
+    n_bins: Optional[int] = None
 ) -> Dict[str, pd.DataFrame]:
     """
     Wrapper function that matches your pipeline interface.
+    If n_bins is not specified, uses config.faithfulness.n_bins or n_bins_b32 based on model.
     """
     vit_model.to(device)
     vit_model.eval()
+
+    # Determine n_bins from config if not specified
+    if n_bins is None:
+        # Detect if B-32 or B-16 based on model config or patches
+        is_patch32 = False
+        if hasattr(config.classify, 'clip_model_name') and config.classify.clip_model_name:
+            model_name = config.classify.clip_model_name.lower()
+            is_patch32 = "patch32" in model_name or "b-32" in model_name or "b32" in model_name
+        n_bins = config.faithfulness.n_bins_b32 if is_patch32 else config.faithfulness.n_bins
 
     # Run binned analysis
     results = run_binned_saco_analysis(config, original_results, vit_model, device, n_bins)
@@ -682,15 +694,8 @@ def extract_true_class_from_filename(filename):
     For the unified dataloader format, the true label is already available in ClassificationResult.
     This is a fallback that returns None if we can't determine the class.
     """
-    # For waterbirds dataset, filenames typically start with class index
-    filepath_str = str(filename)
-    if 'img_00_' in filepath_str:
-        return 'landbird'
-    elif 'img_01_' in filepath_str:
-        return 'waterbird'
-    else:
-        # Return None - the true_label should be available in ClassificationResult
-        return None
+    # Return None - the true_label should be available in ClassificationResult
+    return None
 
 
 def analyze_faithfulness_vs_correctness_from_objects(
