@@ -65,9 +65,8 @@ def compute_feature_gradient_gate(
         contributions = sae_codes  # For debug info
 
     elif gate_construction == "gradient_only":
-        abs_feature_grads = torch.abs(feature_grads)
-        s_t = abs_feature_grads.sum(dim=1)  # [n_patches]
-        contributions = abs_feature_grads  # For debug info
+        s_t = feature_grads.sum(dim=1)  # [n_patches]
+        contributions = feature_grads  # For debug info
 
     elif gate_construction == "combined":
         contributions = sae_codes * feature_grads  # [n_patches, n_features]
